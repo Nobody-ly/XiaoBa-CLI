@@ -4,8 +4,26 @@ import * as fs from 'fs';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { isReadPathAllowed } from '../utils/safety';
 
-const VCS_DIRECTORIES_TO_EXCLUDE = ['.git', '.svn', '.hg', '.bzr'] as const;
+const DIRECTORIES_TO_EXCLUDE = [
+  '.git',
+  '.svn',
+  '.hg',
+  '.bzr',
+  'node_modules',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.turbo',
+  '.cache',
+  '.npm-cache',
+  '.electron-cache',
+  'logs',
+  'tmp',
+  'data',
+] as const;
 const DEFAULT_LIMIT = 250;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 interface GrepResult {
   mode: 'content' | 'files' | 'count';
@@ -143,8 +161,9 @@ export class GrepTool implements Tool {
     const { pattern, path: originalPath, glob: globPattern, type: fileType, case_insensitive = false, context: contextLines, output_mode = 'files', limit = DEFAULT_LIMIT, offset = 0 } = args;
     const rgArgs: string[] = ['--color=never', '--no-heading', '--hidden'];
 
-    for (const dir of VCS_DIRECTORIES_TO_EXCLUDE) rgArgs.push('--glob', `!${dir}`);
+    for (const dir of DIRECTORIES_TO_EXCLUDE) rgArgs.push('--glob', `!**/${dir}/**`);
     rgArgs.push('--max-columns', '500');
+    rgArgs.push('--max-filesize', '1M');
 
     if (output_mode === 'files') rgArgs.push('--files-with-matches');
     else if (output_mode === 'count') rgArgs.push('--count');
@@ -158,9 +177,12 @@ export class GrepTool implements Tool {
     rgArgs.push(originalPath ? searchPath : '.');
 
     try {
-      const output = execFileSync('rg', rgArgs, { cwd: context.workingDirectory, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }) as string;
+      const output = execFileSync('rg', rgArgs, { cwd: context.workingDirectory, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], timeout: DEFAULT_TIMEOUT_MS }) as string;
       return { content: this.processOutput(output, args, context) };
     } catch (error: any) {
+      if (isTimeoutError(error)) {
+        return { content: this.formatTimeout(pattern, originalPath, globPattern, fileType) };
+      }
       if (error.status === 1) {
         // 无匹配，返回格式化的"未找到"
         return { content: this.formatNoMatch(pattern, originalPath, globPattern, fileType) };
@@ -181,11 +203,11 @@ export class GrepTool implements Tool {
     else { grepArgs.push('-n'); if (contextLines !== undefined) grepArgs.push(`-C${contextLines}`); }
 
     grepArgs.push('-r');
-    for (const dir of VCS_DIRECTORIES_TO_EXCLUDE) grepArgs.push('--exclude-dir=' + dir);
+    for (const dir of DIRECTORIES_TO_EXCLUDE) grepArgs.push('--exclude-dir=' + dir);
     grepArgs.push(pattern, searchPath);
 
     try {
-      const output = execFileSync('grep', grepArgs, { cwd: context.workingDirectory, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }) as string;
+      const output = execFileSync('grep', grepArgs, { cwd: context.workingDirectory, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'], timeout: DEFAULT_TIMEOUT_MS }) as string;
       let processedOutput = output;
 
       if (globPattern) {
@@ -196,6 +218,9 @@ export class GrepTool implements Tool {
 
       return { content: this.processOutput(processedOutput, args, context) };
     } catch (error: any) {
+      if (isTimeoutError(error)) {
+        return { content: this.formatTimeout(pattern, originalPath, globPattern, fileType) };
+      }
       if (error.status === 1) {
         return { content: this.formatNoMatch(pattern, originalPath, globPattern, fileType) };
       }
@@ -214,13 +239,15 @@ export class GrepTool implements Tool {
     const escapeRegex = (str: string) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(escapeRegex(pattern), case_insensitive ? 'i' : '');
     const results: string[] = [];
+    const deadline = Date.now() + DEFAULT_TIMEOUT_MS;
 
     const walkDir = (dir: string) => {
+      if (Date.now() > deadline) throw new Error('grep timeout');
       if (!fs.existsSync(dir)) return;
       try {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           const fullPath = path.join(dir, entry.name);
-          if (VCS_DIRECTORIES_TO_EXCLUDE.includes(entry.name as any)) continue;
+          if (DIRECTORIES_TO_EXCLUDE.includes(entry.name as any)) continue;
           if (entry.isDirectory()) { walkDir(fullPath); continue; }
           if (entry.isFile()) {
             if (globPattern) {
@@ -244,8 +271,15 @@ export class GrepTool implements Tool {
       }
     };
 
-    walkDir(searchPath);
-    return { content: this.processOutput(results.join('\n'), args, context) };
+    try {
+      walkDir(searchPath);
+      return { content: this.processOutput(results.join('\n'), args, context) };
+    } catch (error: any) {
+      if (/timeout/i.test(String(error?.message || error))) {
+        return { content: this.formatTimeout(pattern, originalPath, globPattern, fileType) };
+      }
+      throw error;
+    }
   }
 
   private processOutput(output: string, args: any, context: ToolExecutionContext): string {
@@ -283,6 +317,17 @@ export class GrepTool implements Tool {
     return `未找到匹配项。\n模式: ${pattern}\n路径: ${searchPath || '.'}\n${globPattern ? `Glob: ${globPattern}\n` : ''}${fileType ? `类型: ${fileType}\n` : ''}`;
   }
 
+  private formatTimeout(pattern: string, searchPath: string | undefined, globPattern: string | undefined, fileType: string | undefined): string {
+    return [
+      `grep 搜索超时 (${DEFAULT_TIMEOUT_MS}ms)。`,
+      `模式: ${pattern}`,
+      `路径: ${searchPath || '.'}`,
+      globPattern ? `Glob: ${globPattern}` : '',
+      fileType ? `类型: ${fileType}` : '',
+      '请使用更具体的 path、glob 或 type 缩小搜索范围。',
+    ].filter(Boolean).join('\n');
+  }
+
   private formatResult(result: GrepResult, pattern: string, searchPath: string | undefined, globPattern: string | undefined, fileType: string | undefined): string {
     const { mode, numFiles, filenames, content, numLines, numMatches, appliedLimit, appliedOffset } = result;
     if (numFiles === 0 && !content) return `未找到匹配项。\n模式: ${pattern}\n路径: ${searchPath || '.'}\n${globPattern ? `Glob: ${globPattern}\n` : ''}${fileType ? `类型: ${fileType}\n` : ''}`;
@@ -291,4 +336,10 @@ export class GrepTool implements Tool {
     if (mode === 'count') return `找到 ${numMatches} 个匹配，分布在 ${numFiles} 个文件${limitInfo ? ` (${limitInfo})` : ''}:\n模式: ${pattern}\n路径: ${searchPath || '.'}\n${globPattern ? `Glob: ${globPattern}\n` : ''}${fileType ? `类型: ${fileType}\n` : ''}\n` + content;
     return `找到 ${numFiles} 个文件${limitInfo ? ` (${limitInfo})` : ''}:\n模式: ${pattern}\n路径: ${searchPath || '.'}\n${globPattern ? `Glob: ${globPattern}\n` : ''}${fileType ? `类型: ${fileType}\n` : ''}\n` + filenames.map((file, i) => `${(i + 1).toString().padStart(4, ' ')}. ${file}`).join('\n');
   }
+}
+
+function isTimeoutError(error: any): boolean {
+  return error?.signal === 'SIGTERM'
+    || error?.code === 'ETIMEDOUT'
+    || /timed out|timeout|spawnSync .* ETIMEDOUT/i.test(String(error?.message || ''));
 }

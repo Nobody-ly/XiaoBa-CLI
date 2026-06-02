@@ -12,6 +12,7 @@ import { TurnContextBuilder } from './turn-context-builder';
 import { TurnLogRecorder } from './turn-log-recorder';
 import { PlanRuntime } from './plan-runtime';
 import { getPetService } from '../pet/pet-service';
+import { GauzMemService } from '../gauzmem/service';
 
 export interface AgentTurnServices {
   aiService: AIService;
@@ -79,9 +80,11 @@ export class AgentTurnController {
         runtimeObservationSource: params.runtimeObservationSource,
       }),
     });
+    const gauzMemTurnId = `${Date.now()}`;
 
     const turnContext = await this.options.turnContextBuilder.build({
       sessionKey: this.options.sessionKey,
+      sessionType: this.options.sessionType,
       durableMessages: params.messages,
       runtimeFeedback: params.runtimeFeedback,
       skillRuntime: this.options.skillRuntime,
@@ -119,6 +122,13 @@ export class AgentTurnController {
       tokens: { prompt: metrics.totalPromptTokens, completion: metrics.totalCompletionTokens },
       runtimeFeedback: turnContext.runtimeFeedbackForLog,
       runtimeObservationSource: params.runtimeObservationSource,
+    });
+    GauzMemService.getInstance().recordTurnSource({
+      sessionKey: this.options.sessionKey,
+      sessionType: this.options.sessionType,
+      turnId: gauzMemTurnId,
+      userInput: params.input,
+      result,
     });
 
     if (result.finalResponseVisible) {

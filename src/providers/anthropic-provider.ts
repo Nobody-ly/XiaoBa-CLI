@@ -18,6 +18,7 @@ export class AnthropicProvider implements AIProvider {
   private model: string;
   private temperature: number;
   private maxTokens: number;
+  private disableThinking: boolean;
 
   constructor(config: ChatConfig) {
     this.client = new Anthropic({
@@ -37,6 +38,8 @@ export class AnthropicProvider implements AIProvider {
     this.model = config.model || 'claude-sonnet-4-20250514';
     this.temperature = config.temperature ?? 0.7;
     this.maxTokens = resolveMaxTokens(config);
+    this.disableThinking = String(process.env.GAUZ_LLM_THINKING || '').toLowerCase() !== 'enabled'
+      && String(process.env.GAUZ_LLM_DISABLE_THINKING || '').toLowerCase() !== 'false';
   }
 
   /**
@@ -356,6 +359,8 @@ export class AnthropicProvider implements AIProvider {
 
     if (system) params.system = system;
     if (tools && tools.length > 0) params.tools = this.transformTools(tools);
+    if (options?.toolChoice) (params as any).tool_choice = { type: 'tool', name: options.toolChoice };
+    if (this.disableThinking) (params as any).thinking = { type: 'disabled' };
 
     // [CONTEXT_DEBUG] SDK 调用前：记录完整的请求参数
     ContextDebugLogger.dumpSdkBoundary('before', undefined, {
@@ -392,6 +397,8 @@ export class AnthropicProvider implements AIProvider {
 
     if (system) params.system = system;
     if (tools && tools.length > 0) params.tools = this.transformTools(tools);
+    if (options?.toolChoice) (params as any).tool_choice = { type: 'tool', name: options.toolChoice };
+    if (this.disableThinking) (params as any).thinking = { type: 'disabled' };
 
     try {
       // [CONTEXT_DEBUG] SDK 调用前：记录完整的请求参数

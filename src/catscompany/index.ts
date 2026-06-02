@@ -558,7 +558,13 @@ export class CatsCompanyBot {
         Logger.info(`[${sessionKey}] 主会话竞态忙碌，子智能体反馈已入队`);
         return;
       }
-      if (result.text.startsWith('处理消息时出错:')) {
+      if (result.visibleToUser && result.text) {
+        try {
+          await this.sender.sendText(topic, result.text);
+        } catch (err: any) {
+          Logger.warning(`Sub-agent feedback reply send failed: ${err.message}`);
+        }
+      } else if (result.text.startsWith('处理消息时出错:')) {
         try {
           await this.sender.reply(topic, result.text);
         } catch (err: any) {
