@@ -130,6 +130,12 @@ export class ConfigManager {
 
   private static getExplicitModelEnvConfig(): Partial<ChatConfig> {
     const override: Partial<ChatConfig> = {};
+    const modelSource = process.env.CATSCO_MODEL_SOURCE?.trim().toLowerCase();
+    const sourcedProfile = this.getModelSourceEnvConfig(modelSource);
+    if (sourcedProfile) {
+      return sourcedProfile;
+    }
+
     const provider = process.env.GAUZ_LLM_PROVIDER?.trim();
     const apiUrl = process.env.GAUZ_LLM_API_BASE?.trim();
     const apiKey = process.env.GAUZ_LLM_API_KEY?.trim();
@@ -151,6 +157,41 @@ export class ConfigManager {
     if (model) {
       override.model = model;
     }
+    if (maxTokens !== undefined) {
+      override.maxTokens = maxTokens;
+    }
+
+    return override;
+  }
+
+  private static getModelSourceEnvConfig(source?: string): Partial<ChatConfig> | undefined {
+    if (source !== 'relay' && source !== 'custom') {
+      return undefined;
+    }
+
+    const prefix = source === 'relay' ? 'CATSCO_RELAY_LLM' : 'CATSCO_CUSTOM_LLM';
+    const provider = process.env[`${prefix}_PROVIDER`]?.trim();
+    const apiUrl = process.env[`${prefix}_API_BASE`]?.trim();
+    const apiKey = process.env[`${prefix}_API_KEY`]?.trim();
+    const model = process.env[`${prefix}_MODEL`]?.trim();
+
+    if (!provider || !apiUrl || !apiKey || !model) {
+      return undefined;
+    }
+
+    const override: Partial<ChatConfig> = {
+      apiUrl,
+      apiKey,
+      model,
+    };
+    if (provider === 'openai' || provider === 'anthropic') {
+      override.provider = provider;
+    }
+
+    const maxTokens = this.parsePositiveIntegerEnv(
+      process.env.GAUZ_LLM_MAX_OUTPUT_TOKENS,
+      process.env.GAUZ_LLM_MAX_TOKENS,
+    );
     if (maxTokens !== undefined) {
       override.maxTokens = maxTokens;
     }
