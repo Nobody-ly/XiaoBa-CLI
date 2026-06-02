@@ -1,23 +1,31 @@
 import { AIService } from '../utils/ai-service';
 import type { Message } from '../types';
+import type { ToolDefinition } from '../types/tool';
 import { truncateText } from './hash';
 import type {
   GauzMemEdge,
+  GauzMemExtractedEvidence,
+  GauzMemGraphPatch,
   GauzMemNode,
-  GauzMemQueryKind,
   GauzMemQueryPlan,
   GauzMemReasonerStep,
   GauzMemSourceWindow,
 } from './types';
 
+const QUERY_PLAN_TOOL = 'submit_gauzmem_query_plan';
+const RELEVANCE_TOOL = 'submit_gauzmem_relevance';
+const EVIDENCE_TOOL = 'submit_gauzmem_evidence';
+const PARENT_TERMS_TOOL = 'submit_gauzmem_parent_terms';
+const GRAPH_PATCH_TOOL = 'submit_gauzmem_graph_patch';
+const MAX_TOOL_ATTEMPTS = 5;
+
 export class GauzMemReasoner {
   readonly steps: GauzMemReasonerStep[] = [];
-  private readonly ai = new AIService({ temperature: 0, maxTokens: 2048 });
-  private readonly timeoutMs = Number(process.env.GAUZMEM_LLM_TIMEOUT_MS || 60000);
+  private readonly ai = new AIService({ temperature: 0, maxTokens: 4096 });
 
   async probe(): Promise<{ ok: boolean; response?: unknown; error?: string }> {
     try {
-      const result = await this.callJson('probe', 'Return only valid JSON: {"ok":true,"terms":["memory"]}');
+      const result = await this.callSubmitTool('probe', 'Return rootQuery="memory" and searchTerms=["memory"].', this.queryPlanTool());
       return { ok: true, response: result };
     } catch (error: any) {
       return { ok: false, error: String(error?.message || error) };
@@ -33,54 +41,117 @@ export class GauzMemReasoner {
   }): Promise<GauzMemQueryPlan> {
     const prompt = [
       'You build search queries for a long-term memory graph.',
-      'Return only valid JSON.',
-      'Schema: {"rootQuery":string,"searchTerms":string[],"contextHints":string[],"queryKind":"direct|anaphora|continuation|recall|task"}',
+      `Call ${QUERY_PLAN_TOOL} with the result.`,
       'Rules:',
-      '- Prefer concrete entities, names, places, files, decisions, and task nouns.',
-      '- Use the recent context only to resolve references like "previous reply", "continue", "that", "he/she/it".',
-      '- Avoid filler terms, one-character terms, pronouns, and generic verbs.',
+      '- rootQuery is a concise resolved query, using recent context only to resolve references like "continue", "that", "he/she/it".',
+      '- If the current input starts by addressing someone (for example "小零，Dawn，..."), treat those names as addressees, not necessarily the subject being asked about.',
+      '- Resolve pronouns such as 他/她/它/that/he/she/it from the recent context instead of assuming the addressee is the subject.',
+      '- searchTerms are grep literals, not natural-language descriptions.',
+      '- Prefer short concrete entities, names, places, factions, files, decisions, and task nouns.',
+      '- Include useful aliases or near-synonyms directly as separate search terms.',
+      '- Avoid filler terms, one-character terms, pronouns, generic verbs, and long phrases with spaces.',
+      '- Prefer 2-6 Chinese characters or 1-3 English tokens, unless a proper name is naturally longer.',
       '- Keep 4-10 search terms.',
       '',
       `Session: ${params.sessionType || 'unknown'} ${params.sessionKey || ''}`,
-      `Current user input: ${params.userInput}`,
-      `Previous user input: ${params.previousUser || ''}`,
-      `Previous assistant final reply: ${truncateText(params.previousAssistant || '', 1200)}`,
+      `Current user input: ${truncateText(params.userInput, 1600)}`,
+      `Previous user input: ${truncateText(params.previousUser || '', 800)}`,
+      `Previous assistant final reply: ${params.previousAssistant || ''}`,
     ].join('\n');
-    const json = await this.callJson('query_build', prompt);
+    const json = await this.callSubmitTool('query_build', prompt, this.queryPlanTool());
     return {
       rootQuery: this.stringValue(json.rootQuery) || params.userInput,
       searchTerms: this.stringArray(json.searchTerms).slice(0, 12),
-      contextHints: this.stringArray(json.contextHints).slice(0, 8),
-      queryKind: this.queryKind(json.queryKind),
     };
   }
 
-  async extractEvidence(rootQuery: string, windows: GauzMemSourceWindow[]): Promise<Array<{ windowId: string; text: string }>> {
+  async extractEvidence(rootQuery: string, windows: GauzMemSourceWindow[], parent?: GauzMemNode): Promise<GauzMemExtractedEvidence[]> {
     if (windows.length === 0) return [];
     const prompt = [
-      'Extract durable memory evidence from source windows.',
-      'Return only valid JSON.',
-      'Schema: {"evidence":[{"windowId":string,"text":string}]}',
+      parent
+        ? 'Extract only durable memory evidence that has a clear factual relationship to the parent memory.'
+        : 'Extract durable memory evidence from source windows.',
+      `Call ${EVIDENCE_TOOL} with the result.`,
+      parent
+        ? 'For node construct, every evidence item must include windowRef, text, and relationToParent.whyRelevant.'
+        : 'For root construct, every evidence item must include windowRef and text.',
       'Rules:',
-      '- Evidence must be directly supported by the window.',
-      '- Keep concise standalone facts useful for future recall.',
+      '- windowRef must be copied exactly from one provided window.',
+      '- text is the memory node fact: rewrite the selected window into a concise standalone factual statement.',
+      '- Preserve important numbers, probabilities, dates, names, aliases, places, object names, protocol names, model names, and other searchable keywords from the window.',
+      '- Do not over-summarize; keep enough concrete anchors for future grep retrieval.',
+      '- The fact text must be directly supported by the referenced window and must not add facts from outside it.',
       '- Do not invent facts.',
       '- If a window is irrelevant or only procedural noise, omit it.',
+      '- Do not extract task descriptions, tool arguments, file paths, run status, dashboard text, headings, or process summaries as evidence.',
+      parent
+        ? '- Output evidence when it has a concrete factual relationship to the parent memory, or when it is in the same plot chain and adds a constraint, cause, consequence, state, goal, or risk.'
+        : '- For root construct, output durable facts related to current plot state, character state, action constraints, world facts, mission goals, unresolved risks, or facts directly useful for the root query.',
+      parent
+        ? '- Do not output facts that only repeat, rephrase, or merely confirm the parent memory. The fact must add new concrete information beyond the parent.'
+        : '',
+      parent
+        ? '- relationToParent.whyRelevant must be Chinese, 20-80 characters, and state the concrete relationship between the parent fact and evidence fact.'
+        : '',
+      parent
+        ? '- Good relation examples: 确认：导航核心可拔出并转接到猫头鹰号 / 补充：折剑号提供坐标与启动密钥 / 因果：启动第七艘船可能触发 Blackbird 人格风险。'
+        : '',
+      parent
+        ? '- Do not use English templates like Parent fact, Evidence, This confirms, This supports, or vague relation text such as same topic, same scene, same character, related, or relevant.'
+        : '',
       '',
       `Root query: ${rootQuery}`,
+      parent ? `Parent memory: ${parent.text}` : '',
       'Windows:',
-      JSON.stringify(windows.map(w => ({ windowId: w.windowId, text: truncateText(w.text, 1800) }))),
+      JSON.stringify(windows.map((w, index) => ({
+        windowRef: `w${index}`,
+        blockType: w.blockType,
+        matchedTerms: w.matchedTerms,
+        text: truncateText(w.text, 1800),
+      }))),
     ].join('\n');
-    const json = await this.callJson('extract_evidence', prompt);
+    const json = await this.callSubmitTool('extract_evidence', prompt, this.evidenceTool());
     return Array.isArray(json.evidence)
       ? json.evidence
           .map((item: any) => ({
-            windowId: this.stringValue(item.windowId),
-            text: this.stringValue(item.text),
+            windowRef: this.stringValue(item.windowRef),
+            text: this.stringValue(item.text || item.fact),
+            relationToParent: this.relationValue(item.relationToParent),
           }))
-          .filter((item: any) => item.windowId && item.text)
+          .map((item: any) => {
+            const index = /^w(\d+)$/.exec(item.windowRef || '')?.[1];
+            const window = typeof index === 'string' ? windows[Number(index)] : undefined;
+            if (!window || !item.text) return null;
+            return {
+              sourceId: window.sourceId,
+              span: window.span,
+              sourceSnippet: window.text,
+              text: item.text,
+              relationToParent: item.relationToParent,
+            };
+          })
+          .filter(Boolean)
           .slice(0, 24)
       : [];
+  }
+
+  async buildParentSearchTerms(parent: GauzMemNode, sourceContext: string): Promise<string[]> {
+    const prompt = [
+      'You build grep search terms for expanding one memory node in a source journal.',
+      `Call ${PARENT_TERMS_TOOL} with the result.`,
+      'Rules:',
+      '- Use only the parent memory and source context to choose terms; do not use the current user query.',
+      '- Return grep literals, not natural-language descriptions.',
+      '- Preserve multi-word proper names, protocol names, model names, object names, aliases, numbers, and codes.',
+      '- Prefer terms that can find neighboring facts, causes, consequences, constraints, locations, identities, or unresolved risks related to the parent.',
+      '- Avoid generic words, pronouns, standalone common English words, and terms that are too broad.',
+      '- Keep 4-10 terms.',
+      '',
+      `Parent memory: ${parent.text}`,
+      `Parent source context: ${truncateText(sourceContext, 2400)}`,
+    ].join('\n');
+    const json = await this.callSubmitTool('parent_terms', prompt, this.parentTermsTool());
+    return this.stringArray(json.searchTerms).slice(0, 12);
   }
 
   async selectRelevant(params: {
@@ -98,13 +169,19 @@ export class GauzMemReasoner {
     }
     const prompt = [
       'Judge which graph memories help answer or continue the root query.',
-      'Return only valid JSON.',
-      'Schema: {"selectedNodeIds":string[],"selectedEdgeIds":string[],"rejectedNodeIds":string[],"rejectedEdgeIds":string[]}',
+      `Call ${RELEVANCE_TOOL} with the result.`,
       'Rules:',
-      '- Select only memories that are topically useful for the root query or its resolved context.',
-      '- Reject candidates that merely share a generic word, path fragment, tool name, or incidental phrase.',
-      '- Keep useful associative recall, but do not drift into unrelated topics.',
-      '- Every candidate id should appear in exactly one of selected or rejected.',
+      '- Select memories that either directly answer/continue the root query, or concretely add current scene state, character state, action constraints, key world facts, unresolved risks, causes, or consequences.',
+      '- Precision first, but do not reject durable background/state/constraint facts merely because they are not a direct answer.',
+      '- Put only useful memory ids in selectedNodeIds/selectedEdgeIds.',
+      '- Return selectedNodeIds and selectedEdgeIds in descending usefulness order.',
+      '- Do not output rejectedNodeIds or rejectedEdgeIds.',
+      '- Candidates omitted from selected are automatically treated as rejected by the caller.',
+      '- Reject candidates that only share a character, place, tool name, file path, source window, scene, or incidental phrase.',
+      '- Reject task/process/title-like memories unless the concrete fact itself helps answer or continue the root query.',
+      '- Select an edge only when the edge relation text itself is useful; do not select an edge merely because one endpoint is useful.',
+      '- Keep associative recall only when the association gives a concrete fact needed by the root query.',
+      '- A candidate id must not appear in both selected and rejected.',
       '',
       `Root query: ${params.rootQuery}`,
       'Nodes:',
@@ -112,17 +189,15 @@ export class GauzMemReasoner {
       'Edges:',
       JSON.stringify(params.edges.map(e => ({ id: e.id, from: e.from, to: e.to, text: truncateText(e.text, 700) }))),
     ].join('\n');
-    const json = await this.callJson('relevance', prompt);
+    const json = await this.callSubmitTool('relevance', prompt, this.relevanceTool());
     const nodeIds = new Set(params.nodes.map(n => n.id));
     const edgeIds = new Set(params.edges.map(e => e.id));
     const selectedNodeIds = this.stringArray(json.selectedNodeIds).filter(id => nodeIds.has(id));
     const selectedEdgeIds = this.stringArray(json.selectedEdgeIds).filter(id => edgeIds.has(id));
     const selectedNodeSet = new Set(selectedNodeIds);
     const selectedEdgeSet = new Set(selectedEdgeIds);
-    const rejectedNodeIds = this.stringArray(json.rejectedNodeIds)
-      .filter(id => nodeIds.has(id) && !selectedNodeSet.has(id));
-    const rejectedEdgeIds = this.stringArray(json.rejectedEdgeIds)
-      .filter(id => edgeIds.has(id) && !selectedEdgeSet.has(id));
+    const rejectedNodeIds: string[] = [];
+    const rejectedEdgeIds: string[] = [];
     for (const id of nodeIds) {
       if (!selectedNodeSet.has(id) && !rejectedNodeIds.includes(id)) rejectedNodeIds.push(id);
     }
@@ -132,40 +207,108 @@ export class GauzMemReasoner {
     return { selectedNodeIds, selectedEdgeIds, rejectedNodeIds, rejectedEdgeIds };
   }
 
-  private async callJson(stepName: string, prompt: string): Promise<any> {
+  async buildGraphPatch(params: {
+    sourceBatch: Array<{
+      sourceId: string;
+      turnId: string;
+      role: string;
+      blockType?: string;
+      text: string;
+    }>;
+    graph: {
+      nodes: Array<{ id: string; text: string; score?: number }>;
+      edges: Array<{ id: string; from: string; to: string; text: string; score?: number }>;
+    };
+  }): Promise<GauzMemGraphPatch> {
+    const prompt = [
+      'You maintain a long-term evidence graph for an ongoing agent conversation.',
+      `Call ${GRAPH_PATCH_TOOL} with a graph patch.`,
+      'Task:',
+      '- Read the recent source batch and add durable memory facts that will help future recall.',
+      '- Link new facts to each other and to existing graph facts when there is a concrete factual relationship.',
+      '- Suggest merges only when a new fact is equivalent to an existing node.',
+      'Node rules:',
+      '- Each node text is one standalone durable fact, not a title or process note.',
+      '- Preserve names, aliases, numbers, places, object names, protocols, factions, risks, and decisions.',
+      '- Chinese source should usually produce Chinese node text; preserve English proper names when useful.',
+      '- Skip greetings, dashboard/process text, tool arguments, file paths, repeated summaries, and status-only text.',
+      'Edge rules:',
+      '- Edge text must be Chinese, 20-80 characters, and state a specific factual relation.',
+      '- Good edge text examples: 因果：启动第七艘船会提高 Blackbird 人格风险 / 补充：折剑号提供坐标与启动密钥 / 约束：导航核心必须转接到猫头鹰号。',
+      '- Do not create edges only because two facts share a character, place, scene, or topic.',
+      'Merge rules:',
+      '- Use merges only for equivalent facts, not merely related facts.',
+      '- Refer to new nodes by tempId such as n1, n2. Refer to old graph nodes by their existing id.',
+      '- Keep the patch compact and high-signal.',
+      '',
+      'Recent source batch:',
+      JSON.stringify(params.sourceBatch.map(source => ({
+        sourceId: source.sourceId,
+        turnId: source.turnId,
+        role: source.role,
+        blockType: source.blockType,
+        text: truncateText(source.text, 2200),
+      }))),
+      '',
+      'Current graph:',
+      JSON.stringify({
+        nodes: params.graph.nodes.map(node => ({
+          id: node.id,
+          score: node.score,
+          text: truncateText(node.text, 500),
+        })),
+        edges: params.graph.edges.map(edge => ({
+          id: edge.id,
+          from: edge.from,
+          to: edge.to,
+          score: edge.score,
+          text: truncateText(edge.text, 350),
+        })),
+      }),
+    ].join('\n');
+    const json = await this.callSubmitTool('construct_graph_patch', prompt, this.graphPatchTool());
+    return {
+      batchSummary: this.stringValue(json.batchSummary),
+      nodes: Array.isArray(json.nodes)
+        ? json.nodes.map((node: any) => ({
+            tempId: this.stringValue(node.tempId),
+            text: this.stringValue(node.text),
+            sourceIds: this.stringArray(node.sourceIds),
+          }))
+        : [],
+      edges: Array.isArray(json.edges)
+        ? json.edges.map((edge: any) => ({
+            from: this.stringValue(edge.from),
+            to: this.stringValue(edge.to),
+            text: this.stringValue(edge.text),
+            sourceIds: this.stringArray(edge.sourceIds),
+          }))
+        : [],
+      merges: Array.isArray(json.merges)
+        ? json.merges.map((merge: any) => ({
+            tempId: this.stringValue(merge.tempId),
+            existingNodeId: this.stringValue(merge.existingNodeId),
+          }))
+        : [],
+      skipped: this.stringArray(json.skipped),
+    };
+  }
+
+  private async callSubmitTool(stepName: string, prompt: string, tool: ToolDefinition): Promise<any> {
     const started = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const messages: Message[] = [
-        { role: 'system', content: 'You are a strict JSON-only memory reasoner. Do not include markdown.' },
-        { role: 'user', content: prompt },
-      ];
-      let streamedText = '';
-      const response = await this.ai.chatStream(
-        messages,
-        undefined,
-        {
-          onText: (text) => {
-            streamedText += text;
-          },
-        },
-        { signal: controller.signal },
-      );
-      const text = (streamedText || response.content || '').trim();
-      const parsed = this.parseJson(text);
+      const { input, preview, attempts } = await this.callSubmitToolWithRetry(stepName, prompt, tool);
       this.steps.push({
         name: stepName,
         ok: true,
         durationMs: Date.now() - started,
         inputPreview: truncateText(prompt, 600),
-        outputPreview: truncateText(text, 600),
+        outputPreview: truncateText(preview, 600),
+        ...(attempts > 1 && { error: `Recovered after ${attempts} attempts` }),
       });
-      return parsed;
+      return input;
     } catch (error: any) {
-      const message = controller.signal.aborted
-        ? `GauzMem reasoner timed out after ${this.timeoutMs}ms`
-        : String(error?.message || error);
+      const message = String(error?.message || error);
       this.steps.push({
         name: stepName,
         ok: false,
@@ -174,20 +317,96 @@ export class GauzMemReasoner {
         error: message,
       });
       throw new Error(message);
-    } finally {
-      clearTimeout(timer);
     }
   }
 
-  private parseJson(text: string): any {
-    const trimmed = text.trim();
-    if (!trimmed) throw new Error('GauzMem LLM returned empty response');
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      const match = trimmed.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error(`GauzMem LLM returned non-JSON response: ${truncateText(trimmed, 300)}`);
-      return JSON.parse(match[0]);
+  private async callSubmitToolWithRetry(
+    stepName: string,
+    prompt: string,
+    tool: ToolDefinition,
+  ): Promise<{ input: any; preview: string; attempts: number }> {
+    let lastError: any;
+    let lastPreview = '';
+    for (let attempt = 1; attempt <= MAX_TOOL_ATTEMPTS; attempt += 1) {
+      try {
+        const retryHint = attempt === 1
+          ? ''
+          : [
+              '',
+              'Previous attempt failed.',
+              `Error: ${String(lastError?.message || lastError)}`,
+              `Previous response preview: ${truncateText(lastPreview, 800)}`,
+              `Call ${tool.name} with valid arguments only.`,
+            ].join('\n');
+        const messages: Message[] = [
+          {
+            role: 'system',
+            content: [
+              'You are a strict structured memory reasoner.',
+              'You must call the provided submit tool exactly once.',
+              'Do not answer with prose when a submit tool is available.',
+            ].join(' '),
+          },
+          { role: 'user', content: prompt + retryHint },
+        ];
+        const response = await this.ai.chatStream(
+          messages,
+          [tool],
+          undefined,
+          { toolChoice: tool.name },
+        );
+        lastPreview = this.responsePreview(response);
+        const toolCall = response.toolCalls?.find(call => call.function.name === tool.name);
+        if (!toolCall) throw new Error(`GauzMem LLM did not call ${tool.name}`);
+        const input = JSON.parse(toolCall.function.arguments || '{}');
+        this.validateSubmitToolInput(tool.name, input);
+        return { input, preview: JSON.stringify(input), attempts: attempt };
+      } catch (error: any) {
+        lastError = error;
+        if (attempt >= MAX_TOOL_ATTEMPTS) break;
+      }
+    }
+    throw lastError;
+  }
+
+  private responsePreview(response: { content: string | null; toolCalls?: any[] }): string {
+    return JSON.stringify({
+      content: response.content,
+      toolCalls: response.toolCalls?.map(call => ({
+        name: call.function?.name,
+        arguments: truncateText(call.function?.arguments || '', 500),
+      })),
+    });
+  }
+
+  private validateSubmitToolInput(toolName: string, input: any): void {
+    if (!input || typeof input !== 'object') throw new Error(`${toolName} returned non-object input`);
+    if (toolName === QUERY_PLAN_TOOL) {
+      if (!this.stringValue(input.rootQuery)) throw new Error(`${toolName} missing rootQuery`);
+      if (this.stringArray(input.searchTerms).length === 0) throw new Error(`${toolName} missing searchTerms`);
+    }
+    if (toolName === RELEVANCE_TOOL) {
+      if (!Array.isArray(input.selectedNodeIds)) throw new Error(`${toolName} missing selectedNodeIds`);
+      if (!Array.isArray(input.selectedEdgeIds)) throw new Error(`${toolName} missing selectedEdgeIds`);
+    }
+    if (toolName === EVIDENCE_TOOL) {
+      if (!Array.isArray(input.evidence)) throw new Error(`${toolName} missing evidence`);
+    }
+    if (toolName === PARENT_TERMS_TOOL) {
+      if (this.stringArray(input.searchTerms).length === 0) throw new Error(`${toolName} missing searchTerms`);
+    }
+    if (toolName === GRAPH_PATCH_TOOL) {
+      if (!Array.isArray(input.nodes)) throw new Error(`${toolName} missing nodes`);
+      if (!Array.isArray(input.edges)) throw new Error(`${toolName} missing edges`);
+      for (const node of input.nodes) {
+        if (!this.stringValue(node?.tempId)) throw new Error(`${toolName} node missing tempId`);
+        if (!this.stringValue(node?.text)) throw new Error(`${toolName} node missing text`);
+      }
+      for (const edge of input.edges) {
+        if (!this.stringValue(edge?.from)) throw new Error(`${toolName} edge missing from`);
+        if (!this.stringValue(edge?.to)) throw new Error(`${toolName} edge missing to`);
+        if (!this.stringValue(edge?.text)) throw new Error(`${toolName} edge missing text`);
+      }
     }
   }
 
@@ -200,10 +419,175 @@ export class GauzMemReasoner {
     return String(value || '').trim();
   }
 
-  private queryKind(value: unknown): GauzMemQueryKind {
-    const text = this.stringValue(value);
-    return ['direct', 'anaphora', 'continuation', 'recall', 'task'].includes(text)
-      ? text as GauzMemQueryKind
-      : 'direct';
+  private relationValue(value: any): GauzMemExtractedEvidence['relationToParent'] | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const whyRelevant = this.stringValue(value.whyRelevant);
+    if (!whyRelevant) return undefined;
+    const normalized = this.normalizeRelationText(whyRelevant);
+    if (!normalized) return undefined;
+    if (this.isVagueRelation(normalized)) return undefined;
+    return { whyRelevant: normalized };
   }
+
+  private isVagueRelation(value: string): boolean {
+    const normalized = value.toLowerCase().replace(/\s+/g, '');
+    const vagueTerms = [
+      '同主题',
+      '同一主题',
+      '同场景',
+      '同一场景',
+      '同角色',
+      '同一角色',
+      '有关',
+      '相关',
+      '相关联',
+      'relevant',
+      'related',
+      'sametopic',
+      'samescene',
+      'samecharacter',
+    ];
+    return vagueTerms.some(term => normalized === term || normalized.includes(`只是${term}`) || normalized.includes(`仅${term}`));
+  }
+
+  private normalizeRelationText(value: string): string {
+    let text = value
+      .replace(/Parent fact\s*:?\s*/gi, '')
+      .replace(/Evidence\s*:?\s*/gi, '')
+      .replace(/This evidence (directly )?(confirms|supports|explains)[^.。]*[.。]?\s*/gi, '')
+      .replace(/The evidence (directly )?(confirms|supports|explains)[^.。]*[.。]?\s*/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) return '';
+    if (/^[\x00-\x7F\s.,:;'"!?()-]+$/.test(text)) return '';
+    if (text.length > 120) text = text.slice(0, 117).trimEnd() + '...';
+    return text;
+  }
+
+  private queryPlanTool(): ToolDefinition {
+    return {
+      name: QUERY_PLAN_TOOL,
+      description: 'Submit the GauzMem query plan.',
+      parameters: {
+        type: 'object',
+        required: ['rootQuery', 'searchTerms'],
+        properties: {
+          rootQuery: { type: 'string' },
+          searchTerms: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    };
+  }
+
+  private relevanceTool(): ToolDefinition {
+    return {
+      name: RELEVANCE_TOOL,
+      description: 'Submit selected graph memory ids in usefulness order.',
+      parameters: {
+        type: 'object',
+        required: ['selectedNodeIds', 'selectedEdgeIds'],
+        properties: {
+          selectedNodeIds: { type: 'array', items: { type: 'string' } },
+          selectedEdgeIds: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    };
+  }
+
+  private evidenceTool(): ToolDefinition {
+    return {
+      name: EVIDENCE_TOOL,
+      description: 'Submit source-backed memory facts extracted from source windows.',
+      parameters: {
+        type: 'object',
+        required: ['evidence'],
+        properties: {
+          evidence: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['windowRef', 'text'],
+              properties: {
+                windowRef: { type: 'string' },
+                text: { type: 'string' },
+                relationToParent: {
+                  type: 'object',
+                  properties: {
+                    whyRelevant: { type: 'string' },
+                  },
+                  required: ['whyRelevant'],
+                } as any,
+              },
+            },
+          },
+        },
+      },
+    };
+  }
+
+  private parentTermsTool(): ToolDefinition {
+    return {
+      name: PARENT_TERMS_TOOL,
+      description: 'Submit grep terms for expanding one parent memory node.',
+      parameters: {
+        type: 'object',
+        required: ['searchTerms'],
+        properties: {
+          searchTerms: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    };
+  }
+
+  private graphPatchTool(): ToolDefinition {
+    return {
+      name: GRAPH_PATCH_TOOL,
+      description: 'Submit a compact graph patch for GauzMem construct.',
+      parameters: {
+        type: 'object',
+        required: ['batchSummary', 'nodes', 'edges'],
+        properties: {
+          batchSummary: { type: 'string' },
+          nodes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['tempId', 'text', 'sourceIds'],
+              properties: {
+                tempId: { type: 'string' },
+                text: { type: 'string' },
+                sourceIds: { type: 'array', items: { type: 'string' } },
+              },
+            },
+          },
+          edges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['from', 'to', 'text'],
+              properties: {
+                from: { type: 'string' },
+                to: { type: 'string' },
+                text: { type: 'string' },
+                sourceIds: { type: 'array', items: { type: 'string' } },
+              },
+            },
+          },
+          merges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['tempId', 'existingNodeId'],
+              properties: {
+                tempId: { type: 'string' },
+                existingNodeId: { type: 'string' },
+              },
+            },
+          },
+          skipped: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    };
+  }
+
 }

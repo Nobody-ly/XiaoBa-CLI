@@ -31,7 +31,7 @@ export class OpenAIProvider implements AIProvider {
   /**
    * 构建请求体
    */
-  private buildRequestBody(messages: Message[], tools?: ToolDefinition[], stream = false): any {
+  private buildRequestBody(messages: Message[], tools?: ToolDefinition[], stream = false, options?: AIRequestOptions): any {
     const sanitizedMessages = messages.map(message => this.sanitizeMessage(message));
 
     const body: any = {
@@ -55,6 +55,12 @@ export class OpenAIProvider implements AIProvider {
           parameters: tool.parameters
         }
       }));
+      if (options?.toolChoice) {
+        body.tool_choice = {
+          type: 'function',
+          function: { name: options.toolChoice },
+        };
+      }
     }
 
     return body;
@@ -109,7 +115,7 @@ export class OpenAIProvider implements AIProvider {
    * 普通调用
    */
   async chat(messages: Message[], tools?: ToolDefinition[], options?: AIRequestOptions): Promise<ChatResponse> {
-    const body = this.buildRequestBody(messages, tools, false);
+    const body = this.buildRequestBody(messages, tools, false, options);
     ContextDebugLogger.dumpSdkBoundary('before', undefined, {
       apiUrl: this.chatCompletionsUrl,
       body,
@@ -147,7 +153,7 @@ export class OpenAIProvider implements AIProvider {
     callbacks?: StreamCallbacks,
     options?: AIRequestOptions,
   ): Promise<ChatResponse> {
-    const body = this.buildRequestBody(messages, tools, true);
+    const body = this.buildRequestBody(messages, tools, true, options);
 
     ContextDebugLogger.dumpSdkBoundary('before', undefined, {
       apiUrl: this.chatCompletionsUrl,
