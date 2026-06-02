@@ -6,7 +6,7 @@ export function getGauzMemRoot(): string {
 }
 
 export function getGauzMemSourceDir(): string {
-  return path.join(getGauzMemRoot(), 'sources');
+  return path.resolve(process.cwd(), 'data', 'session-memory', 'gauzmem');
 }
 
 export function getGauzMemStoreDir(): string {
@@ -20,7 +20,7 @@ export function ensureGauzMemDirs(): void {
 
 export const GauzMemFiles = {
   sources: () => path.join(getGauzMemSourceDir(), 'session_messages.jsonl'),
-  sourceWindows: () => path.join(getGauzMemSourceDir(), 'source_windows.jsonl'),
+  sourceWindows: () => path.join(getGauzMemStoreDir(), 'source_windows.jsonl'),
   nodes: () => path.join(getGauzMemStoreDir(), 'nodes.jsonl'),
   edges: () => path.join(getGauzMemStoreDir(), 'edges.jsonl'),
   nodeState: () => path.join(getGauzMemStoreDir(), 'node_state.jsonl'),

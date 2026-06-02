@@ -119,6 +119,49 @@
       background: #fbfdff;
     }
     .compact-json { max-height: 160px; }
+    .graph-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .graph-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .graph-actions button {
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .graph-actions button.active {
+      border-color: var(--blue);
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-weight: 750;
+    }
+    .graph-summary {
+      margin: -2px 0 10px;
+    }
+    .graph-legend {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      vertical-align: middle;
+    }
+    .score-ramp {
+      width: 92px;
+      height: 9px;
+      border-radius: 999px;
+      border: 1px solid #d8e1ee;
+      background: linear-gradient(90deg, #e5e7eb, #93c5fd, #1d4ed8);
+    }
     .graph-wrap {
       height: 760px;
       border: 1px solid var(--line);
@@ -130,6 +173,13 @@
       overflow: hidden;
     }
     svg { width: 100%; height: 100%; display: block; }
+    canvas#graph {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+    canvas#graph.dragging { cursor: grabbing; }
     .node-label {
       pointer-events: none;
       fill: #243149;
@@ -158,18 +208,6 @@
       line-height: 1.5;
       white-space: pre-wrap;
       pointer-events: none;
-    }
-    .detail {
-      min-height: 80px;
-      margin-top: 12px;
-      display: grid;
-      gap: 8px;
-    }
-    .detail-card {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      background: #fbfdff;
     }
     .empty { color: var(--muted); border: 1px dashed #cbd5e1; border-radius: 8px; padding: 18px; }
     @media (max-width: 980px) {
@@ -203,19 +241,28 @@
       </section>
     </div>
     <section class="panel">
-      <h2>Persistent Graph</h2>
+      <div class="graph-head">
+        <h2>Persistent Graph</h2>
+        <div class="graph-actions">
+          <button class="active" data-graph-mode="normal">&#27491;&#24120;&#32447;</button>
+          <button data-graph-mode="deep">&#28145;&#24230;&#32447;</button>
+          <button data-graph-mode="all">&#20840;&#37096;</button>
+        </div>
+      </div>
+      <div id="graph-summary" class="muted graph-summary"></div>
       <div class="graph-wrap">
-        <svg id="graph"></svg>
+        <canvas id="graph"></canvas>
       </div>
       <div id="graph-tooltip" class="tooltip"></div>
-      <div id="graph-detail" class="detail">
-        <div class="empty">悬浮或点击节点/边查看 evidence、sourceRef 和权重。</div>
-      </div>
     </section>
   </main>
   <script>
     let graphData = { nodes: [], edges: [] };
     let selectedRunId = null;
+    let graphDisplayMode = 'normal';
+    const NORMAL_GRAPH_THRESHOLD = 0.1;
+    const DEEP_GRAPH_THRESHOLD = -0.45;
+    const CLUSTER_HUES = [207, 166, 28, 267, 10, 188, 326, 86, 230, 134];
 
     async function api(path) {
       const res = await fetch('/api' + path);
@@ -239,6 +286,7 @@
           <span class="pill">runs ${s.counts.runs}</span>
           <span class="pill">faded ${s.counts.fadedNodes}/${s.counts.fadedEdges}</span>
           <div class="muted">store: ${escapeHtml(s.root)}</div>
+          <div class="muted">source: ${escapeHtml(s.sourceRoot || '')}</div>
           <div class="muted">provider: ${escapeHtml(s.llm.provider || 'not set')} · model: ${escapeHtml(s.llm.model || 'not set')} · base: ${escapeHtml(s.llm.apiBase || 'not set')} · timeout: ${escapeHtml(s.llm.timeoutMs || '')}ms · thinking: ${s.llm.disableThinking ? 'disabled' : 'enabled'}</div>
         `;
       } catch (e) {
@@ -260,7 +308,7 @@
       document.getElementById('runs').innerHTML = runs.map(run => `
         <div class="run ${run.runId === selectedRunId ? 'active' : ''}" onclick="loadRun('${run.runId}')">
           <div class="run-title">${escapeHtml(cleanQuery(run.query || '(empty)'))}</div>
-          <div class="muted">${formatTime(run.timestamp)} · ${escapeHtml(run.callType)} · ${escapeHtml(run.runId)}</div>
+          <div class="muted">${formatTime(run.timestamp)} · ${escapeHtml(run.kind || 'recall')} · ${escapeHtml(run.callType)} · ${escapeHtml(run.runId)}</div>
           <div class="run-meta">
             <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
             <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
@@ -283,23 +331,74 @@
     }
 
     function renderRun(run) {
+      const queryPlan = run.queryPlan || {};
+      const graphSteps = (run.trace || []).filter(step =>
+        ['graph_scan', 'disclose_initial', 'relevance_graph_initial', 'graph_frontier'].includes(step.step)
+      );
+      const rootSteps = (run.trace || []).filter(step => step.step.startsWith('root_') || step.step === 'relevance_construct_root');
+      const nodeSteps = (run.trace || []).filter(step => step.step.startsWith('node_') || step.step === 'relevance_construct_node');
       return `
         <div>
           <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
+          <span class="pill">${escapeHtml(run.kind || 'recall')}</span>
           <span class="pill">${formatTime(run.timestamp)}</span>
           <span class="muted">${escapeHtml(run.runId)}</span>
         </div>
         <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>
         ${run.error ? `<pre>${escapeHtml(run.error)}</pre>` : ''}
-        <div class="section"><h2>Query Build</h2><pre class="compact-json">${escapeHtml(JSON.stringify(run.queryPlan || {}, null, 2))}</pre></div>
-        <div class="section"><h2>Flow</h2><div class="flow">${run.trace.map(step => `<div class="step"><strong>${escapeHtml(step.step)}</strong><div class="muted">${escapeHtml(step.detail || '')}</div>${smallIds('nodes', step.nodeIds)}${smallIds('edges', step.edgeIds)}${smallIds('windows', step.windowIds)}</div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Query</h2>
+          <div class="item"><strong>rootQuery</strong><pre class="compact-json">${escapeHtml(queryPlan.rootQuery || '')}</pre></div>
+          <div class="item"><strong>terms</strong><div>${(queryPlan.searchTerms || []).map(term => `<span class="pill">${escapeHtml(term)}</span>`).join('') || '<span class="muted">none</span>'}</div></div>
+        </div>
+        <div class="section"><h2>Graph</h2>${renderStepCards(graphSteps)}<h3>selected</h3>${itemCards(run.selectedNodeIds, 'node')}${itemCards(run.selectedEdgeIds, 'edge')}<h3>rejected</h3>${itemCards(run.rejectedNodeIds, 'node', true)}${itemCards(run.rejectedEdgeIds, 'edge', true)}</div>
+        <div class="section"><h2>Root Construct</h2>${renderStepCards(rootSteps)}</div>
+        <div class="section"><h2>Node Construct</h2>${renderStepCards(nodeSteps)}</div>
         <div class="section"><h2>Reasoner</h2><div class="card-list">${run.reasonerSteps.map(s => `<div class="item"><span class="pill ${s.ok ? 'ok' : 'err'}">${escapeHtml(s.name)}</span><span class="muted">${s.durationMs}ms</span>${s.error ? `<pre>${escapeHtml(s.error)}</pre>` : ''}<pre class="compact-json">${escapeHtml(s.outputPreview || s.inputPreview || '')}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
-        <div class="section"><h2>Source Windows</h2><div class="card-list">${run.sourceWindows.map(w => `<div class="item"><strong>${escapeHtml(w.windowId)}</strong><div class="muted">${escapeHtml(w.sourceId)} · ${escapeHtml(w.sessionKey)}</div><pre>${escapeHtml(w.text)}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
-        <div class="section"><h2>Evidence</h2><div class="card-list">${run.extractedEvidence.map(e => `<div class="item"><strong>${escapeHtml(e.windowId)}</strong><pre>${escapeHtml(e.text)}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Source Windows</h2><div class="card-list">${run.sourceWindows.map(w => `<div class="item"><strong>${escapeHtml(w.windowId)}</strong><div class="muted">${escapeHtml(w.sourceId)} · ${escapeHtml(w.sessionKey)} · terms ${escapeHtml(String(w.distinctTermCount || 0))} · first ${escapeHtml(String(w.firstMatchedTermIndex ?? ''))} · span ${escapeHtml((w.span && `${w.span.start}-${w.span.end}`) || '')}</div><div>${(w.matchedTerms || []).map(term => `<span class="pill">${escapeHtml(term)}</span>`).join('') || '<span class="muted">no matched terms</span>'}</div><pre>${escapeHtml(w.text)}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Evidence</h2><div class="card-list">${run.extractedEvidence.map(e => `<div class="item"><strong>${escapeHtml(e.text || '')}</strong><div class="muted">${escapeHtml(e.sourceId || '')} · span ${escapeHtml((e.span && `${e.span.start}-${e.span.end}`) || '')}</div>${e.sourceSnippet ? `<pre>${escapeHtml(e.sourceSnippet)}</pre>` : ''}</div>`).join('') || '<div class="empty">none</div>'}</div></div>
         <div class="section"><h2>Selections</h2><pre class="compact-json">${escapeHtml(JSON.stringify({selectedNodeIds: run.selectedNodeIds, selectedEdgeIds: run.selectedEdgeIds, rejectedNodeIds: run.rejectedNodeIds, rejectedEdgeIds: run.rejectedEdgeIds, fadedNodeIds: run.fadedNodeIds, fadedEdgeIds: run.fadedEdgeIds}, null, 2))}</pre></div>
         <div class="section"><h2>Weights</h2><div class="card-list">${run.weightChanges.map(w => `<div class="item"><span class="pill ${w.reason === 'selected' ? 'ok' : 'err'}">${escapeHtml(w.reason)} ${escapeHtml(w.kind)}</span> ${escapeHtml(w.id)} <span class="muted">${round(w.before)} -> ${round(w.after)} (${round(w.delta)}) ${w.faded ? 'faded' : ''}</span></div>`).join('') || '<div class="empty">none</div>'}</div></div>
         <div class="section"><h2>Prompt Bundle</h2><pre>${escapeHtml(run.promptBundle || '(empty)')}</pre></div>
       `;
+    }
+
+    function renderStepCards(steps) {
+      return `<div class="flow">${steps.map(step => `
+        <div class="step">
+          <strong>${escapeHtml(step.step)}</strong>
+          <div class="muted">${escapeHtml(step.detail || '')}</div>
+          ${previewItems(step.nodeIds, 'node')}
+          ${previewItems(step.edgeIds, 'edge')}
+          ${smallIds('windows', step.windowIds)}
+        </div>
+      `).join('') || '<div class="empty">none</div>'}</div>`;
+    }
+
+    function previewItems(ids, kind) {
+      if (!ids || ids.length === 0) return '';
+      return `<div class="card-list">${ids.slice(0, 8).map(id => miniItem(id, kind)).join('')}${ids.length > 8 ? `<div class="muted">+${ids.length - 8} more</div>` : ''}</div>`;
+    }
+
+    function itemCards(ids, kind, rejected = false) {
+      if (!ids || ids.length === 0) return '<div class="empty">none</div>';
+      return `<div class="card-list">${ids.slice(0, 16).map(id => miniItem(id, kind, rejected)).join('')}${ids.length > 16 ? `<div class="muted">+${ids.length - 16} more</div>` : ''}</div>`;
+    }
+
+    function miniItem(id, kind, rejected = false) {
+      const item = findGraphItem(id, kind);
+      const text = item ? (kind === 'node' ? item.text : item.text || `${item.from} -> ${item.to}`) : id;
+      const state = item && item.state ? item.state : null;
+      return `<div class="item">
+        <span class="pill ${rejected ? 'err' : 'ok'}">${escapeHtml(kind)}</span>
+        ${state ? `<span class="muted">score ${round(state.score)}</span>` : ''}
+        <div><strong>${escapeHtml(preview(text, 180))}</strong></div>
+        <div class="muted">${escapeHtml(shortId(id))}</div>
+      </div>`;
+    }
+
+    function findGraphItem(id, kind) {
+      const items = kind === 'node' ? (graphData.nodes || []) : (graphData.edges || []);
+      return items.find(item => item.id === id);
     }
 
     async function loadGraph() {
@@ -312,43 +411,60 @@
       const width = svg.clientWidth || 1200;
       const height = svg.clientHeight || 760;
       svg.innerHTML = '';
-      const nodes = graphData.nodes || [];
-      const edges = graphData.edges || [];
+      const fullNodes = graphData.nodes || [];
+      const fullEdges = graphData.edges || [];
+      const filtered = filterGraphForMode(fullNodes, fullEdges);
+      const nodes = filtered.nodes;
+      const edges = filtered.edges;
+      updateGraphSummary(fullNodes, fullEdges, filtered);
       if (nodes.length === 0) {
         svg.appendChild(svgText(width / 2, height / 2, 'No graph nodes yet', 'cluster-label'));
         return;
       }
 
-      const activeNodes = nodes.filter(n => !isFaded(n));
-      const fadedNodes = nodes.filter(isFaded);
-      const activeEdges = edges.filter(e => !isFaded(e));
-      const components = connectedComponents(activeNodes, activeEdges).sort((a, b) => b.length - a.length);
       const positions = new Map();
-      const boxes = layoutComponentBoxes(components, width, height, fadedNodes.length);
+      const mutedNodes = nodes.filter(isMutedInCurrentMode);
+      const primaryNodes = nodes.filter(n => !isMutedInCurrentMode(n));
+      const primaryEdges = edges.filter(e => !isMutedInCurrentMode(e));
+      const layoutNodes = primaryNodes.length > 0 ? primaryNodes : nodes;
+      const layoutEdges = primaryNodes.length > 0 ? primaryEdges : edges;
+      const layout = layoutForceGraph(layoutNodes, layoutEdges, width, height, mutedNodes.length);
+      const clusterByNode = new Map();
+      layout.communities.forEach((community, idx) => {
+        for (const node of community.nodes) clusterByNode.set(node.id, idx);
+      });
 
-      components.forEach((comp, idx) => {
-        const box = boxes[idx];
-        placeComponent(comp, activeEdges, box, positions);
-        const label = svgText(box.x + 12, box.y + 20, `cluster ${idx + 1} · ${comp.length}`, 'cluster-label');
+      for (const [id, point] of layout.positions) positions.set(id, point);
+
+      layout.communities.forEach((community, idx) => {
+        const clusterName = idx === 0 ? 'core cluster' : `cluster ${idx + 1}`;
+        const label = svgText(
+          clamp(community.cx - community.r, 20, width - 160),
+          clamp(community.cy - community.r - 10, 20, height - 16),
+          `${clusterName} - ${community.nodes.length}`,
+          'cluster-label'
+        );
         svg.appendChild(label);
       });
 
-      fadedNodes.forEach((node, i) => {
+      mutedNodes.forEach((node, i) => {
         const x = width - 125 + (i % 3) * 38;
         const y = 44 + Math.floor(i / 3) * 34;
         positions.set(node.id, { x, y });
+        clusterByNode.set(node.id, 0);
       });
 
       for (const edge of edges) {
         const a = positions.get(edge.from);
         const b = positions.get(edge.to);
         if (!a || !b) continue;
-        const faded = isFaded(edge);
+        const faded = isMutedInCurrentMode(edge);
         const score = scoreOf(edge);
+        const cluster = clusterByNode.get(edge.from) || clusterByNode.get(edge.to) || 0;
         const line = svgEl('line', {
           x1: a.x, y1: a.y, x2: b.x, y2: b.y,
-          stroke: faded ? '#c7ced8' : edgeColor(score),
-          'stroke-width': faded ? 1 : Math.max(1.4, 1.4 + score * 2.4),
+          stroke: edgeColor(score, cluster, faded),
+          'stroke-width': faded ? 1 : Math.max(1.2, 1.35 + scoreIntensity(score) * 2.2),
           opacity: faded ? .25 : .62,
         });
         attachHover(line, 'edge', edge);
@@ -358,13 +474,14 @@
       for (const node of nodes) {
         const p = positions.get(node.id);
         if (!p) continue;
-        const faded = isFaded(node);
+        const faded = isMutedInCurrentMode(node);
         const score = scoreOf(node);
+        const cluster = clusterByNode.get(node.id) || 0;
         const g = svgEl('g', { cursor: 'pointer' });
         const circle = svgEl('circle', {
           cx: p.x, cy: p.y,
-          r: faded ? 8 : 12 + Math.min(7, score * 7),
-          fill: faded ? '#e5e7eb' : nodeColor(score),
+          r: faded ? 7 : 10 + Math.min(9, scoreIntensity(score) * 9),
+          fill: nodeColor(score, cluster, faded),
           stroke: faded ? '#cbd5e1' : '#ffffff',
           'stroke-width': faded ? 1 : 2,
         });
@@ -376,47 +493,259 @@
       }
     }
 
-    function layoutComponentBoxes(components, width, height, fadedCount) {
-      const usableWidth = fadedCount > 0 ? width - 170 : width;
-      const cols = Math.max(1, Math.ceil(Math.sqrt(components.length || 1)));
-      const rows = Math.max(1, Math.ceil((components.length || 1) / cols));
-      return components.map((_, idx) => {
-        const col = idx % cols;
-        const row = Math.floor(idx / cols);
+    function filterGraphForMode(nodes, edges) {
+      const visibleNodes = nodes.filter(passesGraphMode);
+      const visibleIds = new Set(visibleNodes.map(node => node.id));
+      const visibleEdges = edges.filter(edge =>
+        passesGraphMode(edge) && visibleIds.has(edge.from) && visibleIds.has(edge.to)
+      );
+      const linkedIds = new Set();
+      for (const edge of visibleEdges) {
+        linkedIds.add(edge.from);
+        linkedIds.add(edge.to);
+      }
+      const orderedNodes = visibleNodes.sort((a, b) =>
+        Number(linkedIds.has(b.id)) - Number(linkedIds.has(a.id)) ||
+        scoreOf(b) - scoreOf(a) ||
+        String(a.id).localeCompare(String(b.id))
+      );
+      return {
+        nodes: orderedNodes,
+        edges: visibleEdges,
+        hiddenNodes: Math.max(0, nodes.length - visibleNodes.length),
+        hiddenEdges: Math.max(0, edges.length - visibleEdges.length),
+      };
+    }
+
+    function passesGraphMode(item) {
+      if (graphDisplayMode === 'all') return true;
+      const score = scoreOf(item);
+      if (graphDisplayMode === 'deep') return score >= DEEP_GRAPH_THRESHOLD;
+      return score >= NORMAL_GRAPH_THRESHOLD;
+    }
+
+    function isMutedInCurrentMode(item) {
+      if (graphDisplayMode !== 'all') return isFaded(item);
+      return isFaded(item) || scoreOf(item) < NORMAL_GRAPH_THRESHOLD;
+    }
+
+    function updateGraphSummary(fullNodes, fullEdges, filtered) {
+      const summary = document.getElementById('graph-summary');
+      if (!summary) return;
+      const modeText = graphDisplayMode === 'normal'
+        ? `\u6b63\u5e38\u7ebf score >= ${NORMAL_GRAPH_THRESHOLD}`
+        : graphDisplayMode === 'deep'
+          ? `\u6df1\u5ea6\u7ebf score >= ${DEEP_GRAPH_THRESHOLD}`
+          : '\u5168\u90e8\u8282\u70b9\u4e0e\u8fb9';
+      const scores = filtered.nodes.map(node => scoreOf(node));
+      const minScore = scores.length ? Math.min(...scores) : 0;
+      const maxScore = scores.length ? Math.max(...scores) : 0;
+      summary.innerHTML = `${escapeHtml(modeText)} · \u663e\u793a ${filtered.nodes.length}/${fullNodes.length} nodes, ${filtered.edges.length}/${fullEdges.length} edges · \u9690\u85cf ${filtered.hiddenNodes}/${filtered.hiddenEdges} · score ${round(minScore)}-${round(maxScore)}<span class="graph-legend"><span>\u4f4e\u5206</span><span class="score-ramp"></span><span>\u9ad8\u5206</span></span>`;
+    }
+
+    function layoutForceGraph(nodes, edges, width, height, fadedCount) {
+      const positions = new Map();
+      if (nodes.length === 0) return { positions, communities: [] };
+
+      const usableWidth = Math.max(320, fadedCount > 0 ? width - 170 : width);
+      const bounds = { x: 30, y: 34, w: usableWidth - 60, h: height - 68 };
+      const communities = detectGraphCommunities(nodes, edges);
+      const communityMeta = placeCommunityCenters(communities, bounds);
+      const byId = new Map(nodes.map(node => [node.id, node]));
+      const communityByNode = new Map();
+      communityMeta.forEach((community, index) => {
+        for (const node of community.nodes) communityByNode.set(node.id, index);
+      });
+
+      const degree = new Map(nodes.map(node => [node.id, 0]));
+      for (const edge of edges) {
+        if (degree.has(edge.from)) degree.set(edge.from, degree.get(edge.from) + 1);
+        if (degree.has(edge.to)) degree.set(edge.to, degree.get(edge.to) + 1);
+      }
+
+      for (const community of communityMeta) {
+        const sorted = [...community.nodes].sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0));
+        sorted.forEach((node, i) => {
+          const seed = hashNumber(node.id);
+          const angle = (i * 2.399963229728653) + seed * Math.PI * 2;
+          const radius = community.r * (0.16 + 0.58 * Math.sqrt((i + 1) / Math.max(1, sorted.length)));
+          positions.set(node.id, {
+            x: clamp(community.cx + Math.cos(angle) * radius, bounds.x, bounds.x + bounds.w),
+            y: clamp(community.cy + Math.sin(angle) * radius, bounds.y, bounds.y + bounds.h),
+            vx: 0,
+            vy: 0,
+          });
+        });
+      }
+
+      const nodeList = nodes.filter(node => positions.has(node.id));
+      const linkList = edges.filter(edge => byId.has(edge.from) && byId.has(edge.to));
+      const iterations = nodeList.length > 80 ? 170 : 230;
+      const repulsion = 1700;
+      const collisionBase = 28;
+
+      for (let step = 0; step < iterations; step += 1) {
+        const alpha = 1 - step / iterations;
+        for (let i = 0; i < nodeList.length; i += 1) {
+          const a = nodeList[i];
+          const pa = positions.get(a.id);
+          for (let j = i + 1; j < nodeList.length; j += 1) {
+            const b = nodeList[j];
+            const pb = positions.get(b.id);
+            let dx = pa.x - pb.x;
+            let dy = pa.y - pb.y;
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < 0.01) {
+              const jitter = hashNumber(a.id + b.id) * Math.PI * 2;
+              dx = Math.cos(jitter) * 0.1;
+              dy = Math.sin(jitter) * 0.1;
+              dist2 = 0.01;
+            }
+            const dist = Math.sqrt(dist2);
+            const sameCommunity = communityByNode.get(a.id) === communityByNode.get(b.id);
+            const force = (sameCommunity ? repulsion * 0.42 : repulsion) / dist2;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+            pa.vx += fx;
+            pa.vy += fy;
+            pb.vx -= fx;
+            pb.vy -= fy;
+
+            const minDist = collisionBase + Math.min(14, scoreOf(a) * 5 + scoreOf(b) * 5);
+            if (dist < minDist) {
+              const push = (minDist - dist) * 0.028;
+              pa.vx += (dx / dist) * push;
+              pa.vy += (dy / dist) * push;
+              pb.vx -= (dx / dist) * push;
+              pb.vy -= (dy / dist) * push;
+            }
+          }
+        }
+
+        for (const edge of linkList) {
+          const a = positions.get(edge.from);
+          const b = positions.get(edge.to);
+          if (!a || !b) continue;
+          const sameCommunity = communityByNode.get(edge.from) === communityByNode.get(edge.to);
+          const target = sameCommunity ? 70 : 115;
+          const strength = sameCommunity ? 0.014 : 0.009;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.max(0.1, Math.sqrt(dx * dx + dy * dy));
+          const force = (dist - target) * strength * alpha;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          a.vx += fx;
+          a.vy += fy;
+          b.vx -= fx;
+          b.vy -= fy;
+        }
+
+        for (const node of nodeList) {
+          const p = positions.get(node.id);
+          const community = communityMeta[communityByNode.get(node.id)] || communityMeta[0];
+          p.vx += (community.cx - p.x) * 0.006 * alpha;
+          p.vy += (community.cy - p.y) * 0.006 * alpha;
+          p.vx += (bounds.x + bounds.w / 2 - p.x) * 0.0008;
+          p.vy += (bounds.y + bounds.h / 2 - p.y) * 0.0008;
+          p.vx *= 0.74;
+          p.vy *= 0.74;
+          p.x = clamp(p.x + p.vx, bounds.x, bounds.x + bounds.w);
+          p.y = clamp(p.y + p.vy, bounds.y, bounds.y + bounds.h);
+        }
+      }
+
+      for (const point of positions.values()) {
+        delete point.vx;
+        delete point.vy;
+      }
+
+      return { positions, communities: communityMeta };
+    }
+
+    function detectGraphCommunities(nodes, edges) {
+      const byId = new Map(nodes.map(node => [node.id, node]));
+      const labels = new Map(nodes.map(node => [node.id, node.id]));
+      const neighbors = new Map(nodes.map(node => [node.id, []]));
+      for (const edge of edges) {
+        if (!neighbors.has(edge.from) || !neighbors.has(edge.to)) continue;
+        neighbors.get(edge.from).push(edge.to);
+        neighbors.get(edge.to).push(edge.from);
+      }
+
+      const order = [...nodes].sort((a, b) => hashNumber(a.id) - hashNumber(b.id));
+      for (let pass = 0; pass < 8; pass += 1) {
+        let changed = false;
+        for (const node of order) {
+          const counts = new Map();
+          for (const next of neighbors.get(node.id) || []) {
+            const label = labels.get(next);
+            counts.set(label, (counts.get(label) || 0) + 1);
+          }
+          if (counts.size === 0) continue;
+          const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || hashNumber(a[0]) - hashNumber(b[0]))[0][0];
+          if (best !== labels.get(node.id)) {
+            labels.set(node.id, best);
+            changed = true;
+          }
+        }
+        if (!changed) break;
+      }
+
+      const groups = new Map();
+      for (const node of nodes) {
+        const label = labels.get(node.id) || node.id;
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(byId.get(node.id));
+      }
+
+      return [...groups.values()]
+        .map(group => group.filter(Boolean))
+        .sort((a, b) => b.length - a.length || hashNumber(a[0]?.id || '') - hashNumber(b[0]?.id || ''));
+    }
+
+    function placeCommunityCenters(communities, bounds) {
+      if (communities.length === 0) return [];
+      if (communities.length === 1) {
+        return [{
+          nodes: communities[0],
+          cx: bounds.x + bounds.w / 2,
+          cy: bounds.y + bounds.h / 2,
+          r: Math.max(70, Math.min(bounds.w, bounds.h) * 0.42),
+        }];
+      }
+
+      const centerX = bounds.x + bounds.w / 2;
+      const centerY = bounds.y + bounds.h / 2;
+      const mainRadius = Math.min(bounds.w, bounds.h) * 0.28;
+      const orbitX = bounds.w * 0.34;
+      const orbitY = bounds.h * 0.34;
+      return communities.map((nodes, index) => {
+        if (index === 0) {
+          return { nodes, cx: centerX, cy: centerY, r: Math.max(90, mainRadius) };
+        }
+        const angle = -Math.PI / 2 + (index - 1) * (Math.PI * 2 / Math.max(1, communities.length - 1));
+        const sizeFactor = Math.sqrt(nodes.length / Math.max(1, communities[0].length));
         return {
-          x: col * usableWidth / cols + 16,
-          y: row * height / rows + 16,
-          w: usableWidth / cols - 32,
-          h: height / rows - 32,
+          nodes,
+          cx: clamp(centerX + Math.cos(angle) * orbitX, bounds.x + 70, bounds.x + bounds.w - 70),
+          cy: clamp(centerY + Math.sin(angle) * orbitY, bounds.y + 70, bounds.y + bounds.h - 70),
+          r: Math.max(46, Math.min(110, mainRadius * (0.35 + sizeFactor * 0.45))),
         };
       });
     }
 
-    function placeComponent(comp, edges, box, positions) {
-      if (comp.length === 1) {
-        positions.set(comp[0].id, { x: box.x + box.w / 2, y: box.y + box.h / 2 });
-        return;
+    function hashNumber(text) {
+      let hash = 2166136261;
+      for (let i = 0; i < String(text).length; i += 1) {
+        hash ^= String(text).charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
       }
-      const degree = new Map(comp.map(n => [n.id, 0]));
-      for (const e of edges) {
-        if (degree.has(e.from)) degree.set(e.from, degree.get(e.from) + 1);
-        if (degree.has(e.to)) degree.set(e.to, degree.get(e.to) + 1);
-      }
-      const sorted = [...comp].sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0));
-      const center = sorted[0];
-      const cx = box.x + box.w / 2;
-      const cy = box.y + box.h / 2;
-      positions.set(center.id, { x: cx, y: cy });
-      const rings = sorted.slice(1);
-      const radius = Math.max(42, Math.min(box.w, box.h) * .34);
-      rings.forEach((node, i) => {
-        const angle = -Math.PI / 2 + (Math.PI * 2 * i) / Math.max(1, rings.length);
-        const wobble = 1 + ((i % 3) - 1) * .12;
-        positions.set(node.id, {
-          x: cx + Math.cos(angle) * radius * wobble,
-          y: cy + Math.sin(angle) * radius * wobble,
-        });
-      });
+      return (hash >>> 0) / 4294967295;
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
     }
 
     function connectedComponents(nodes, edges) {
@@ -452,7 +781,7 @@
       el.addEventListener('mousemove', event => showTooltip(event, tooltipText(kind, item)));
       el.addEventListener('mouseenter', event => showTooltip(event, tooltipText(kind, item)));
       el.addEventListener('mouseleave', hideTooltip);
-      el.addEventListener('click', () => showGraphDetail(kind, item));
+      el.addEventListener('click', event => showTooltip(event, tooltipText(kind, item)));
     }
 
     function showTooltip(event, text) {
@@ -473,35 +802,48 @@
       document.getElementById('graph-tooltip').style.display = 'none';
     }
 
-    function showGraphDetail(kind, item) {
-      const state = item.state || {};
-      document.getElementById('graph-detail').innerHTML = `
-        <div class="detail-card">
-          <div><span class="pill">${escapeHtml(kind)}</span><span class="pill ${state.faded ? 'warn' : 'ok'}">${state.faded ? 'faded' : 'retrievable'}</span><span class="pill">score ${round(scoreOf(item))}</span></div>
-          <h3>${escapeHtml(item.id)}</h3>
-          <pre>${escapeHtml(kind === 'node' ? item.text : item.text || `${item.from} -> ${item.to}`)}</pre>
-          <pre class="compact-json">${escapeHtml(JSON.stringify(item, null, 2))}</pre>
-        </div>
-      `;
-    }
-
     function tooltipText(kind, item) {
       const state = item.state || {};
       const title = kind === 'node' ? item.text : item.text || `${item.from} -> ${item.to}`;
-      return `${kind.toUpperCase()} · ${item.id}\nscore ${round(scoreOf(item))}${state.faded ? ' · faded' : ''}\n\n${title}\n\nsourceIds: ${(item.sourceIds || []).join(', ')}`;
+      const refs = item.evidenceRefs || (item.sourceIds || []).map(sourceId => ({ sourceId }));
+      const refText = refs.map(ref => `${ref.sourceId || ''}${ref.span ? `:${ref.span.start}-${ref.span.end}` : ''}`).join(', ');
+      return `${kind.toUpperCase()} · ${item.id}\nscore ${round(scoreOf(item))}${state.faded ? ' · faded' : ''}\n\n${title}\n\nevidenceRefs: ${refText}`;
     }
 
-    function nodeColor(score) {
-      if (score >= .95) return '#1d4ed8';
-      if (score >= .55) return '#2dd4bf';
-      if (score >= .25) return '#7dd3fc';
-      return '#bfdbfe';
+    function nodeColor(score, clusterIndex = 0, muted = false) {
+      if (muted) return '#e5e7eb';
+      const hue = CLUSTER_HUES[Math.abs(clusterIndex) % CLUSTER_HUES.length];
+      const intensity = visualScoreIntensity(score);
+      if (intensity < 0.08) return '#e5e7eb';
+      const saturation = 18 + intensity * 70;
+      const lightness = 86 - intensity * 54;
+      return `hsl(${hue} ${saturation}% ${lightness}%)`;
     }
 
-    function edgeColor(score) {
-      if (score >= .8) return '#0f766e';
-      if (score >= .4) return '#38bdf8';
-      return '#93c5fd';
+    function edgeColor(score, clusterIndex = 0, muted = false) {
+      if (muted) return '#c7ced8';
+      const hue = CLUSTER_HUES[Math.abs(clusterIndex) % CLUSTER_HUES.length];
+      const intensity = visualScoreIntensity(score);
+      if (intensity < 0.08) return '#cbd5e1';
+      const saturation = 16 + intensity * 60;
+      const lightness = 82 - intensity * 48;
+      return `hsl(${hue} ${saturation}% ${lightness}%)`;
+    }
+
+    function scoreIntensity(score) {
+      return clamp((Number(score || 0) - DEEP_GRAPH_THRESHOLD) / (1 - DEEP_GRAPH_THRESHOLD), 0, 1);
+    }
+
+    function visualScoreIntensity(score) {
+      const range = canvasGraphState.scoreRange || { min: 0, max: 1 };
+      const span = range.max - range.min;
+      const relative = span > 0.001
+        ? clamp((Number(score || 0) - range.min) / span, 0, 1)
+        : scoreIntensity(score);
+      if (graphDisplayMode !== 'normal' && Number(score || 0) < NORMAL_GRAPH_THRESHOLD) {
+        return clamp(relative * 0.18, 0, 0.18);
+      }
+      return 0.34 + relative * 0.66;
     }
 
     function scoreOf(item) {
@@ -520,6 +862,16 @@
 
     function cleanQuery(text) {
       return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function preview(text, max) {
+      const clean = cleanQuery(text);
+      return clean.length <= max ? clean : clean.slice(0, max - 1) + '…';
+    }
+
+    function shortId(id) {
+      const text = String(id || '');
+      return text.length <= 12 ? text : `${text.slice(0, 8)}…`;
     }
 
     function smallIds(label, ids) {
@@ -550,6 +902,401 @@
     function escapeHtml(value) {
       return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
+
+    const canvasGraphState = {
+      graphKey: '',
+      nodes: [],
+      edges: [],
+      transform: { x: 0, y: 0, k: 1 },
+      pointer: { x: 0, y: 0, worldX: 0, worldY: 0 },
+      draggingNode: null,
+      panning: false,
+      panStart: null,
+      alpha: 0,
+      frameStarted: false,
+      scoreRange: { min: 0, max: 1 },
+    };
+
+    function drawGraph() {
+      const canvas = document.getElementById('graph');
+      if (!canvas) return;
+      const fullNodes = graphData.nodes || [];
+      const fullEdges = graphData.edges || [];
+      const filtered = filterGraphForMode(fullNodes, fullEdges);
+      updateGraphSummary(fullNodes, fullEdges, filtered);
+      const key = `${graphDisplayMode}:${filtered.nodes.map(n => n.id).join('|')}:${filtered.edges.map(e => e.id).join('|')}`;
+      if (canvasGraphState.graphKey !== key) {
+        canvasGraphState.graphKey = key;
+        initializeCanvasGraph(filtered.nodes, filtered.edges);
+      }
+      resizeGraphCanvas();
+      renderCanvasGraph();
+      startCanvasGraphFrame();
+    }
+
+    function initializeCanvasGraph(rawNodes, rawEdges) {
+      const communities = detectGraphCommunities(rawNodes, rawEdges);
+      const clusterByNode = new Map();
+      communities.forEach((community, clusterIndex) => {
+        for (const node of community) clusterByNode.set(node.id, clusterIndex);
+      });
+      const nodes = rawNodes.map((node, index) => ({
+        ...node,
+        index,
+        cluster: clusterByNode.get(node.id) || 0,
+        radius: isMutedInCurrentMode(node) ? 7 : 10 + Math.min(9, scoreIntensity(scoreOf(node)) * 9),
+        labelWidth: Math.min(280, 40 + cleanQuery(node.text || node.id).length * 6.4),
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+      }));
+      const nodeScores = nodes.map(node => scoreOf(node));
+      canvasGraphState.scoreRange = {
+        min: nodeScores.length ? Math.min(...nodeScores) : 0,
+        max: nodeScores.length ? Math.max(...nodeScores) : 1,
+      };
+      const byId = new Map(nodes.map(node => [node.id, node]));
+      const edges = rawEdges
+        .map(edge => ({ ...edge, source: byId.get(edge.from), target: byId.get(edge.to) }))
+        .filter(edge => edge.source && edge.target);
+
+      canvasGraphState.nodes = nodes;
+      canvasGraphState.edges = edges;
+      const clusters = [...new Set(nodes.map(node => node.cluster))].sort((a, b) => a - b);
+      const clusterIndex = new Map(clusters.map((cluster, index) => [cluster, index]));
+      const wrap = document.querySelector('.graph-wrap');
+      const w = Math.max(320, wrap?.clientWidth || 1200);
+      const h = Math.max(320, wrap?.clientHeight || 760);
+      const orbitX = Math.max(120, w * 0.28);
+      const orbitY = Math.max(100, h * 0.24);
+      for (const node of nodes) {
+        const ci = clusterIndex.get(node.cluster) || 0;
+        const angle = clusters.length <= 1 ? 0 : (Math.PI * 2 * ci) / clusters.length - Math.PI / 2;
+        const local = node.index * 2.399963229728653 + hashNumber(node.id) * Math.PI * 2;
+        const spread = 30 + (node.index % 9) * 8;
+        node.x = Math.cos(angle) * orbitX + Math.cos(local) * spread;
+        node.y = Math.sin(angle) * orbitY + Math.sin(local) * spread;
+      }
+      canvasGraphState.alpha = 1;
+      fitCanvasGraph();
+    }
+
+    function resizeGraphCanvas() {
+      const canvas = document.getElementById('graph');
+      const wrap = canvas?.parentElement;
+      if (!canvas || !wrap) return;
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const width = Math.max(320, wrap.clientWidth || 1200);
+      const height = Math.max(320, wrap.clientHeight || 760);
+      if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        canvas.style.width = width + 'px';
+        canvas.style.height = height + 'px';
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+    }
+
+    function tickCanvasGraph() {
+      const state = canvasGraphState;
+      if (state.alpha < 0.004) return;
+      const nodes = state.nodes;
+      const edges = state.edges;
+      const clusters = [...new Set(nodes.map(node => node.cluster))].sort((a, b) => a - b);
+      const clusterIndex = new Map(clusters.map((cluster, index) => [cluster, index]));
+
+      for (const edge of edges) {
+        const dx = edge.target.x - edge.source.x;
+        const dy = edge.target.y - edge.source.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const sameCluster = edge.source.cluster === edge.target.cluster;
+        const desired = sameCluster ? 95 : 165;
+        const strength = sameCluster ? 0.013 : 0.009;
+        const force = (dist - desired) * strength * state.alpha;
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        edge.source.vx += fx;
+        edge.source.vy += fy;
+        edge.target.vx -= fx;
+        edge.target.vy -= fy;
+      }
+
+      for (let i = 0; i < nodes.length; i += 1) {
+        for (let j = i + 1; j < nodes.length; j += 1) {
+          const a = nodes[i];
+          const b = nodes[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.hypot(dx, dy) || 1;
+          const labelPad = Math.max(a.labelWidth, b.labelWidth) * 0.13;
+          const minDist = a.radius + b.radius + 24 + labelPad;
+          const sameCluster = a.cluster === b.cluster;
+          const repulse = Math.min(6, (minDist * minDist) / (dist * dist)) * state.alpha * (sameCluster ? 0.85 : 1.18);
+          const fx = (dx / dist) * repulse;
+          const fy = (dy / dist) * repulse;
+          a.vx -= fx;
+          a.vy -= fy;
+          b.vx += fx;
+          b.vy += fy;
+          if (dist < minDist) {
+            const push = (minDist - dist) * 0.018 * state.alpha;
+            a.vx -= (dx / dist) * push;
+            a.vy -= (dy / dist) * push;
+            b.vx += (dx / dist) * push;
+            b.vy += (dy / dist) * push;
+          }
+        }
+      }
+
+      for (const node of nodes) {
+        const ci = clusterIndex.get(node.cluster) || 0;
+        const angle = clusters.length <= 1 ? 0 : (Math.PI * 2 * ci) / clusters.length - Math.PI / 2;
+        const gx = Math.cos(angle) * 210;
+        const gy = Math.sin(angle) * 150;
+        node.vx += (gx - node.x) * 0.0018 * state.alpha;
+        node.vy += (gy - node.y) * 0.0018 * state.alpha;
+        node.vx += -node.x * 0.00028 * state.alpha;
+        node.vy += -node.y * 0.00028 * state.alpha;
+      }
+
+      for (const node of nodes) {
+        if (node === state.draggingNode) {
+          node.x = state.pointer.worldX;
+          node.y = state.pointer.worldY;
+          node.vx = 0;
+          node.vy = 0;
+          continue;
+        }
+        node.vx *= 0.82;
+        node.vy *= 0.82;
+        node.x += node.vx;
+        node.y += node.vy;
+      }
+      state.alpha *= 0.986;
+    }
+
+    function renderCanvasGraph() {
+      const canvas = document.getElementById('graph');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const rect = canvas.getBoundingClientRect();
+      const state = canvasGraphState;
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.save();
+      ctx.translate(state.transform.x, state.transform.y);
+      ctx.scale(state.transform.k, state.transform.k);
+
+      ctx.lineCap = 'round';
+      for (const edge of state.edges) {
+        const dx = edge.target.x - edge.source.x;
+        const dy = edge.target.y - edge.source.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const sx = edge.source.x + (dx / dist) * edge.source.radius;
+        const sy = edge.source.y + (dy / dist) * edge.source.radius;
+        const tx = edge.target.x - (dx / dist) * edge.target.radius;
+        const ty = edge.target.y - (dy / dist) * edge.target.radius;
+        const muted = isMutedInCurrentMode(edge);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(tx, ty);
+        const intensity = visualScoreIntensity(scoreOf(edge));
+        ctx.strokeStyle = edgeColor(scoreOf(edge), edge.source.cluster, muted);
+        ctx.globalAlpha = muted ? 0.18 : 0.22 + intensity * 0.58;
+        ctx.lineWidth = (muted ? 0.8 : 0.9 + intensity * 3.4) / Math.sqrt(state.transform.k);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      for (const node of state.nodes) {
+        const muted = isMutedInCurrentMode(node);
+        const intensity = visualScoreIntensity(scoreOf(node));
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius + 3 + intensity * 2, 0, Math.PI * 2);
+        ctx.fillStyle = muted ? 'rgba(248,250,252,.75)' : `rgba(255,255,255,${0.72 + intensity * 0.22})`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+        ctx.fillStyle = nodeColor(scoreOf(node), node.cluster, muted);
+        ctx.fill();
+        ctx.lineWidth = muted ? 1 : 1.1 + intensity * 2.2;
+        ctx.strokeStyle = muted ? 'rgba(203,213,225,.8)' : 'rgba(255,255,255,.95)';
+        ctx.stroke();
+      }
+
+      ctx.font = '650 12px system-ui, -apple-system, Segoe UI, sans-serif';
+      ctx.textBaseline = 'middle';
+      for (const node of state.nodes) {
+        const muted = isMutedInCurrentMode(node);
+        if (state.transform.k < 0.45 && scoreOf(node) < 0.55) continue;
+        const label = labelFor(node.text || node.id);
+        const x = node.x + node.radius + 7;
+        const y = node.y;
+        const width = Math.min(250, ctx.measureText(label).width + 10);
+        ctx.fillStyle = muted ? 'rgba(248,250,252,.56)' : 'rgba(248,250,252,.78)';
+        roundCanvasRect(ctx, x - 4, y - 10, width, 20, 5);
+        ctx.fill();
+        ctx.fillStyle = muted ? '#94a3b8' : '#26354a';
+        ctx.fillText(label, x, y);
+      }
+      ctx.restore();
+    }
+
+    function roundCanvasRect(ctx, x, y, width, height, radius) {
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.arcTo(x + width, y, x + width, y + height, radius);
+      ctx.arcTo(x + width, y + height, x, y + height, radius);
+      ctx.arcTo(x, y + height, x, y, radius);
+      ctx.arcTo(x, y, x + width, y, radius);
+      ctx.closePath();
+    }
+
+    function startCanvasGraphFrame() {
+      if (canvasGraphState.frameStarted) return;
+      canvasGraphState.frameStarted = true;
+      function frame() {
+        for (let i = 0; i < 3; i += 1) tickCanvasGraph();
+        renderCanvasGraph();
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+
+    function screenToWorld(x, y) {
+      const state = canvasGraphState;
+      return {
+        x: (x - state.transform.x) / state.transform.k,
+        y: (y - state.transform.y) / state.transform.k,
+      };
+    }
+
+    function findCanvasNode(worldX, worldY) {
+      const nodes = canvasGraphState.nodes;
+      for (let i = nodes.length - 1; i >= 0; i -= 1) {
+        const node = nodes[i];
+        if (Math.hypot(node.x - worldX, node.y - worldY) <= node.radius + 8) return node;
+      }
+      return null;
+    }
+
+    function findCanvasEdge(worldX, worldY) {
+      let best = null;
+      let bestDistance = Infinity;
+      for (const edge of canvasGraphState.edges) {
+        const distance = pointToSegmentDistance(worldX, worldY, edge.source.x, edge.source.y, edge.target.x, edge.target.y);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = edge;
+        }
+      }
+      return bestDistance <= 7 / Math.sqrt(canvasGraphState.transform.k) ? best : null;
+    }
+
+    function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const length2 = dx * dx + dy * dy;
+      if (length2 === 0) return Math.hypot(px - x1, py - y1);
+      const t = clamp(((px - x1) * dx + (py - y1) * dy) / length2, 0, 1);
+      return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+    }
+
+    function fitCanvasGraph() {
+      const canvas = document.getElementById('graph');
+      const rect = canvas?.getBoundingClientRect();
+      const nodes = canvasGraphState.nodes;
+      if (!rect || nodes.length === 0) return;
+      const minX = Math.min(...nodes.map(node => node.x)) - 180;
+      const maxX = Math.max(...nodes.map(node => node.x)) + 280;
+      const minY = Math.min(...nodes.map(node => node.y)) - 120;
+      const maxY = Math.max(...nodes.map(node => node.y)) + 140;
+      const w = maxX - minX || 1;
+      const h = maxY - minY || 1;
+      const k = Math.min(1.35, Math.max(0.18, Math.min(rect.width / w, rect.height / h)));
+      canvasGraphState.transform.k = k;
+      canvasGraphState.transform.x = rect.width / 2 - ((minX + maxX) / 2) * k;
+      canvasGraphState.transform.y = rect.height / 2 - ((minY + maxY) / 2) * k;
+    }
+
+    function installCanvasGraphInteractions() {
+      const canvas = document.getElementById('graph');
+      if (!canvas || canvas.dataset.interactionsInstalled) return;
+      canvas.dataset.interactionsInstalled = '1';
+      canvas.addEventListener('pointerdown', event => {
+        canvas.setPointerCapture(event.pointerId);
+        const world = screenToWorld(event.offsetX, event.offsetY);
+        canvasGraphState.pointer = { x: event.offsetX, y: event.offsetY, worldX: world.x, worldY: world.y };
+        canvasGraphState.draggingNode = findCanvasNode(world.x, world.y);
+        if (!canvasGraphState.draggingNode) {
+          canvasGraphState.panning = true;
+          canvasGraphState.panStart = {
+            x: event.clientX,
+            y: event.clientY,
+            tx: canvasGraphState.transform.x,
+            ty: canvasGraphState.transform.y,
+          };
+        }
+        canvasGraphState.alpha = Math.max(canvasGraphState.alpha, 0.42);
+        canvas.classList.add('dragging');
+      });
+      canvas.addEventListener('pointermove', event => {
+        const world = screenToWorld(event.offsetX, event.offsetY);
+        canvasGraphState.pointer = { x: event.offsetX, y: event.offsetY, worldX: world.x, worldY: world.y };
+        if (canvasGraphState.panning && canvasGraphState.panStart) {
+          canvasGraphState.transform.x = canvasGraphState.panStart.tx + event.clientX - canvasGraphState.panStart.x;
+          canvasGraphState.transform.y = canvasGraphState.panStart.ty + event.clientY - canvasGraphState.panStart.y;
+          return;
+        }
+        const node = findCanvasNode(world.x, world.y);
+        const edge = node ? null : findCanvasEdge(world.x, world.y);
+        if (node) showTooltip(event, tooltipText('node', node));
+        else if (edge) showTooltip(event, tooltipText('edge', edge));
+        else hideTooltip();
+      });
+      canvas.addEventListener('pointerup', () => {
+        canvasGraphState.draggingNode = null;
+        canvasGraphState.panning = false;
+        canvasGraphState.panStart = null;
+        canvas.classList.remove('dragging');
+      });
+      canvas.addEventListener('pointerleave', () => {
+        hideTooltip();
+      });
+      canvas.addEventListener('click', event => {
+        const world = screenToWorld(event.offsetX, event.offsetY);
+        const node = findCanvasNode(world.x, world.y);
+        if (node) {
+          node.vx += (hashNumber(node.id + ':x') - 0.5) * 24;
+          node.vy += (hashNumber(node.id + ':y') - 0.5) * 24;
+          canvasGraphState.alpha = Math.max(canvasGraphState.alpha, 0.55);
+        }
+      });
+      canvas.addEventListener('wheel', event => {
+        event.preventDefault();
+        const before = screenToWorld(event.offsetX, event.offsetY);
+        const zoom = Math.exp(-event.deltaY * 0.001);
+        canvasGraphState.transform.k = Math.max(0.18, Math.min(3.5, canvasGraphState.transform.k * zoom));
+        canvasGraphState.transform.x = event.offsetX - before.x * canvasGraphState.transform.k;
+        canvasGraphState.transform.y = event.offsetY - before.y * canvasGraphState.transform.k;
+      }, { passive: false });
+      window.addEventListener('resize', () => {
+        resizeGraphCanvas();
+        fitCanvasGraph();
+      });
+    }
+
+    document.querySelectorAll('[data-graph-mode]').forEach(button => {
+      button.addEventListener('click', () => {
+        graphDisplayMode = button.getAttribute('data-graph-mode') || 'normal';
+        document.querySelectorAll('[data-graph-mode]').forEach(next => {
+          next.classList.toggle('active', next === button);
+        });
+        drawGraph();
+      });
+    });
+    installCanvasGraphInteractions();
 
     loadAll();
     setInterval(loadRuns, 10000);

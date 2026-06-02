@@ -59,6 +59,7 @@ describe('runtime characterization', () => {
         'check_subagent',
         'edit_file',
         'execute_shell',
+        'gauzmem_search',
         'glob',
         'grep',
         'read_file',

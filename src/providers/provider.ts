@@ -17,6 +17,7 @@ export interface StreamCallbacks {
 
 export interface AIRequestOptions {
   signal?: AbortSignal;
+  toolChoice?: string;
 }
 
 /**

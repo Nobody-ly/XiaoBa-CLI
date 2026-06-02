@@ -1,6 +1,6 @@
 import type { ContentBlock, Message } from '../types';
 import type { RunResult } from '../core/conversation-runner';
-import { appendJsonl, readJsonl, writeJsonl } from './jsonl';
+import { appendJsonl, readJsonl } from './jsonl';
 import { GauzMemFiles, ensureGauzMemDirs } from './paths';
 import { normalizeMemoryText, stableHash, truncateText } from './hash';
 import type { GauzMemSourceRecord, GauzMemSourceWindow } from './types';
@@ -11,6 +11,15 @@ export interface AppendTurnSourceParams {
   turnId: string;
   userInput: string | ContentBlock[];
   result: RunResult;
+}
+
+export interface GauzMemSourceTurn {
+  turnKey: string;
+  sessionKey: string;
+  sessionType?: string;
+  turnId: string;
+  timestamp: string;
+  records: GauzMemSourceRecord[];
 }
 
 export class GauzMemSourceJournal {
@@ -35,43 +44,84 @@ export class GauzMemSourceJournal {
     return Array.from(deduped.values());
   }
 
-  searchWindows(terms: string[], maxWindows = 16): GauzMemSourceWindow[] {
-    const loweredTerms = terms
-      .map(term => term.trim().toLowerCase())
-      .filter(term => term.length > 0);
-    if (loweredTerms.length === 0) return [];
+  readTurns(): GauzMemSourceTurn[] {
+    const groups = new Map<string, GauzMemSourceRecord[]>();
+    for (const source of this.readAll()) {
+      const turnKey = `${source.sessionKey}:${source.turnId}`;
+      const records = groups.get(turnKey) || [];
+      records.push(source);
+      groups.set(turnKey, records);
+    }
+    return Array.from(groups.entries())
+      .map(([turnKey, records]) => {
+        const sorted = [...records].sort((a, b) => a.sourceRef.index - b.sourceRef.index);
+        const first = sorted[0];
+        const timestamp = sorted
+          .map(record => record.timestamp)
+          .sort()[sorted.length - 1] || first.timestamp;
+        return {
+          turnKey,
+          sessionKey: first.sessionKey,
+          sessionType: first.sessionType,
+          turnId: first.turnId,
+          timestamp,
+          records: sorted,
+        };
+      })
+      .sort((a, b) =>
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+        || a.turnKey.localeCompare(b.turnKey)
+      );
+  }
 
-    const windows: GauzMemSourceWindow[] = [];
+  searchWindows(terms: string[], maxWindows = 12, maxWindowChars = 500): GauzMemSourceWindow[] {
+    const normalizedTerms = terms
+      .map((term, index) => ({ term: term.trim(), lowered: term.trim().toLowerCase(), index }))
+      .filter(item => item.lowered.length > 0);
+    if (normalizedTerms.length === 0) return [];
+
+    const windowMap = new Map<string, GauzMemSourceWindow>();
     for (const source of this.readAll().reverse()) {
       const lower = source.text.toLowerCase();
-      if (!loweredTerms.some(term => lower.includes(term))) continue;
-      const window = this.toWindow(source, loweredTerms);
-      windows.push(window);
-      if (windows.length >= maxWindows) break;
+      const hits: Array<{ start: number; end: number }> = [];
+      for (const term of normalizedTerms) {
+        let fromIndex = 0;
+        while (fromIndex < lower.length) {
+          const hit = lower.indexOf(term.lowered, fromIndex);
+          if (hit < 0) break;
+          hits.push({ start: hit, end: hit + term.lowered.length });
+          fromIndex = hit + Math.max(1, term.lowered.length);
+        }
+      }
+      for (const span of this.groupHitSpans(hits, source.text, maxWindowChars)) {
+        const window = this.toWindowForSpan(source, span, normalizedTerms);
+        windowMap.set(window.windowId, window);
+      }
     }
 
-    if (windows.length > 0) {
-      writeJsonl(GauzMemFiles.sourceWindows(), windows);
-    }
+    const windows = Array.from(windowMap.values())
+      .sort((a, b) =>
+        b.distinctTermCount - a.distinctTermCount
+        || a.firstMatchedTermIndex - b.firstMatchedTermIndex
+        || new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        || a.windowId.localeCompare(b.windowId)
+      )
+      .slice(0, maxWindows);
+
     return windows;
   }
 
   private buildTurnRecords(params: AppendTurnSourceParams, timestamp: string): GauzMemSourceRecord[] {
     const records: GauzMemSourceRecord[] = [];
     const userText = this.contentToString(params.userInput);
-    records.push(this.createRecord(params, timestamp, records.length, 'user', userText));
+    records.push(this.createRecord(params, timestamp, records.length, 'user', 'user_text', userText));
 
     const assistantText = params.result.response || '';
-    records.push(this.createRecord(params, timestamp, records.length, 'assistant', assistantText));
+    records.push(this.createRecord(params, timestamp, records.length, 'assistant', 'assistant_text', assistantText));
 
     const toolCalls = this.extractToolCalls(params.result.newMessages);
     for (const toolCall of toolCalls) {
-      const text = [
-        `Tool: ${toolCall.name}`,
-        `Arguments: ${toolCall.arguments}`,
-        `Result: ${toolCall.result}`,
-      ].join('\n');
-      records.push(this.createRecord(params, timestamp, records.length, 'tool', text, toolCall));
+      records.push(this.createRecord(params, timestamp, records.length, 'tool', 'tool_result', toolCall.result, toolCall));
     }
 
     return records;
@@ -82,6 +132,7 @@ export class GauzMemSourceJournal {
     timestamp: string,
     index: number,
     role: GauzMemSourceRecord['role'],
+    blockType: NonNullable<GauzMemSourceRecord['blockType']>,
     text: string,
     toolCall?: GauzMemSourceRecord['toolCall'],
   ): GauzMemSourceRecord {
@@ -93,6 +144,7 @@ export class GauzMemSourceJournal {
       sessionType: params.sessionType,
       turnId: params.turnId,
       role,
+      blockType,
       text: truncateText(text, 6000),
       timestamp,
       ...(toolCall && { toolCall }),
@@ -105,24 +157,147 @@ export class GauzMemSourceJournal {
     };
   }
 
-  private toWindow(source: GauzMemSourceRecord, terms: string[]): GauzMemSourceWindow {
-    const lower = source.text.toLowerCase();
-    const firstHit = terms
-      .map(term => lower.indexOf(term))
-      .filter(idx => idx >= 0)
-      .sort((a, b) => a - b)[0] ?? 0;
-    const start = Math.max(0, firstHit - 500);
-    const end = Math.min(source.text.length, firstHit + 1200);
-    const text = source.text.slice(start, end);
+  private toWindow(
+    source: GauzMemSourceRecord,
+    hitStart: number,
+    hitEnd: number,
+    terms: Array<{ term: string; lowered: string; index: number }>,
+    maxWindowChars: number,
+  ): GauzMemSourceWindow {
+    const span = this.blockSpanForHit(source.text, hitStart, hitEnd, maxWindowChars);
+    const text = source.text.slice(span.start, span.end).trim();
+    const lower = text.toLowerCase();
+    const matched = terms.filter(term => lower.includes(term.lowered));
+    const matchedTerms = matched.map(term => term.term);
+    const firstMatchedTermIndex = matched.reduce(
+      (min, term) => Math.min(min, term.index),
+      Number.POSITIVE_INFINITY,
+    );
     return {
-      windowId: 'gzw_' + stableHash(`${source.sourceId}:${start}:${end}`),
+      windowId: 'gzw_' + stableHash(`${source.sourceId}:${span.start}:${span.end}`),
       sourceId: source.sourceId,
       sessionKey: source.sessionKey,
       sessionType: source.sessionType,
       text,
       timestamp: source.timestamp,
       sourceRef: source.sourceRef,
+      blockType: source.blockType || this.blockTypeFromRole(source.role),
+      matchedTerms,
+      distinctTermCount: matchedTerms.length,
+      firstMatchedTermIndex: Number.isFinite(firstMatchedTermIndex) ? firstMatchedTermIndex : terms.length,
+      span,
     };
+  }
+
+  private toWindowForSpan(
+    source: GauzMemSourceRecord,
+    span: { start: number; end: number },
+    terms: Array<{ term: string; lowered: string; index: number }>,
+  ): GauzMemSourceWindow {
+    const text = source.text.slice(span.start, span.end).trim();
+    const lower = text.toLowerCase();
+    const matched = terms.filter(term => lower.includes(term.lowered));
+    const matchedTerms = matched.map(term => term.term);
+    const firstMatchedTermIndex = matched.reduce(
+      (min, term) => Math.min(min, term.index),
+      Number.POSITIVE_INFINITY,
+    );
+    return {
+      windowId: 'gzw_' + stableHash(`${source.sourceId}:${span.start}:${span.end}`),
+      sourceId: source.sourceId,
+      sessionKey: source.sessionKey,
+      sessionType: source.sessionType,
+      text,
+      timestamp: source.timestamp,
+      sourceRef: source.sourceRef,
+      blockType: source.blockType || this.blockTypeFromRole(source.role),
+      matchedTerms,
+      distinctTermCount: matchedTerms.length,
+      firstMatchedTermIndex: Number.isFinite(firstMatchedTermIndex) ? firstMatchedTermIndex : terms.length,
+      span,
+    };
+  }
+
+  private groupHitSpans(
+    hits: Array<{ start: number; end: number }>,
+    text: string,
+    maxChars: number,
+  ): Array<{ start: number; end: number }> {
+    if (hits.length === 0) return [];
+    const sorted = [...hits].sort((a, b) => a.start - b.start || a.end - b.end);
+    const groups: Array<{ start: number; end: number }> = [];
+    let current = { ...sorted[0] };
+    for (const hit of sorted.slice(1)) {
+      const mergedStart = Math.min(current.start, hit.start);
+      const mergedEnd = Math.max(current.end, hit.end);
+      if (mergedEnd - mergedStart <= maxChars) {
+        current = { start: mergedStart, end: mergedEnd };
+      } else {
+        groups.push(current);
+        current = { ...hit };
+      }
+    }
+    groups.push(current);
+    return this.mergeExpandedSpans(groups.map(group => this.blockSpanForRange(text, group.start, group.end, maxChars)));
+  }
+
+  private mergeExpandedSpans(spans: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+    if (spans.length <= 1) return spans;
+    const sorted = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
+    const merged: Array<{ start: number; end: number }> = [];
+    let current = { ...sorted[0] };
+    for (const span of sorted.slice(1)) {
+      if (span.start <= current.end) {
+        current = { start: current.start, end: Math.max(current.end, span.end) };
+      } else {
+        merged.push(current);
+        current = { ...span };
+      }
+    }
+    merged.push(current);
+    return merged;
+  }
+
+  private blockSpanForHit(text: string, hitStart: number, hitEnd: number, maxChars: number): { start: number; end: number } {
+    return this.blockSpanForRange(text, hitStart, hitEnd, maxChars);
+  }
+
+  private blockSpanForRange(text: string, hitStart: number, hitEnd: number, maxChars: number): { start: number; end: number } {
+    let start = 0;
+    let end = text.length;
+
+    if (text.length > maxChars) {
+      const hitLength = Math.min(maxChars, Math.max(1, hitEnd - hitStart));
+      const side = Math.max(0, Math.floor((maxChars - hitLength) / 2));
+      start = Math.max(0, hitStart - side);
+      end = Math.min(text.length, start + maxChars);
+      if (end < hitEnd) {
+        end = Math.min(text.length, hitEnd);
+        start = Math.max(0, end - maxChars);
+      }
+      start = this.trimLeftToBoundary(text, start);
+      end = this.trimRightToBoundary(text, end);
+    }
+
+    while (start < end && /\s/.test(text[start])) start += 1;
+    while (end > start && /\s/.test(text[end - 1])) end -= 1;
+    return { start, end };
+  }
+
+  private trimLeftToBoundary(text: string, start: number): number {
+    for (let i = start; i < text.length; i += 1) {
+      if (/\s/.test(text[i])) continue;
+      return i;
+    }
+    return start;
+  }
+
+  private trimRightToBoundary(text: string, end: number): number {
+    for (let i = end; i > 0; i -= 1) {
+      if (/\s/.test(text[i - 1])) continue;
+      return i;
+    }
+    return end;
   }
 
   private extractToolCalls(messages: Message[]): NonNullable<GauzMemSourceRecord['toolCall']>[] {
@@ -154,5 +329,11 @@ export class GauzMemSourceJournal {
     if (typeof content === 'string') return content;
     if (!Array.isArray(content)) return '';
     return content.map(block => block.type === 'text' ? block.text : '[image]').join('');
+  }
+
+  private blockTypeFromRole(role: GauzMemSourceRecord['role']): NonNullable<GauzMemSourceRecord['blockType']> {
+    if (role === 'user') return 'user_text';
+    if (role === 'assistant') return 'assistant_text';
+    return 'tool_result';
   }
 }
