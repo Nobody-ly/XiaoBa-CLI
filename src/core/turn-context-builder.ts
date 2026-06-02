@@ -9,13 +9,17 @@ import {
   TRANSIENT_SUBAGENT_STATUS_PREFIX,
   buildSubAgentStatusMessage,
 } from './sub-agent-observation';
+import { GauzMemService } from '../gauzmem/service';
 
 const TRANSIENT_PLAN_STATUS_PREFIX = '[transient_plan_status]';
 const TRANSIENT_RUNNER_HINT_PREFIX = '[transient_runner_hint]';
 const TRANSIENT_SOFT_CHECK_PREFIX = '[transient_soft_check]';
+const TRANSIENT_GAUZMEM_RECALL_PREFIX = '[transient_gauzmem_recall]';
+const GAUZMEM_PASSIVE_TIMEOUT_MS = Number(process.env.GAUZMEM_PASSIVE_TIMEOUT_MS || 20000);
 
 export interface BuildTurnContextParams {
   sessionKey: string;
+  sessionType?: string;
   durableMessages: Message[];
   runtimeFeedback: string[];
   skillRuntime: SessionSkillRuntime;
@@ -38,6 +42,7 @@ export class TurnContextBuilder {
     this.injectRuntimeFeedback(contextMessages, params.runtimeFeedback);
     this.injectPlanStatus(contextMessages, params.planRuntime);
     this.injectSubAgentStatus(contextMessages, params.sessionKey);
+    await this.injectGauzMemRecall(contextMessages, params.sessionKey, params.sessionType);
 
     await params.skillRuntime.reloadSkills();
     const skillsListMsg = params.skillRuntime.buildSkillsListMessage();
@@ -59,6 +64,7 @@ export class TurnContextBuilder {
       if (msg.content.startsWith(TRANSIENT_PLAN_STATUS_PREFIX)) return false;
       if (msg.content.startsWith(TRANSIENT_RUNNER_HINT_PREFIX)) return false;
       if (msg.content.startsWith(TRANSIENT_SOFT_CHECK_PREFIX)) return false;
+      if (msg.content.startsWith(TRANSIENT_GAUZMEM_RECALL_PREFIX)) return false;
       if (msg.content.startsWith(TRANSIENT_SKILLS_LIST_PREFIX)) return false;
       return true;
     });
@@ -91,6 +97,28 @@ export class TurnContextBuilder {
     this.insertBeforeLastUser(messages, statusMessage);
   }
 
+  private async injectGauzMemRecall(messages: Message[], sessionKey: string, sessionType?: string): Promise<void> {
+    const lastUser = [...messages].reverse().find(message =>
+      message.role === 'user' && !message.__injected && typeof message.content === 'string'
+    );
+    const query = typeof lastUser?.content === 'string' ? lastUser.content.trim() : '';
+    if (!query) return;
+
+    const result = await withTimeout(GauzMemService.getInstance().recall({
+      callType: 'passive',
+      query,
+      sessionKey,
+      sessionType,
+      durableMessages: messages,
+    }), GAUZMEM_PASSIVE_TIMEOUT_MS);
+    if (!result?.message) return;
+    this.insertBeforeLastUser(messages, {
+      role: 'user',
+      content: result.message,
+      __injected: true,
+    });
+  }
+
   private extractRuntimeFeedback(messages: Message[]): string[] {
     return messages
       .filter(message => message.__runtimeFeedback && isRuntimeFeedbackContent(message.content))
@@ -105,6 +133,16 @@ export class TurnContextBuilder {
     }
     messages.splice(lastUserIdx, 0, ...inserted);
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<null>(resolve => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {

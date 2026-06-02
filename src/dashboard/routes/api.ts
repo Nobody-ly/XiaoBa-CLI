@@ -35,6 +35,7 @@ import { resolveCatsCoRuntimeConfig } from '../../catscompany/runtime-config';
 import { consumeLocalFileGrant, validateLocalFileGrant } from '../local-file-grants';
 import { registerSkillHubRoutes } from './skillhub';
 import { registerPetRoutes } from './pet';
+import { registerGauzMemRoutes } from './gauzmem';
 import { SkillHubService } from '../../skillhub/service';
 import {
   computeLocalSkillContentHash,
@@ -1361,6 +1362,7 @@ export function createApiRouter(serviceManager: ServiceManager, updateController
   const router = Router();
   registerSkillHubRoutes(router, { getCatsCoAuth: getCatsCoAuthForSkillHub });
   registerPetRoutes(router);
+  registerGauzMemRoutes(router);
 
   // ==================== 总览 ====================
 

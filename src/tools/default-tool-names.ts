@@ -15,6 +15,7 @@ export const DEFAULT_TOOL_NAMES = [
   'update_plan',
   'record_decision',
   'share_skillhub_skill',
+  'gauzmem_search',
   'skill',
 ] as const;
 

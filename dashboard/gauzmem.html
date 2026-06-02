@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GauzMem Dashboard</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --line: #dbe3ef;
+      --text: #172033;
+      --muted: #66758f;
+      --blue: #2563eb;
+      --green: #0f9f6e;
+      --red: #dc2626;
+      --amber: #b7791f;
+      --shadow: 0 12px 34px rgba(31, 45, 70, .08);
+    }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(255,255,255,.94);
+      border-bottom: 1px solid var(--line);
+      padding: 14px 22px;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      backdrop-filter: blur(10px);
+    }
+    h1, h2, h3 { margin: 0; }
+    h1 { font-size: 20px; letter-spacing: 0; }
+    h2 { font-size: 15px; }
+    h3 { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    main { padding: 18px; display: grid; gap: 16px; }
+    button {
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      color: var(--text);
+    }
+    button:hover { border-color: var(--blue); color: #1d4ed8; }
+    .grid { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+    .muted { color: var(--muted); font-size: 12px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #edf4ff;
+      color: #1d4ed8;
+      margin: 2px;
+      white-space: nowrap;
+    }
+    .pill.ok { background: #dcfce7; color: #15803d; }
+    .pill.err { background: #fee2e2; color: #b91c1c; }
+    .pill.warn { background: #fef3c7; color: #92400e; }
+    .run-list { max-height: 760px; overflow: auto; padding-right: 4px; }
+    .run {
+      padding: 11px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      margin-bottom: 9px;
+      cursor: pointer;
+      background: #fff;
+      transition: border-color .15s, box-shadow .15s, background .15s;
+    }
+    .run:hover { border-color: #93c5fd; box-shadow: 0 7px 20px rgba(37,99,235,.08); }
+    .run.active { border-color: var(--blue); background: #eff6ff; }
+    .run-title {
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      font-size: 13px;
+      line-height: 1.45;
+      font-weight: 750;
+    }
+    .run-meta { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .section { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 10px;
+      max-height: 240px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .flow, .card-list { display: grid; gap: 8px; }
+    .step, .item {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfdff;
+    }
+    .compact-json { max-height: 160px; }
+    .graph-wrap {
+      height: 760px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 20% 18%, rgba(37,99,235,.07), transparent 28%),
+        linear-gradient(180deg, #ffffff, #f9fbff);
+      position: relative;
+      overflow: hidden;
+    }
+    svg { width: 100%; height: 100%; display: block; }
+    .node-label {
+      pointer-events: none;
+      fill: #243149;
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .node-label.faded { fill: #a1aab8; font-weight: 500; }
+    .cluster-label {
+      fill: #73829a;
+      font-size: 11px;
+      font-weight: 700;
+      pointer-events: none;
+    }
+    .tooltip {
+      position: fixed;
+      z-index: 50;
+      max-width: 440px;
+      display: none;
+      background: rgba(17, 24, 39, .96);
+      color: #f8fafc;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 18px 50px rgba(15,23,42,.24);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      pointer-events: none;
+    }
+    .detail {
+      min-height: 80px;
+      margin-top: 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .detail-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfdff;
+    }
+    .empty { color: var(--muted); border: 1px dashed #cbd5e1; border-radius: 8px; padding: 18px; }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .run-list { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>GauzMem</h1>
+      <div class="muted">长期图记忆调试面板</div>
+    </div>
+    <div class="toolbar">
+      <button onclick="loadAll()">刷新</button>
+      <button onclick="probe()">Probe LLM</button>
+      <button onclick="location.href='/'">返回 Dashboard</button>
+    </div>
+  </header>
+  <main>
+    <section class="panel" id="status">加载中...</section>
+    <div class="grid">
+      <section class="panel">
+        <h2>Runs</h2>
+        <div id="runs" class="run-list"></div>
+      </section>
+      <section class="panel">
+        <h2>Run Replay</h2>
+        <div id="run-detail" class="muted">选择一次 run 查看流程。</div>
+      </section>
+    </div>
+    <section class="panel">
+      <h2>Persistent Graph</h2>
+      <div class="graph-wrap">
+        <svg id="graph"></svg>
+      </div>
+      <div id="graph-tooltip" class="tooltip"></div>
+      <div id="graph-detail" class="detail">
+        <div class="empty">悬浮或点击节点/边查看 evidence、sourceRef 和权重。</div>
+      </div>
+    </section>
+  </main>
+  <script>
+    let graphData = { nodes: [], edges: [] };
+    let selectedRunId = null;
+
+    async function api(path) {
+      const res = await fetch('/api' + path);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    async function loadAll() {
+      await Promise.all([loadStatus(), loadRuns(), loadGraph()]);
+    }
+
+    async function loadStatus() {
+      try {
+        const s = await api('/gauzmem/status');
+        document.getElementById('status').innerHTML = `
+          <h2>Status</h2>
+          <span class="pill ${s.enabled ? 'ok' : 'err'}">${s.enabled ? 'enabled' : 'disabled'}</span>
+          <span class="pill">sources ${s.counts.sources}</span>
+          <span class="pill">nodes ${s.counts.nodes}</span>
+          <span class="pill">edges ${s.counts.edges}</span>
+          <span class="pill">runs ${s.counts.runs}</span>
+          <span class="pill">faded ${s.counts.fadedNodes}/${s.counts.fadedEdges}</span>
+          <div class="muted">store: ${escapeHtml(s.root)}</div>
+          <div class="muted">provider: ${escapeHtml(s.llm.provider || 'not set')} · model: ${escapeHtml(s.llm.model || 'not set')} · base: ${escapeHtml(s.llm.apiBase || 'not set')} · timeout: ${escapeHtml(s.llm.timeoutMs || '')}ms · thinking: ${s.llm.disableThinking ? 'disabled' : 'enabled'}</div>
+        `;
+      } catch (e) {
+        document.getElementById('status').innerHTML = `<span class="pill err">status error</span><pre>${escapeHtml(String(e))}</pre>`;
+      }
+    }
+
+    async function probe() {
+      const s = await api('/gauzmem/probe');
+      alert(JSON.stringify(s.probe, null, 2));
+      await loadStatus();
+      await loadRuns();
+    }
+
+    async function loadRuns() {
+      const data = await api('/gauzmem/runs?limit=120');
+      const runs = [...data.runs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      if (!selectedRunId && runs.length > 0) selectedRunId = runs[0].runId;
+      document.getElementById('runs').innerHTML = runs.map(run => `
+        <div class="run ${run.runId === selectedRunId ? 'active' : ''}" onclick="loadRun('${run.runId}')">
+          <div class="run-title">${escapeHtml(cleanQuery(run.query || '(empty)'))}</div>
+          <div class="muted">${formatTime(run.timestamp)} · ${escapeHtml(run.callType)} · ${escapeHtml(run.runId)}</div>
+          <div class="run-meta">
+            <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
+            <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
+            <span class="pill">rej ${run.rejectedNodeIds.length}/${run.rejectedEdgeIds.length}</span>
+            <span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>
+          </div>
+        </div>
+      `).join('') || '<div class="empty">No runs yet.</div>';
+      if (selectedRunId) await loadRunDetailOnly(selectedRunId);
+    }
+
+    async function loadRun(runId) {
+      selectedRunId = runId;
+      await loadRuns();
+    }
+
+    async function loadRunDetailOnly(runId) {
+      const run = await api('/gauzmem/runs/' + encodeURIComponent(runId));
+      document.getElementById('run-detail').innerHTML = renderRun(run);
+    }
+
+    function renderRun(run) {
+      return `
+        <div>
+          <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
+          <span class="pill">${formatTime(run.timestamp)}</span>
+          <span class="muted">${escapeHtml(run.runId)}</span>
+        </div>
+        <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>
+        ${run.error ? `<pre>${escapeHtml(run.error)}</pre>` : ''}
+        <div class="section"><h2>Query Build</h2><pre class="compact-json">${escapeHtml(JSON.stringify(run.queryPlan || {}, null, 2))}</pre></div>
+        <div class="section"><h2>Flow</h2><div class="flow">${run.trace.map(step => `<div class="step"><strong>${escapeHtml(step.step)}</strong><div class="muted">${escapeHtml(step.detail || '')}</div>${smallIds('nodes', step.nodeIds)}${smallIds('edges', step.edgeIds)}${smallIds('windows', step.windowIds)}</div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Reasoner</h2><div class="card-list">${run.reasonerSteps.map(s => `<div class="item"><span class="pill ${s.ok ? 'ok' : 'err'}">${escapeHtml(s.name)}</span><span class="muted">${s.durationMs}ms</span>${s.error ? `<pre>${escapeHtml(s.error)}</pre>` : ''}<pre class="compact-json">${escapeHtml(s.outputPreview || s.inputPreview || '')}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Source Windows</h2><div class="card-list">${run.sourceWindows.map(w => `<div class="item"><strong>${escapeHtml(w.windowId)}</strong><div class="muted">${escapeHtml(w.sourceId)} · ${escapeHtml(w.sessionKey)}</div><pre>${escapeHtml(w.text)}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Evidence</h2><div class="card-list">${run.extractedEvidence.map(e => `<div class="item"><strong>${escapeHtml(e.windowId)}</strong><pre>${escapeHtml(e.text)}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Selections</h2><pre class="compact-json">${escapeHtml(JSON.stringify({selectedNodeIds: run.selectedNodeIds, selectedEdgeIds: run.selectedEdgeIds, rejectedNodeIds: run.rejectedNodeIds, rejectedEdgeIds: run.rejectedEdgeIds, fadedNodeIds: run.fadedNodeIds, fadedEdgeIds: run.fadedEdgeIds}, null, 2))}</pre></div>
+        <div class="section"><h2>Weights</h2><div class="card-list">${run.weightChanges.map(w => `<div class="item"><span class="pill ${w.reason === 'selected' ? 'ok' : 'err'}">${escapeHtml(w.reason)} ${escapeHtml(w.kind)}</span> ${escapeHtml(w.id)} <span class="muted">${round(w.before)} -> ${round(w.after)} (${round(w.delta)}) ${w.faded ? 'faded' : ''}</span></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Prompt Bundle</h2><pre>${escapeHtml(run.promptBundle || '(empty)')}</pre></div>
+      `;
+    }
+
+    async function loadGraph() {
+      graphData = await api('/gauzmem/graph');
+      drawGraph();
+    }
+
+    function drawGraph() {
+      const svg = document.getElementById('graph');
+      const width = svg.clientWidth || 1200;
+      const height = svg.clientHeight || 760;
+      svg.innerHTML = '';
+      const nodes = graphData.nodes || [];
+      const edges = graphData.edges || [];
+      if (nodes.length === 0) {
+        svg.appendChild(svgText(width / 2, height / 2, 'No graph nodes yet', 'cluster-label'));
+        return;
+      }
+
+      const activeNodes = nodes.filter(n => !isFaded(n));
+      const fadedNodes = nodes.filter(isFaded);
+      const activeEdges = edges.filter(e => !isFaded(e));
+      const components = connectedComponents(activeNodes, activeEdges).sort((a, b) => b.length - a.length);
+      const positions = new Map();
+      const boxes = layoutComponentBoxes(components, width, height, fadedNodes.length);
+
+      components.forEach((comp, idx) => {
+        const box = boxes[idx];
+        placeComponent(comp, activeEdges, box, positions);
+        const label = svgText(box.x + 12, box.y + 20, `cluster ${idx + 1} · ${comp.length}`, 'cluster-label');
+        svg.appendChild(label);
+      });
+
+      fadedNodes.forEach((node, i) => {
+        const x = width - 125 + (i % 3) * 38;
+        const y = 44 + Math.floor(i / 3) * 34;
+        positions.set(node.id, { x, y });
+      });
+
+      for (const edge of edges) {
+        const a = positions.get(edge.from);
+        const b = positions.get(edge.to);
+        if (!a || !b) continue;
+        const faded = isFaded(edge);
+        const score = scoreOf(edge);
+        const line = svgEl('line', {
+          x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+          stroke: faded ? '#c7ced8' : edgeColor(score),
+          'stroke-width': faded ? 1 : Math.max(1.4, 1.4 + score * 2.4),
+          opacity: faded ? .25 : .62,
+        });
+        attachHover(line, 'edge', edge);
+        svg.appendChild(line);
+      }
+
+      for (const node of nodes) {
+        const p = positions.get(node.id);
+        if (!p) continue;
+        const faded = isFaded(node);
+        const score = scoreOf(node);
+        const g = svgEl('g', { cursor: 'pointer' });
+        const circle = svgEl('circle', {
+          cx: p.x, cy: p.y,
+          r: faded ? 8 : 12 + Math.min(7, score * 7),
+          fill: faded ? '#e5e7eb' : nodeColor(score),
+          stroke: faded ? '#cbd5e1' : '#ffffff',
+          'stroke-width': faded ? 1 : 2,
+        });
+        const label = svgText(p.x + 16, p.y + 4, labelFor(node.text), 'node-label' + (faded ? ' faded' : ''));
+        g.appendChild(circle);
+        g.appendChild(label);
+        attachHover(g, 'node', node);
+        svg.appendChild(g);
+      }
+    }
+
+    function layoutComponentBoxes(components, width, height, fadedCount) {
+      const usableWidth = fadedCount > 0 ? width - 170 : width;
+      const cols = Math.max(1, Math.ceil(Math.sqrt(components.length || 1)));
+      const rows = Math.max(1, Math.ceil((components.length || 1) / cols));
+      return components.map((_, idx) => {
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        return {
+          x: col * usableWidth / cols + 16,
+          y: row * height / rows + 16,
+          w: usableWidth / cols - 32,
+          h: height / rows - 32,
+        };
+      });
+    }
+
+    function placeComponent(comp, edges, box, positions) {
+      if (comp.length === 1) {
+        positions.set(comp[0].id, { x: box.x + box.w / 2, y: box.y + box.h / 2 });
+        return;
+      }
+      const degree = new Map(comp.map(n => [n.id, 0]));
+      for (const e of edges) {
+        if (degree.has(e.from)) degree.set(e.from, degree.get(e.from) + 1);
+        if (degree.has(e.to)) degree.set(e.to, degree.get(e.to) + 1);
+      }
+      const sorted = [...comp].sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0));
+      const center = sorted[0];
+      const cx = box.x + box.w / 2;
+      const cy = box.y + box.h / 2;
+      positions.set(center.id, { x: cx, y: cy });
+      const rings = sorted.slice(1);
+      const radius = Math.max(42, Math.min(box.w, box.h) * .34);
+      rings.forEach((node, i) => {
+        const angle = -Math.PI / 2 + (Math.PI * 2 * i) / Math.max(1, rings.length);
+        const wobble = 1 + ((i % 3) - 1) * .12;
+        positions.set(node.id, {
+          x: cx + Math.cos(angle) * radius * wobble,
+          y: cy + Math.sin(angle) * radius * wobble,
+        });
+      });
+    }
+
+    function connectedComponents(nodes, edges) {
+      const byId = new Map(nodes.map(n => [n.id, n]));
+      const adj = new Map(nodes.map(n => [n.id, []]));
+      for (const e of edges) {
+        if (!adj.has(e.from) || !adj.has(e.to)) continue;
+        adj.get(e.from).push(e.to);
+        adj.get(e.to).push(e.from);
+      }
+      const seen = new Set();
+      const comps = [];
+      for (const node of nodes) {
+        if (seen.has(node.id)) continue;
+        const stack = [node.id];
+        const comp = [];
+        seen.add(node.id);
+        while (stack.length) {
+          const id = stack.pop();
+          comp.push(byId.get(id));
+          for (const next of adj.get(id) || []) {
+            if (seen.has(next)) continue;
+            seen.add(next);
+            stack.push(next);
+          }
+        }
+        comps.push(comp.filter(Boolean));
+      }
+      return comps.length ? comps : [[]];
+    }
+
+    function attachHover(el, kind, item) {
+      el.addEventListener('mousemove', event => showTooltip(event, tooltipText(kind, item)));
+      el.addEventListener('mouseenter', event => showTooltip(event, tooltipText(kind, item)));
+      el.addEventListener('mouseleave', hideTooltip);
+      el.addEventListener('click', () => showGraphDetail(kind, item));
+    }
+
+    function showTooltip(event, text) {
+      const tooltip = document.getElementById('graph-tooltip');
+      tooltip.textContent = text;
+      tooltip.style.display = 'block';
+      const pad = 16;
+      const rect = tooltip.getBoundingClientRect();
+      let x = event.clientX + 18;
+      let y = event.clientY + 18;
+      if (x + rect.width > window.innerWidth - pad) x = event.clientX - rect.width - 18;
+      if (y + rect.height > window.innerHeight - pad) y = event.clientY - rect.height - 18;
+      tooltip.style.left = Math.max(pad, x) + 'px';
+      tooltip.style.top = Math.max(pad, y) + 'px';
+    }
+
+    function hideTooltip() {
+      document.getElementById('graph-tooltip').style.display = 'none';
+    }
+
+    function showGraphDetail(kind, item) {
+      const state = item.state || {};
+      document.getElementById('graph-detail').innerHTML = `
+        <div class="detail-card">
+          <div><span class="pill">${escapeHtml(kind)}</span><span class="pill ${state.faded ? 'warn' : 'ok'}">${state.faded ? 'faded' : 'retrievable'}</span><span class="pill">score ${round(scoreOf(item))}</span></div>
+          <h3>${escapeHtml(item.id)}</h3>
+          <pre>${escapeHtml(kind === 'node' ? item.text : item.text || `${item.from} -> ${item.to}`)}</pre>
+          <pre class="compact-json">${escapeHtml(JSON.stringify(item, null, 2))}</pre>
+        </div>
+      `;
+    }
+
+    function tooltipText(kind, item) {
+      const state = item.state || {};
+      const title = kind === 'node' ? item.text : item.text || `${item.from} -> ${item.to}`;
+      return `${kind.toUpperCase()} · ${item.id}\nscore ${round(scoreOf(item))}${state.faded ? ' · faded' : ''}\n\n${title}\n\nsourceIds: ${(item.sourceIds || []).join(', ')}`;
+    }
+
+    function nodeColor(score) {
+      if (score >= .95) return '#1d4ed8';
+      if (score >= .55) return '#2dd4bf';
+      if (score >= .25) return '#7dd3fc';
+      return '#bfdbfe';
+    }
+
+    function edgeColor(score) {
+      if (score >= .8) return '#0f766e';
+      if (score >= .4) return '#38bdf8';
+      return '#93c5fd';
+    }
+
+    function scoreOf(item) {
+      return Number((item.state && item.state.score) || 0);
+    }
+
+    function isFaded(item) {
+      return Boolean(item.state && item.state.faded);
+    }
+
+    function labelFor(text) {
+      const clean = String(text || '').replace(/\s+/g, ' ').trim();
+      if (clean.length <= 22) return clean;
+      return clean.slice(0, 21) + '…';
+    }
+
+    function cleanQuery(text) {
+      return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function smallIds(label, ids) {
+      if (!ids || ids.length === 0) return '';
+      return `<div class="muted">${label}: ${escapeHtml(ids.slice(0, 8).join(', '))}${ids.length > 8 ? ` +${ids.length - 8}` : ''}</div>`;
+    }
+
+    function formatTime(value) {
+      try { return new Date(value).toLocaleString(); } catch { return value || ''; }
+    }
+
+    function round(value) {
+      return Math.round(Number(value || 0) * 1000) / 1000;
+    }
+
+    function svgText(x, y, text, className) {
+      const el = svgEl('text', { x, y, class: className });
+      el.textContent = text;
+      return el;
+    }
+
+    function svgEl(name, attrs) {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', name);
+      for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, String(value));
+      return el;
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    loadAll();
+    setInterval(loadRuns, 10000);
+  </script>
+</body>
+</html>

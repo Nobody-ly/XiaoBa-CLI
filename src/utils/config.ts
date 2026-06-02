@@ -5,7 +5,19 @@ import * as dotenv from 'dotenv';
 import { ChatConfig } from '../types';
 
 // 加载环境变量（静默模式）
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || '.env', quiet: true });
+function getDefaultEnvPath(): string {
+  if (process.env.DOTENV_CONFIG_PATH) {
+    return process.env.DOTENV_CONFIG_PATH;
+  }
+  const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  const userEnvPath = path.join(appData, 'xiaoba-cli', '.env');
+  if (fs.existsSync(userEnvPath)) {
+    return userEnvPath;
+  }
+  return '.env';
+}
+
+dotenv.config({ path: getDefaultEnvPath(), quiet: true });
 
 const DEFAULT_CONFIG_DIR = path.join(os.homedir(), '.xiaoba');
 const DEFAULT_CONFIG_FILE = path.join(DEFAULT_CONFIG_DIR, 'config.json');

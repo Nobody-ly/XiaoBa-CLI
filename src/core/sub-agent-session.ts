@@ -615,6 +615,7 @@ function buildSubAgentSystemPrompt(
       ? '如果信息不足，先基于可用工具自行调查；只有真正需要主 agent 或用户决策时才用 ask_parent 明确提出问题并等待恢复。'
       : '如果信息不足，先基于可用工具自行调查；本次未授权 ask_parent，请在最终结果里说明缺口和需要主 agent 判断的事项。',
     `工具权限范围: ${toolScope}。实际可用工具: ${allowedTools.length > 0 ? allowedTools.join(', ') : '无'}。不要尝试派生新的子智能体。`,
+    '使用 glob/grep 时必须先限定具体 path、glob 或 type；不要在整个工作区执行 glob **/* 或无路径的宽泛 grep。搜索结果过大或超时时，立即基于已有信息总结，不要反复扩大搜索。',
     maxTurns
       ? `本次主 agent 设置的工具推理轮次预算: ${maxTurns}。接近预算时请优先总结已知结论和缺口。`
       : '本次没有固定的类型轮次上限；由你自己在信息足够时及时总结结束。',
