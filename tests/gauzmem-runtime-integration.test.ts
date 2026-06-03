@@ -65,3 +65,22 @@ test('GauzMem session allowlist gates recall, source recording, and construct ba
   assert.match(source, /isSessionAllowed\(params\.sessionKey, params\.sessionType\)/);
   assert.match(source, /filter\(turn => this\.isSessionAllowed\(turn\.sessionKey, turn\.sessionType\)\)/);
 });
+
+test('GauzMem prompt injection setting gates only passive prompt injection', () => {
+  const source = readFileSync(join(process.cwd(), 'src/gauzmem/service.ts'), 'utf-8');
+  assert.match(source, /promptInjectionEnabled/);
+  assert.match(source, /GAUZMEM_PROMPT_INJECTION/);
+  assert.match(source, /params\.callType === 'passive' && !this\.isPromptInjectionEnabled\(\)/);
+  assert.match(source, /return \{ run \}/);
+});
+
+test('GauzMem dashboard exposes memory assist settings without user-facing enabled switch', () => {
+  const routeSource = readFileSync(join(process.cwd(), 'src/dashboard/routes/gauzmem.ts'), 'utf-8');
+  const dashboardSource = readFileSync(join(process.cwd(), 'dashboard/gauzmem.html'), 'utf-8');
+  assert.match(routeSource, /router\.get\('\/gauzmem\/settings'/);
+  assert.match(routeSource, /router\.post\('\/gauzmem\/settings'/);
+  assert.match(dashboardSource, /toggleMemoryAssist/);
+  assert.match(dashboardSource, /retriever \$\{escapeHtml\(String\(run\.stats\?\.durationMs/);
+  assert.doesNotMatch(dashboardSource, /scope:/);
+  assert.doesNotMatch(dashboardSource, /sessionAllowlist/);
+});

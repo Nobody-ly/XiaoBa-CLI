@@ -95,7 +95,33 @@ export class GauzMemService {
       scope: this.scope(),
       sessionAllowlist: this.envList('GAUZMEM_SESSION_ALLOWLIST'),
       sessionTypeAllowlist: this.envList('GAUZMEM_SESSION_TYPE_ALLOWLIST'),
+      promptInjectionEnabled: this.isPromptInjectionEnabled(),
     };
+  }
+
+  getSettings(): any {
+    const status = this.getStatus();
+    return {
+      enabled: status.enabled,
+      promptInjectionEnabled: status.promptInjectionEnabled,
+      promptInjectionEnvOverride: this.hasPromptInjectionEnvOverride(),
+      backgroundLearningText: status.promptInjectionEnabled
+        ? '记忆辅助已开启：相关记忆会提供给 Agent。'
+        : '记忆辅助已关闭：后台仍会整理记忆，但不会影响回复。',
+      counts: status.counts,
+      llm: status.llm,
+    };
+  }
+
+  updateSettings(input: { promptInjectionEnabled?: boolean }): any {
+    if (typeof input.promptInjectionEnabled === 'boolean') {
+      ConfigManager.saveConfig({
+        gauzmem: {
+          promptInjectionEnabled: input.promptInjectionEnabled,
+        },
+      });
+    }
+    return this.getSettings();
   }
 
   async probeReasoner(): Promise<any> {
@@ -210,6 +236,7 @@ export class GauzMemService {
       this.saveRun(run);
 
       if (!run.promptBundle.trim()) return { run };
+      if (params.callType === 'passive' && !this.isPromptInjectionEnabled()) return { run };
       return {
         run,
         message: `[transient_gauzmem_recall]\n${run.promptBundle}`,
@@ -726,6 +753,14 @@ export class GauzMemService {
 
   private scope(): GauzMemScope {
     return String(process.env.GAUZMEM_SCOPE || 'global').toLowerCase() === 'session' ? 'session' : 'global';
+  }
+
+  private isPromptInjectionEnabled(): boolean {
+    return ConfigManager.getConfigReadonly().gauzmem?.promptInjectionEnabled !== false;
+  }
+
+  private hasPromptInjectionEnvOverride(): boolean {
+    return String(process.env.GAUZMEM_PROMPT_INJECTION || '').trim().length > 0;
   }
 
   private isSessionAllowed(sessionKey?: string, sessionType?: string): boolean {
