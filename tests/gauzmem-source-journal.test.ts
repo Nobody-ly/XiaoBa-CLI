@@ -62,12 +62,12 @@ describe('GauzMemSourceJournal', () => {
       result,
     });
 
-    assert.equal(first.length, 3);
+    assert.equal(first.length, 4);
     assert.equal(second.length, 0);
     const all = journal.readAll();
-    assert.equal(all.length, 3);
+    assert.equal(all.length, 4);
     assert.equal(all.some(record => record.role === 'tool' && record.text.includes('Cyrus is a smuggler')), true);
-    assert.equal(all.some(record => record.role === 'tool' && record.text.includes('Arguments:')), false);
+    assert.equal(all.some(record => record.blockType === 'tool_call' && record.text.includes('Arguments:')), true);
     assert.equal(all.some(record => record.blockType === 'tool_result'), true);
   });
 
@@ -232,5 +232,49 @@ describe('GauzMemSourceJournal', () => {
       ['assistant_text', 'tool_result', 'user_text'],
     );
     assert.equal(windows.some(window => window.text.includes('file_path')), false);
+  });
+
+  test('records durable intermediate assistant text and tool calls in transcript order', () => {
+    const journal = new GauzMemSourceJournal();
+    journal.appendTurn({
+      sessionKey: 'session-a',
+      sessionType: 'catscompany',
+      turnId: 'turn-full-transcript',
+      userInput: 'Find the engine note.',
+      result: {
+        response: 'Final answer references the engine note.',
+        finalResponseVisible: true,
+        newMessages: [
+          {
+            role: 'assistant',
+            content: 'I will inspect the engine log first.',
+            tool_calls: [{
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'read_file', arguments: '{"file_path":"engine.md"}' },
+            }],
+          },
+          {
+            role: 'tool',
+            name: 'read_file',
+            tool_call_id: 'call-1',
+            content: 'The engine note says Dawn must reroute power.',
+          },
+          {
+            role: 'assistant',
+            content: 'Final answer references the engine note.',
+          },
+        ],
+        messages: [],
+      },
+    });
+
+    const all = journal.readAll();
+    assert.deepEqual(
+      all.map(record => record.blockType),
+      ['user_text', 'assistant_text', 'tool_call', 'tool_result', 'assistant_text'],
+    );
+    assert.equal(all.some(record => record.text.includes('engine.md')), true);
+    assert.equal(all.some(record => record.text.includes('Dawn must reroute power')), true);
   });
 });

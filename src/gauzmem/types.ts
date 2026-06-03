@@ -6,7 +6,7 @@ export interface GauzMemSourceRecord {
   sessionType?: string;
   turnId: string;
   role: 'user' | 'assistant' | 'tool';
-  blockType?: 'user_text' | 'assistant_text' | 'tool_result';
+  blockType?: 'user_text' | 'assistant_text' | 'tool_call' | 'tool_result';
   text: string;
   timestamp: string;
   toolCall?: {
