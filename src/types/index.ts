@@ -57,6 +57,9 @@ export interface ChatConfig {
     serverUrl?: string;
     intervalMinutes?: number;
   };
+  gauzmem?: {
+    promptInjectionEnabled?: boolean;
+  };
 }
 
 export interface TokenUsage {

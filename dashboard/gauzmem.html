@@ -61,6 +61,38 @@
     }
     .muted { color: var(--muted); font-size: 12px; }
     .toolbar { display: flex; gap: 8px; align-items: center; }
+    .status-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+    .memory-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: #f8fafc;
+    }
+    .switch {
+      width: 44px;
+      height: 24px;
+      border-radius: 999px;
+      border: 0;
+      background: #cbd5e1;
+      padding: 2px;
+      display: inline-flex;
+      align-items: center;
+      transition: background .15s;
+    }
+    .switch::after {
+      content: "";
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(15,23,42,.2);
+      transition: transform .15s;
+    }
+    .switch.on { background: #2563eb; }
+    .switch.on::after { transform: translateX(20px); }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -270,28 +302,52 @@
       return res.json();
     }
 
+    async function apiPost(path, body) {
+      const res = await fetch('/api' + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
     async function loadAll() {
       await Promise.all([loadStatus(), loadRuns(), loadGraph()]);
     }
 
     async function loadStatus() {
       try {
-        const s = await api('/gauzmem/status');
+        const s = await api('/gauzmem/settings');
+        const counts = s.counts || {};
+        const promptEnabled = s.promptInjectionEnabled !== false;
         document.getElementById('status').innerHTML = `
           <h2>Status</h2>
-          <span class="pill ${s.enabled ? 'ok' : 'err'}">${s.enabled ? 'enabled' : 'disabled'}</span>
-          <span class="pill">sources ${s.counts.sources}</span>
-          <span class="pill">nodes ${s.counts.nodes}</span>
-          <span class="pill">edges ${s.counts.edges}</span>
-          <span class="pill">runs ${s.counts.runs}</span>
-          <span class="pill">faded ${s.counts.fadedNodes}/${s.counts.fadedEdges}</span>
-          <div class="muted">store: ${escapeHtml(s.root)}</div>
-          <div class="muted">source: ${escapeHtml(s.sourceRoot || '')}</div>
+          <div class="status-row">
+            <div class="memory-toggle">
+              <button class="switch ${promptEnabled ? 'on' : ''}" onclick="toggleMemoryAssist(${promptEnabled ? 'false' : 'true'})" title="切换记忆辅助"></button>
+              <div>
+                <strong>记忆辅助：${promptEnabled ? '开启' : '关闭'}</strong>
+                <div class="muted">${escapeHtml(s.backgroundLearningText || '')}</div>
+              </div>
+            </div>
+            <span class="pill">sources ${counts.sources || 0}</span>
+            <span class="pill">nodes ${counts.nodes || 0}</span>
+            <span class="pill">edges ${counts.edges || 0}</span>
+            <span class="pill">runs ${counts.runs || 0}</span>
+            <span class="pill">faded ${counts.fadedNodes || 0}/${counts.fadedEdges || 0}</span>
+          </div>
+          ${s.promptInjectionEnvOverride ? '<div class="muted">GAUZMEM_PROMPT_INJECTION 已由环境变量强制覆盖，Dashboard 修改可能在重启后被覆盖。</div>' : ''}
           <div class="muted">provider: ${escapeHtml(s.llm.provider || 'not set')} · model: ${escapeHtml(s.llm.model || 'not set')} · base: ${escapeHtml(s.llm.apiBase || 'not set')} · timeout: ${escapeHtml(s.llm.timeoutMs || '')}ms · thinking: ${s.llm.disableThinking ? 'disabled' : 'enabled'}</div>
         `;
       } catch (e) {
         document.getElementById('status').innerHTML = `<span class="pill err">status error</span><pre>${escapeHtml(String(e))}</pre>`;
       }
+    }
+
+    async function toggleMemoryAssist(nextValue) {
+      await apiPost('/gauzmem/settings', { promptInjectionEnabled: Boolean(nextValue) });
+      await loadStatus();
     }
 
     async function probe() {
@@ -314,6 +370,7 @@
             <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
             <span class="pill">rej ${run.rejectedNodeIds.length}/${run.rejectedEdgeIds.length}</span>
             <span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>
+            <span class="pill">retriever ${escapeHtml(String(run.stats?.durationMs ?? 0))}ms</span>
           </div>
         </div>
       `).join('') || '<div class="empty">No runs yet.</div>';
@@ -330,6 +387,10 @@
       document.getElementById('run-detail').innerHTML = renderRun(run);
     }
 
+    function totalReasonerMs(run) {
+      return (run.reasonerSteps || []).reduce((sum, step) => sum + (Number(step.durationMs) || 0), 0);
+    }
+
     function renderRun(run) {
       const queryPlan = run.queryPlan || {};
       const graphSteps = (run.trace || []).filter(step =>
@@ -342,6 +403,11 @@
           <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
           <span class="pill">${escapeHtml(run.kind || 'recall')}</span>
           <span class="pill">${formatTime(run.timestamp)}</span>
+          <span class="pill">retriever ${escapeHtml(String(run.stats?.durationMs ?? 0))}ms</span>
+          <span class="pill">reasoner ${escapeHtml(String(totalReasonerMs(run)))}ms</span>
+          <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
+          <span class="pill">rej ${run.rejectedNodeIds.length}/${run.rejectedEdgeIds.length}</span>
+          <span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>
           <span class="muted">${escapeHtml(run.runId)}</span>
         </div>
         <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>

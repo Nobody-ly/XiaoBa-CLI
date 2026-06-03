@@ -43,6 +43,10 @@ export class ConfigManager {
         ...(base.weixin || {}),
         ...(override.weixin || {}),
       },
+      gauzmem: {
+        ...(base.gauzmem || {}),
+        ...(override.gauzmem || {}),
+      },
     };
   }
 
@@ -125,6 +129,9 @@ export class ConfigManager {
         serverUrl: process.env.CATSCO_LOG_API_BASE_URL || 'https://logs.catsco.fun:8000',
         intervalMinutes: parseInt(process.env.CATSCO_LOG_UPLOAD_INTERVAL_MINUTES || '30'),
       },
+      gauzmem: {
+        promptInjectionEnabled: true,
+      },
     };
   }
 
@@ -132,7 +139,14 @@ export class ConfigManager {
     const override: Partial<ChatConfig> = {};
     const modelSource = process.env.CATSCO_MODEL_SOURCE?.trim().toLowerCase();
     const sourcedProfile = this.getModelSourceEnvConfig(modelSource);
+    const gauzMemPromptInjection = this.parseBooleanEnv(process.env.GAUZMEM_PROMPT_INJECTION);
     if (sourcedProfile) {
+      if (gauzMemPromptInjection !== undefined) {
+        sourcedProfile.gauzmem = {
+          ...(sourcedProfile.gauzmem || {}),
+          promptInjectionEnabled: gauzMemPromptInjection,
+        };
+      }
       return sourcedProfile;
     }
 
@@ -159,6 +173,13 @@ export class ConfigManager {
     }
     if (maxTokens !== undefined) {
       override.maxTokens = maxTokens;
+    }
+
+    if (gauzMemPromptInjection !== undefined) {
+      override.gauzmem = {
+        ...(override.gauzmem || {}),
+        promptInjectionEnabled: gauzMemPromptInjection,
+      };
     }
 
     return override;
@@ -208,6 +229,14 @@ export class ConfigManager {
         return Math.floor(parsed);
       }
     }
+    return undefined;
+  }
+
+  private static parseBooleanEnv(value: string | undefined): boolean | undefined {
+    const text = value?.trim().toLowerCase();
+    if (!text) return undefined;
+    if (['1', 'true', 'yes', 'on', 'enabled'].includes(text)) return true;
+    if (['0', 'false', 'no', 'off', 'disabled'].includes(text)) return false;
     return undefined;
   }
 }

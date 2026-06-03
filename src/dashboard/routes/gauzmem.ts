@@ -10,6 +10,26 @@ export function registerGauzMemRoutes(router: Router): void {
     }
   });
 
+  router.get('/gauzmem/settings', (_req, res) => {
+    try {
+      res.json(GauzMemService.getInstance().getSettings());
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
+  router.post('/gauzmem/settings', (req, res) => {
+    try {
+      const value = req.body?.promptInjectionEnabled;
+      if (typeof value !== 'boolean') {
+        return res.status(400).json({ error: 'promptInjectionEnabled must be boolean' });
+      }
+      return res.json(GauzMemService.getInstance().updateSettings({ promptInjectionEnabled: value }));
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || String(e) });
+    }
+  });
+
   router.get('/gauzmem/probe', async (_req, res) => {
     try {
       res.json(await GauzMemService.getInstance().probeReasoner());
