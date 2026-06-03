@@ -93,6 +93,8 @@ export class GauzMemService {
       },
       latestRun: runs[runs.length - 1] || null,
       scope: this.scope(),
+      sessionAllowlist: this.envList('GAUZMEM_SESSION_ALLOWLIST'),
+      sessionTypeAllowlist: this.envList('GAUZMEM_SESSION_TYPE_ALLOWLIST'),
     };
   }
 
@@ -108,6 +110,7 @@ export class GauzMemService {
 
   async recall(params: GauzMemRecallParams): Promise<GauzMemRecallResult | null> {
     if (!this.isEnabled()) return null;
+    if (!this.isSessionAllowed(params.sessionKey, params.sessionType)) return null;
     ensureGauzMemDirs();
     const started = Date.now();
     const run = this.emptyRun(params, started);
@@ -223,12 +226,14 @@ export class GauzMemService {
 
   recordTurnSource(params: GauzMemRecordTurnParams): void {
     if (!this.isEnabled()) return;
+    if (!this.isSessionAllowed(params.sessionKey, params.sessionType)) return;
     this.sources.appendTurn(params);
     this.scheduleConstruct();
   }
 
   recordErrorTurnSource(params: GauzMemRecordErrorTurnParams): void {
     if (!this.isEnabled()) return;
+    if (!this.isSessionAllowed(params.sessionKey, params.sessionType)) return;
     this.sources.appendTurn({
       sessionKey: params.sessionKey,
       sessionType: params.sessionType,
@@ -420,7 +425,8 @@ export class GauzMemService {
   }
 
   private nextConstructBatch(): ConstructBatch | null {
-    const turns = this.sources.readTurns();
+    const turns = this.sources.readTurns()
+      .filter(turn => this.isSessionAllowed(turn.sessionKey, turn.sessionType));
     if (turns.length < CONSTRUCT_NEW_TURN_COUNT) return null;
     if (this.scope() === 'session') {
       const sessionKeys = this.uniqueStrings(turns.map(turn => turn.sessionKey));
@@ -720,6 +726,32 @@ export class GauzMemService {
 
   private scope(): GauzMemScope {
     return String(process.env.GAUZMEM_SCOPE || 'global').toLowerCase() === 'session' ? 'session' : 'global';
+  }
+
+  private isSessionAllowed(sessionKey?: string, sessionType?: string): boolean {
+    const sessionPatterns = this.envList('GAUZMEM_SESSION_ALLOWLIST');
+    const sessionTypes = this.envList('GAUZMEM_SESSION_TYPE_ALLOWLIST');
+    if (sessionPatterns.length > 0) {
+      const key = sessionKey || '';
+      if (!sessionPatterns.some(pattern => this.matchesSessionPattern(pattern, key))) return false;
+    }
+    if (sessionTypes.length > 0) {
+      const type = sessionType || '';
+      if (!sessionTypes.includes(type)) return false;
+    }
+    return true;
+  }
+
+  private envList(name: string): string[] {
+    return String(process.env[name] || '')
+      .split(/[,\n;]/)
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  private matchesSessionPattern(pattern: string, sessionKey: string): boolean {
+    if (pattern.endsWith('*')) return sessionKey.startsWith(pattern.slice(0, -1));
+    return pattern === sessionKey;
   }
 
   private filterGraphByScope<T extends { nodes: GauzMemNode[]; edges: GauzMemEdge[] }>(graph: T, sessionKey?: string): T {

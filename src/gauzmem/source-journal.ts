@@ -116,12 +116,63 @@ export class GauzMemSourceJournal {
     const userText = this.contentToString(params.userInput);
     records.push(this.createRecord(params, timestamp, records.length, 'user', 'user_text', userText));
 
-    const assistantText = params.result.response || '';
-    records.push(this.createRecord(params, timestamp, records.length, 'assistant', 'assistant_text', assistantText));
+    for (const message of params.result.newMessages) {
+      if (message.__injected) continue;
+      if (message.role === 'user') {
+        records.push(this.createRecord(
+          params,
+          timestamp,
+          records.length,
+          'user',
+          'user_text',
+          this.messageContentToString(message.content),
+        ));
+        continue;
+      }
+      if (message.role === 'assistant') {
+        const assistantText = this.messageContentToString(message.content);
+        if (assistantText.trim()) {
+          records.push(this.createRecord(params, timestamp, records.length, 'assistant', 'assistant_text', assistantText));
+        }
+        for (const toolCall of message.tool_calls || []) {
+          records.push(this.createRecord(
+            params,
+            timestamp,
+            records.length,
+            'assistant',
+            'tool_call',
+            this.toolCallToText(toolCall),
+            {
+              id: toolCall.id,
+              name: toolCall.function.name,
+              arguments: toolCall.function.arguments,
+              result: '',
+            },
+          ));
+        }
+        continue;
+      }
+      if (message.role === 'tool') {
+        const toolCall = this.toolResultMetadata(message, params.result.newMessages);
+        records.push(this.createRecord(
+          params,
+          timestamp,
+          records.length,
+          'tool',
+          'tool_result',
+          this.messageContentToString(message.content),
+          toolCall,
+        ));
+      }
+    }
 
-    const toolCalls = this.extractToolCalls(params.result.newMessages);
-    for (const toolCall of toolCalls) {
-      records.push(this.createRecord(params, timestamp, records.length, 'tool', 'tool_result', toolCall.result, toolCall));
+    const assistantText = params.result.response || '';
+    if (assistantText.trim() && !records.some(record =>
+      record.role === 'assistant'
+      && record.blockType === 'assistant_text'
+      && normalizeMemoryText(record.text) === normalizeMemoryText(assistantText)
+    )) {
+      records.push(this.createRecord(params, timestamp, records.length, 'assistant', 'assistant_text', assistantText));
     }
 
     return records;
@@ -300,21 +351,29 @@ export class GauzMemSourceJournal {
     return end;
   }
 
-  private extractToolCalls(messages: Message[]): NonNullable<GauzMemSourceRecord['toolCall']>[] {
-    return messages
-      .filter(message => message.role === 'assistant' && message.tool_calls)
-      .flatMap(message => message.tool_calls || [])
-      .map(toolCall => {
-        const resultMsg = messages.find(message =>
-          message.role === 'tool' && message.tool_call_id === toolCall.id
-        );
-        return {
-          id: toolCall.id,
-          name: toolCall.function.name,
-          arguments: toolCall.function.arguments,
-          result: this.messageContentToString(resultMsg?.content || ''),
-        };
-      });
+  private toolCallToText(toolCall: NonNullable<Message['tool_calls']>[number]): string {
+    return [
+      `Tool call: ${toolCall.function.name}`,
+      `Arguments: ${toolCall.function.arguments}`,
+    ].join('\n');
+  }
+
+  private toolResultMetadata(
+    message: Message,
+    messages: Message[],
+  ): NonNullable<GauzMemSourceRecord['toolCall']> | undefined {
+    const toolCallId = message.tool_call_id;
+    if (!toolCallId) return undefined;
+    const assistantToolCall = messages
+      .filter(candidate => candidate.role === 'assistant')
+      .flatMap(candidate => candidate.tool_calls || [])
+      .find(toolCall => toolCall.id === toolCallId);
+    return {
+      id: toolCallId,
+      name: message.name || assistantToolCall?.function.name || '',
+      arguments: assistantToolCall?.function.arguments || '',
+      result: this.messageContentToString(message.content),
+    };
   }
 
   private contentToString(content: string | ContentBlock[]): string {

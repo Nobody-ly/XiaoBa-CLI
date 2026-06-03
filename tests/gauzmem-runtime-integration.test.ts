@@ -57,3 +57,11 @@ test('GauzMem query build uses full previous assistant reply and addressee guida
   assert.match(source, /treat those names as addressees/);
   assert.match(source, /Previous assistant final reply: \$\{params\.previousAssistant \|\| ''\}/);
 });
+
+test('GauzMem session allowlist gates recall, source recording, and construct batches', () => {
+  const source = readFileSync(join(process.cwd(), 'src/gauzmem/service.ts'), 'utf-8');
+  assert.match(source, /GAUZMEM_SESSION_ALLOWLIST/);
+  assert.match(source, /GAUZMEM_SESSION_TYPE_ALLOWLIST/);
+  assert.match(source, /isSessionAllowed\(params\.sessionKey, params\.sessionType\)/);
+  assert.match(source, /filter\(turn => this\.isSessionAllowed\(turn\.sessionKey, turn\.sessionType\)\)/);
+});
