@@ -104,13 +104,21 @@ export class TurnContextBuilder {
     const query = typeof lastUser?.content === 'string' ? lastUser.content.trim() : '';
     if (!query) return;
 
-    const result = await withTimeout(GauzMemService.getInstance().recall({
+    const gauzMem = GauzMemService.getInstance();
+    const recallParams = {
       callType: 'passive',
       query,
       sessionKey,
       sessionType,
       durableMessages: messages,
-    }), GAUZMEM_PASSIVE_TIMEOUT_MS);
+    } as const;
+
+    if (!gauzMem.isPromptInjectionEnabled()) {
+      gauzMem.enqueueRecall(recallParams);
+      return;
+    }
+
+    const result = await withTimeout(gauzMem.recall(recallParams), GAUZMEM_PASSIVE_TIMEOUT_MS);
     if (!result?.message) return;
     this.insertBeforeLastUser(messages, {
       role: 'user',

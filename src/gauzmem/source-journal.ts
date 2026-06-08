@@ -2,7 +2,7 @@ import type { ContentBlock, Message } from '../types';
 import type { RunResult } from '../core/conversation-runner';
 import { appendJsonl, readJsonl } from './jsonl';
 import { GauzMemFiles, ensureGauzMemDirs } from './paths';
-import { normalizeMemoryText, stableHash, truncateText } from './hash';
+import { normalizeMemoryText, stableHash } from './hash';
 import type { GauzMemSourceRecord, GauzMemSourceWindow } from './types';
 
 export interface AppendTurnSourceParams {
@@ -196,7 +196,7 @@ export class GauzMemSourceJournal {
       turnId: params.turnId,
       role,
       blockType,
-      text: truncateText(text, 6000),
+      text,
       timestamp,
       ...(toolCall && { toolCall }),
       sourceRef: {

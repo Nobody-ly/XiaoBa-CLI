@@ -9,8 +9,10 @@ import { GauzMemReasoner } from './reasoner';
 import { GauzMemSourceJournal } from './source-journal';
 import type {
   GauzMemCallType,
+  GauzMemConstructArtifact,
   GauzMemEdge,
   GauzMemEvidenceRef,
+  GauzMemGraphSnapshot,
   GauzMemGraphPatch,
   GauzMemNode,
   GauzMemRecallResult,
@@ -20,7 +22,47 @@ import type {
 
 const CONSTRUCT_NEW_TURN_COUNT = 1;
 const CONSTRUCT_CONTEXT_TURN_COUNT = 2;
+const ONE_HOP_MAX_NEARBY_NODES = 16;
+const ONE_HOP_MAX_NEARBY_EDGES = 24;
+const ONE_HOP_MIN_EDGES_PER_ANCHOR = 1;
+const HIGH_FREQUENCY_TERM_RATIO = 0.10;
+const VERY_HIGH_FREQUENCY_TERM_RATIO = 0.20;
+const HIGH_ONLY_SINGLE_LIMIT = 8;
+const VERY_HIGH_ONLY_SINGLE_LIMIT = 5;
+const HIGH_ONLY_MULTI_LIMIT = 8;
+const SNAPSHOT_NORMAL_THRESHOLD = 0.1;
+const SNAPSHOT_DEEP_THRESHOLD = -0.45;
 type GauzMemScope = 'global' | 'session';
+
+interface GauzMemPromptMemory {
+  selectedNodeIds: string[];
+  selectedEdgeIds: string[];
+  nearbyNodeIds: string[];
+  nearbyEdgeIds: string[];
+}
+
+interface GauzMemNearbyContext {
+  nodeIds: string[];
+  edgeIds: string[];
+  rawNodeIds: string[];
+  rawEdgeIds: string[];
+}
+
+interface GauzMemTermFrequency {
+  term: string;
+  index: number;
+  hitCount: number;
+  ratio: number;
+  level: 'normal' | 'high' | 'very_high';
+}
+
+interface GauzMemRelevanceCandidates {
+  nodes: GauzMemNode[];
+  edges: GauzMemEdge[];
+  droppedNodeIds: string[];
+  droppedEdgeIds: string[];
+  highFrequencyTerms: GauzMemTermFrequency[];
+}
 
 export interface GauzMemRecallParams {
   callType: GauzMemCallType;
@@ -56,11 +98,12 @@ export class GauzMemService {
 
   private readonly graph = new GauzMemGraphStore();
   private readonly sources = new GauzMemSourceJournal();
+  private recallQueue: Promise<void> = Promise.resolve();
   private constructScheduled = false;
   private constructRunning = false;
 
   isEnabled(): boolean {
-    return /^(1|true|yes)$/i.test(process.env.GAUZMEM_ENABLED || '');
+    return !/^(0|false|no|off)$/i.test(process.env.GAUZMEM_ENABLED || '');
   }
 
   getStatus(): any {
@@ -141,7 +184,6 @@ export class GauzMemService {
     const started = Date.now();
     const run = this.emptyRun(params, started);
     const reasoner = new GauzMemReasoner();
-    const budget = this.budgetFor(params.callType);
 
     try {
       const recent = this.extractRecentContext(params.durableMessages || []);
@@ -153,10 +195,11 @@ export class GauzMemService {
         sessionType: params.sessionType,
       });
       run.queryPlan = queryPlan;
-      run.trace.push({ step: 'query_build', detail: queryPlan.searchTerms.join(' | ') });
+      run.trace.push({
+        step: 'query_build',
+        detail: `rootQuery: ${queryPlan.rootQuery}; terms ${queryPlan.searchTerms.join(' | ')}`,
+      });
 
-      let finalSelection = this.emptySelection();
-      const graphRounds = 1;
       const memoryTurn = this.readRuns().filter(item => item.kind === 'recall').length + 1;
       const decayChanges = this.graph.applyRecallDecay(memoryTurn);
       if (decayChanges.length > 0) {
@@ -168,58 +211,102 @@ export class GauzMemService {
         });
       }
 
-      const graphScan = this.filterGraphByScope(this.graph.graphScan(queryPlan.searchTerms), params.sessionKey);
+      run.snapshotId = this.saveGraphSnapshot(run, params.sessionKey);
+      const retrievableGraph = this.filterGraphByScope(this.graph.normalRetrievableGraph(), params.sessionKey);
+      const graphScan = this.grepQueryPlan(queryPlan.searchTerms, params.sessionKey);
+      const grepNodeRatio = this.ratio(graphScan.nodes.length, retrievableGraph.nodes.length);
+      const grepEdgeRatio = this.ratio(graphScan.edges.length, retrievableGraph.edges.length);
       run.trace.push({
-        step: 'graph_scan',
+        step: 'graph_grep',
+        detail: [
+          `nodes ${graphScan.nodes.length}/${retrievableGraph.nodes.length} (${this.percent(grepNodeRatio)})`,
+          `edges ${graphScan.edges.length}/${retrievableGraph.edges.length} (${this.percent(grepEdgeRatio)})`,
+        ].join('; '),
         nodeIds: graphScan.nodes.map(node => node.id),
         edgeIds: graphScan.edges.map(edge => edge.id),
       });
 
-      const initialSeedNodes = graphScan.nodes.slice(0, budget.maxInitialSeeds);
-      const graphSeedNodeIds = this.uniqueStrings([
-        ...initialSeedNodes.map(node => node.id),
-        ...graphScan.edges.flatMap(edge => [edge.from, edge.to]),
-      ]).slice(0, budget.maxInitialSeeds);
-      const disclosed = this.filterGraphByScope(this.graph.disclose(graphSeedNodeIds), params.sessionKey);
-      const candidateNodes = this.uniqueById([
-        ...initialSeedNodes,
-        ...this.nodesForEdges(graphScan.edges),
-        ...disclosed.nodes,
-      ]);
-      const candidateEdges = this.uniqueById([...graphScan.edges, ...disclosed.edges]);
+      const relevanceCandidates = this.compressRelevanceCandidates(
+        queryPlan.searchTerms,
+        graphScan,
+        retrievableGraph,
+      );
       run.trace.push({
-        step: 'disclose_initial',
-        nodeIds: disclosed.nodes.map(node => node.id),
-        edgeIds: disclosed.edges.map(edge => edge.id),
+        step: 'candidate_filter',
+        detail: [
+          `high terms ${relevanceCandidates.highFrequencyTerms.map(term =>
+            `${term.term}:${term.hitCount}(${this.percent(term.ratio)})`
+          ).join(', ') || 'none'}`,
+          `nodes ${relevanceCandidates.nodes.length}/${graphScan.nodes.length}`,
+          `edges ${relevanceCandidates.edges.length}/${graphScan.edges.length}`,
+          `dropped nodes ${relevanceCandidates.droppedNodeIds.length}`,
+          `dropped edges ${relevanceCandidates.droppedEdgeIds.length}`,
+        ].join('; '),
+        nodeIds: relevanceCandidates.nodes.map(node => node.id),
+        edgeIds: relevanceCandidates.edges.map(edge => edge.id),
       });
 
       const initialSelection = await reasoner.selectRelevant({
         rootQuery: queryPlan.rootQuery,
-        nodes: candidateNodes,
-        edges: candidateEdges,
+        nodes: relevanceCandidates.nodes,
+        edges: relevanceCandidates.edges,
       });
       run.trace.push({
-        step: 'relevance_graph_initial',
+        step: 'relevance_grep',
         detail: `selected ${initialSelection.selectedNodeIds.length}/${initialSelection.selectedEdgeIds.length}, rejected ${initialSelection.rejectedNodeIds.length}/${initialSelection.rejectedEdgeIds.length}`,
         nodeIds: initialSelection.selectedNodeIds,
         edgeIds: initialSelection.selectedEdgeIds,
       });
-      finalSelection = this.mergeSelection(finalSelection, initialSelection);
+
+      const selectedEdgeMap = new Map(relevanceCandidates.edges.map(edge => [edge.id, edge]));
+      const selectedAnchorIds = this.uniqueStrings([
+        ...initialSelection.selectedNodeIds,
+        ...initialSelection.selectedEdgeIds.flatMap(id => {
+          const edge = selectedEdgeMap.get(id);
+          return edge ? [edge.from, edge.to] : [];
+        }),
+      ]);
+      const disclosed = selectedAnchorIds.length > 0
+        ? this.filterGraphByScope(this.graph.disclose(selectedAnchorIds), params.sessionKey)
+        : { nodes: [], edges: [] };
+      const nearbyContext = this.limitNearbyContext(
+        selectedAnchorIds,
+        {
+          nodeIds: initialSelection.selectedNodeIds,
+          edgeIds: initialSelection.selectedEdgeIds,
+        },
+        disclosed,
+      );
+      run.trace.push({
+        step: 'disclose_selected',
+        detail: [
+          `raw nodes ${nearbyContext.rawNodeIds.length}, edges ${nearbyContext.rawEdgeIds.length}`,
+          `capped nodes ${nearbyContext.nodeIds.length}/${ONE_HOP_MAX_NEARBY_NODES}`,
+          `edges ${nearbyContext.edgeIds.length}/${ONE_HOP_MAX_NEARBY_EDGES}`,
+        ].join('; '),
+        nodeIds: nearbyContext.nodeIds,
+        edgeIds: nearbyContext.edgeIds,
+      });
 
       const weightChanges = [
         ...decayChanges,
-        ...this.graph.applySelection({ ...finalSelection, currentTurn: memoryTurn }),
+        ...this.graph.applySelection({ ...initialSelection, currentTurn: memoryTurn }),
       ];
       const faded = this.graph.getFadedIds();
 
-      run.selectedNodeIds = finalSelection.selectedNodeIds;
-      run.selectedEdgeIds = finalSelection.selectedEdgeIds;
-      run.rejectedNodeIds = finalSelection.rejectedNodeIds;
-      run.rejectedEdgeIds = finalSelection.rejectedEdgeIds;
+      run.selectedNodeIds = initialSelection.selectedNodeIds;
+      run.selectedEdgeIds = initialSelection.selectedEdgeIds;
+      run.rejectedNodeIds = initialSelection.rejectedNodeIds;
+      run.rejectedEdgeIds = initialSelection.rejectedEdgeIds;
       run.fadedNodeIds = faded.nodeIds;
       run.fadedEdgeIds = faded.edgeIds;
       run.weightChanges = weightChanges;
-      run.promptBundle = this.buildPromptBundle(run.selectedNodeIds, run.selectedEdgeIds);
+      const promptMemory = this.buildPromptMemory(initialSelection, params.sessionKey, nearbyContext);
+      run.promptBundle = this.buildPromptBundle(queryPlan.rootQuery, queryPlan.searchTerms, promptMemory);
+      run.trace.push({
+        step: 'prompt_bundle',
+        detail: `chars ${run.promptBundle.length}`,
+      });
       run.status = 'ok';
       run.stats = {
         sourceCount: this.sources.readAll().length,
@@ -228,9 +315,28 @@ export class GauzMemService {
         sourceWindowCount: 0,
         evidenceCount: 0,
         durationMs: Date.now() - started,
-        frontierSteps: graphRounds,
+        frontierSteps: 1,
         rootConstructCount: 0,
         nodeConstructCount: 0,
+        grepNodeCount: graphScan.nodes.length,
+        grepEdgeCount: graphScan.edges.length,
+        relevanceCandidateNodeCount: relevanceCandidates.nodes.length,
+        relevanceCandidateEdgeCount: relevanceCandidates.edges.length,
+        relevanceCandidateDroppedNodeCount: relevanceCandidates.droppedNodeIds.length,
+        relevanceCandidateDroppedEdgeCount: relevanceCandidates.droppedEdgeIds.length,
+        retrievableNodeCount: retrievableGraph.nodes.length,
+        retrievableEdgeCount: retrievableGraph.edges.length,
+        grepNodeRatio,
+        grepEdgeRatio,
+        relevanceSelectedNodeCount: initialSelection.selectedNodeIds.length,
+        relevanceSelectedEdgeCount: initialSelection.selectedEdgeIds.length,
+        relevanceRejectedNodeCount: initialSelection.rejectedNodeIds.length,
+        relevanceRejectedEdgeCount: initialSelection.rejectedEdgeIds.length,
+        oneHopNodeCount: nearbyContext.nodeIds.length,
+        oneHopEdgeCount: nearbyContext.edgeIds.length,
+        oneHopRawNodeCount: nearbyContext.rawNodeIds.length,
+        oneHopRawEdgeCount: nearbyContext.rawEdgeIds.length,
+        promptCharCount: run.promptBundle.length,
       };
       run.reasonerSteps = reasoner.steps;
       this.saveRun(run);
@@ -249,6 +355,15 @@ export class GauzMemService {
       this.saveRun(run);
       return { run };
     }
+  }
+
+  enqueueRecall(params: GauzMemRecallParams): void {
+    this.recallQueue = this.recallQueue
+      .catch(() => undefined)
+      .then(async () => {
+        await this.recall(params);
+      })
+      .catch(() => undefined);
   }
 
   recordTurnSource(params: GauzMemRecordTurnParams): void {
@@ -273,6 +388,7 @@ export class GauzMemService {
         newMessages: [],
       },
     });
+    this.scheduleConstruct();
   }
 
   private scheduleConstruct(): void {
@@ -295,17 +411,39 @@ export class GauzMemService {
       const reasoner = new GauzMemReasoner();
       try {
         const constructGraph = this.compactGraphForConstruct(batch);
+        const sourceBatch = batch.batchRecords.map(source => ({
+          sourceId: source.sourceId,
+          turnId: source.turnId,
+          role: source.role,
+          blockType: source.blockType,
+          text: source.text,
+        }));
+        const artifact: GauzMemConstructArtifact = {
+          artifactId: 'gza_' + stableHash(`${run.runId}:construct_artifact`),
+          runId: run.runId,
+          timestamp: new Date(started).toISOString(),
+          sessionKey: run.sessionKey,
+          sessionType: run.sessionType,
+          input: {
+            sourceBatch,
+            graph: constructGraph,
+          },
+        };
+        run.artifactId = artifact.artifactId;
         const patch = await reasoner.buildGraphPatch({
-          sourceBatch: batch.batchRecords.map(source => ({
-            sourceId: source.sourceId,
-            turnId: source.turnId,
-            role: source.role,
-            blockType: source.blockType,
-            text: source.text,
-          })),
+          sourceBatch,
           graph: constructGraph,
         });
+        artifact.patch = patch;
         const applied = this.applyGraphPatch(patch, batch.batchRecords, run);
+        artifact.applyResult = {
+          tempToNodeId: Array.from(applied.tempToNodeId.entries()),
+          createdNodeIds: run.createdNodeIds,
+          createdEdgeIds: run.createdEdgeIds,
+          mergedNodeIds: applied.mergedNodeIds,
+          skippedEdges: applied.skippedEdges,
+          warnings: applied.warnings,
+        };
         run.status = 'ok';
         run.promptBundle = patch.batchSummary || '';
         run.reasonerSteps = reasoner.steps;
@@ -330,12 +468,43 @@ export class GauzMemService {
           nodeIds: constructGraph.nodes.map(node => node.id),
           edgeIds: constructGraph.edges.map(edge => edge.id),
         });
+        this.saveConstructArtifact(artifact);
         this.saveRun(run);
       } catch (error: any) {
         run.status = 'error';
         run.error = String(error?.message || error);
         run.reasonerSteps = reasoner.steps;
-        run.stats.durationMs = Date.now() - started;
+        run.stats = {
+          ...run.stats,
+          sourceCount: this.sources.readAll().length,
+          graphNodeCount: this.graph.readNodes().length,
+          graphEdgeCount: this.graph.readEdges().length,
+          durationMs: Date.now() - started,
+          constructTurnIds: batch.batchTurns.map(turn => turn.turnKey),
+          constructNewTurnIds: batch.newTurns.map(turn => turn.turnKey),
+          constructBatchStart: batch.batchTurns[0]?.turnKey,
+          constructBatchEnd: batch.newTurns[batch.newTurns.length - 1]?.turnKey,
+        };
+        if (run.artifactId) {
+          this.saveConstructArtifact({
+            artifactId: run.artifactId,
+            runId: run.runId,
+            timestamp: new Date(started).toISOString(),
+            sessionKey: run.sessionKey,
+            sessionType: run.sessionType,
+            input: {
+              sourceBatch: batch.batchRecords.map(source => ({
+                sourceId: source.sourceId,
+                turnId: source.turnId,
+                role: source.role,
+                blockType: source.blockType,
+                text: source.text,
+              })),
+              graph: this.compactGraphForConstruct(batch),
+            },
+            error: run.error,
+          });
+        }
         this.saveRun(run);
       }
     } finally {
@@ -468,14 +637,13 @@ export class GauzMemService {
 
   private nextConstructBatchForTurns(turns: ReturnType<GauzMemSourceJournal['readTurns']>, sessionKey?: string): ConstructBatch | null {
     if (turns.length < CONSTRUCT_NEW_TURN_COUNT) return null;
-    const latestCompleted = [...this.readRuns(500)]
-      .reverse()
-      .find(run =>
-        run.kind === 'construct'
-        && run.status === 'ok'
-        && run.stats.constructBatchEnd
-        && (!sessionKey || run.sessionKey === sessionKey)
-      )
+      const latestCompleted = [...this.readRuns(500)]
+        .reverse()
+        .find(run =>
+          run.kind === 'construct'
+          && run.stats.constructBatchEnd
+          && (!sessionKey || run.sessionKey === sessionKey)
+        )
       ?.stats.constructBatchEnd;
     const startIndex = latestCompleted
       ? turns.findIndex(turn => turn.turnKey === latestCompleted) + 1
@@ -734,28 +902,366 @@ export class GauzMemService {
         };
   }
 
-  private buildPromptBundle(nodeIds: string[], edgeIds: string[]): string {
-    const nodeSet = new Set(nodeIds);
-    const edgeSet = new Set(edgeIds);
-    const nodes = this.graph.readNodes().filter(node => nodeSet.has(node.id));
-    const edges = this.graph.readEdges().filter(edge => edgeSet.has(edge.id));
-    const lines: string[] = [];
-    if (nodes.length > 0) {
-      lines.push('Relevant memory nodes:');
-      for (const node of nodes.slice(0, 12)) lines.push(`- ${node.text}`);
+  private grepQueryPlan(searchTerms: string[], sessionKey?: string): { nodes: GauzMemNode[]; edges: GauzMemEdge[] } {
+    const scan = this.filterGraphByScope(this.graph.graphScan(searchTerms), sessionKey);
+    return {
+      nodes: this.uniqueById([...scan.nodes, ...this.nodesForEdges(scan.edges)]),
+      edges: scan.edges,
+    };
+  }
+
+  private compressRelevanceCandidates(
+    searchTerms: string[],
+    graphScan: { nodes: GauzMemNode[]; edges: GauzMemEdge[] },
+    retrievableGraph: { nodes: GauzMemNode[]; edges: GauzMemEdge[] },
+  ): GauzMemRelevanceCandidates {
+    const terms = searchTerms.map(term => term.trim()).filter(Boolean);
+    if (terms.length === 0 || (graphScan.nodes.length === 0 && graphScan.edges.length === 0)) {
+      return {
+        nodes: graphScan.nodes,
+        edges: graphScan.edges,
+        droppedNodeIds: [],
+        droppedEdgeIds: [],
+        highFrequencyTerms: [],
+      };
     }
-    if (edges.length > 0) {
-      lines.push('Relevant memory links:');
-      for (const edge of edges.slice(0, 8)) lines.push(`- ${edge.text}`);
+
+    const frequencies = this.termFrequencies(terms, retrievableGraph);
+    const highTermIndexes = new Set(
+      frequencies
+        .filter(term => term.level !== 'normal')
+        .map(term => term.index),
+    );
+    const highFrequencyTerms = frequencies.filter(term => term.level !== 'normal');
+    if (highTermIndexes.size === 0) {
+      return {
+        nodes: graphScan.nodes,
+        edges: graphScan.edges,
+        droppedNodeIds: [],
+        droppedEdgeIds: [],
+        highFrequencyTerms,
+      };
     }
-    return lines.join('\n');
+
+    const edgeTermIndexes = new Map<string, number[]>();
+    const nodeTermIndexes = new Map<string, number[]>();
+    for (const node of graphScan.nodes) {
+      nodeTermIndexes.set(node.id, this.matchedTermIndexes(node.text, terms));
+    }
+    for (const edge of graphScan.edges) {
+      const indexes = this.matchedTermIndexes(edge.text, terms);
+      edgeTermIndexes.set(edge.id, indexes);
+      for (const nodeId of [edge.from, edge.to]) {
+        nodeTermIndexes.set(nodeId, this.uniqueNumbers([
+          ...(nodeTermIndexes.get(nodeId) || []),
+          ...indexes,
+        ]));
+      }
+    }
+
+    const keepNodeIds = new Set<string>();
+    const keepEdgeIds = new Set<string>();
+    const singleHighBuckets = new Map<number, Array<{ kind: 'node' | 'edge'; id: string }>>();
+    const multiHighOnly: Array<{ kind: 'node' | 'edge'; id: string; termIndexes: number[] }> = [];
+
+    const classify = (kind: 'node' | 'edge', id: string, termIndexes: number[]) => {
+      const distinct = this.uniqueNumbers(termIndexes);
+      if (distinct.length === 0 || distinct.some(index => !highTermIndexes.has(index))) {
+        if (kind === 'node') keepNodeIds.add(id);
+        else keepEdgeIds.add(id);
+        return;
+      }
+      if (distinct.length === 1) {
+        const index = distinct[0];
+        const bucket = singleHighBuckets.get(index) || [];
+        bucket.push({ kind, id });
+        singleHighBuckets.set(index, bucket);
+        return;
+      }
+      multiHighOnly.push({ kind, id, termIndexes: distinct });
+    };
+
+    for (const node of graphScan.nodes) classify('node', node.id, nodeTermIndexes.get(node.id) || []);
+    for (const edge of graphScan.edges) classify('edge', edge.id, edgeTermIndexes.get(edge.id) || []);
+
+    for (const [termIndex, bucket] of singleHighBuckets) {
+      const frequency = frequencies[termIndex];
+      const limit = frequency?.level === 'very_high' ? VERY_HIGH_ONLY_SINGLE_LIMIT : HIGH_ONLY_SINGLE_LIMIT;
+      for (const candidate of this.rankCandidates(bucket, retrievableGraph).slice(0, limit)) {
+        if (candidate.kind === 'node') keepNodeIds.add(candidate.id);
+        else keepEdgeIds.add(candidate.id);
+      }
+    }
+
+    const multiLimit = multiHighOnly.some(candidate =>
+      candidate.termIndexes.some(index => frequencies[index]?.level === 'very_high')
+    ) ? VERY_HIGH_ONLY_SINGLE_LIMIT : HIGH_ONLY_MULTI_LIMIT;
+    for (const candidate of this.rankCandidates(multiHighOnly, retrievableGraph).slice(0, multiLimit)) {
+      if (candidate.kind === 'node') keepNodeIds.add(candidate.id);
+      else keepEdgeIds.add(candidate.id);
+    }
+
+    const nodes = graphScan.nodes.filter(node => keepNodeIds.has(node.id));
+    const edges = graphScan.edges.filter(edge => keepEdgeIds.has(edge.id));
+    return {
+      nodes,
+      edges,
+      droppedNodeIds: graphScan.nodes.map(node => node.id).filter(id => !keepNodeIds.has(id)),
+      droppedEdgeIds: graphScan.edges.map(edge => edge.id).filter(id => !keepEdgeIds.has(id)),
+      highFrequencyTerms,
+    };
+  }
+
+  private termFrequencies(
+    terms: string[],
+    graph: { nodes: GauzMemNode[]; edges: GauzMemEdge[] },
+  ): GauzMemTermFrequency[] {
+    const denominator = Math.max(1, graph.nodes.length + graph.edges.length);
+    return terms.map((term, index) => {
+      const hitCount = graph.nodes.filter(node => this.textIncludesTerm(node.text, term)).length
+        + graph.edges.filter(edge => this.textIncludesTerm(edge.text, term)).length;
+      const ratio = hitCount / denominator;
+      return {
+        term,
+        index,
+        hitCount,
+        ratio,
+        level: ratio >= VERY_HIGH_FREQUENCY_TERM_RATIO
+          ? 'very_high'
+          : ratio >= HIGH_FREQUENCY_TERM_RATIO
+            ? 'high'
+            : 'normal',
+      };
+    });
+  }
+
+  private matchedTermIndexes(text: string, terms: string[]): number[] {
+    const indexes: number[] = [];
+    for (let index = 0; index < terms.length; index += 1) {
+      if (this.textIncludesTerm(text, terms[index])) indexes.push(index);
+    }
+    return indexes;
+  }
+
+  private textIncludesTerm(text: string, term: string): boolean {
+    const value = term.trim().toLowerCase();
+    return Boolean(value) && text.toLowerCase().includes(value);
+  }
+
+  private rankCandidates<T extends { kind: 'node' | 'edge'; id: string }>(
+    candidates: T[],
+    graph: { nodes: GauzMemNode[]; edges: GauzMemEdge[] },
+  ): T[] {
+    const nodeStates = this.graph.readNodeStates();
+    const edgeStates = this.graph.readEdgeStates();
+    const degree = this.degreeMap(graph.edges);
+    return [...candidates].sort((a, b) =>
+      this.candidateScore(b, nodeStates, edgeStates, degree)
+      - this.candidateScore(a, nodeStates, edgeStates, degree)
+      || a.id.localeCompare(b.id)
+    );
+  }
+
+  private candidateScore(
+    candidate: { kind: 'node' | 'edge'; id: string },
+    nodeStates: ReturnType<GauzMemGraphStore['readNodeStates']>,
+    edgeStates: ReturnType<GauzMemGraphStore['readEdgeStates']>,
+    degree: Map<string, number>,
+  ): number {
+    const state = candidate.kind === 'node' ? nodeStates.get(candidate.id) : edgeStates.get(candidate.id);
+    const score = state?.score ?? 0.45;
+    const selected = state?.selectedCount ?? 0;
+    const updated = Date.parse(state?.updatedAt || '') || 0;
+    const degreeScore = candidate.kind === 'node' ? (degree.get(candidate.id) || 0) : 0;
+    return score * 1_000_000
+      + Math.min(selected, 1000) * 1_000
+      + Math.min(updated / 1_000_000_000, 1000)
+      + Math.min(degreeScore, 100) * 0.001;
+  }
+
+  private limitNearbyContext(
+    anchorIds: string[],
+    selected: { nodeIds: string[]; edgeIds: string[] },
+    disclosed: { nodes: GauzMemNode[]; edges: GauzMemEdge[] },
+  ): GauzMemNearbyContext {
+    const selectedNodeIds = new Set(selected.nodeIds);
+    const selectedEdgeIds = new Set(selected.edgeIds);
+    const rawNodeIds = this.uniqueStrings(disclosed.nodes
+      .map(node => node.id)
+      .filter(id => !selectedNodeIds.has(id)));
+    const rawEdgeIds = this.uniqueStrings(disclosed.edges
+      .map(edge => edge.id)
+      .filter(id => !selectedEdgeIds.has(id)));
+    const edgeMap = new Map(disclosed.edges.map(edge => [edge.id, edge]));
+    const nodeMap = new Map(disclosed.nodes.map(node => [node.id, node]));
+    const rankedEdges = this.rankNearbyEdges(rawEdgeIds.map(id => edgeMap.get(id)).filter(Boolean) as GauzMemEdge[], anchorIds);
+    const chosenEdgeIds: string[] = [];
+    const chosenEdgeSet = new Set<string>();
+    const anchorSet = new Set(anchorIds);
+    for (const anchorId of anchorIds) {
+      if (chosenEdgeIds.length >= ONE_HOP_MAX_NEARBY_EDGES) break;
+      const localEdges = rankedEdges.filter(item =>
+        !chosenEdgeSet.has(item.id)
+        && (item.from === anchorId || item.to === anchorId)
+      ).slice(0, ONE_HOP_MIN_EDGES_PER_ANCHOR);
+      for (const edge of localEdges) {
+        if (chosenEdgeIds.length >= ONE_HOP_MAX_NEARBY_EDGES) break;
+        chosenEdgeIds.push(edge.id);
+        chosenEdgeSet.add(edge.id);
+      }
+    }
+    for (const edge of rankedEdges) {
+      if (chosenEdgeIds.length >= ONE_HOP_MAX_NEARBY_EDGES) break;
+      if (chosenEdgeSet.has(edge.id)) continue;
+      chosenEdgeIds.push(edge.id);
+      chosenEdgeSet.add(edge.id);
+    }
+    const edgeNodeIds = chosenEdgeIds.flatMap(id => {
+      const edge = edgeMap.get(id);
+      if (!edge) return [];
+      return [edge.from, edge.to].filter(nodeId => !anchorSet.has(nodeId) && !selectedNodeIds.has(nodeId));
+    });
+    const rankedNodes = this.rankNearbyNodes(
+      this.uniqueStrings([...edgeNodeIds, ...rawNodeIds])
+        .map(id => nodeMap.get(id))
+        .filter(Boolean) as GauzMemNode[],
+      chosenEdgeIds.map(id => edgeMap.get(id)).filter(Boolean) as GauzMemEdge[],
+    );
+    return {
+      rawNodeIds,
+      rawEdgeIds,
+      edgeIds: chosenEdgeIds,
+      nodeIds: rankedNodes.slice(0, ONE_HOP_MAX_NEARBY_NODES).map(node => node.id),
+    };
+  }
+
+  private rankNearbyEdges(edges: GauzMemEdge[], anchorIds: string[]): GauzMemEdge[] {
+    const anchorSet = new Set(anchorIds);
+    const nodeStates = this.graph.readNodeStates();
+    const edgeStates = this.graph.readEdgeStates();
+    const degree = this.degreeMap(this.graph.readEdges());
+    return [...edges].sort((a, b) =>
+      this.edgeScore(b, edgeStates, nodeStates, degree, anchorSet)
+      - this.edgeScore(a, edgeStates, nodeStates, degree, anchorSet)
+      || a.id.localeCompare(b.id)
+    );
+  }
+
+  private rankNearbyNodes(nodes: GauzMemNode[], selectedEdges: GauzMemEdge[]): GauzMemNode[] {
+    const nodeStates = this.graph.readNodeStates();
+    const connectedCount = new Map<string, number>();
+    for (const edge of selectedEdges) {
+      connectedCount.set(edge.from, (connectedCount.get(edge.from) || 0) + 1);
+      connectedCount.set(edge.to, (connectedCount.get(edge.to) || 0) + 1);
+    }
+    return [...nodes].sort((a, b) =>
+      (connectedCount.get(b.id) || 0) - (connectedCount.get(a.id) || 0)
+      || (nodeStates.get(b.id)?.score ?? 0.45) - (nodeStates.get(a.id)?.score ?? 0.45)
+      || a.id.localeCompare(b.id)
+    );
+  }
+
+  private edgeScore(
+    edge: GauzMemEdge,
+    edgeStates: Map<string, { score: number }>,
+    nodeStates: Map<string, { score: number }>,
+    degree: Map<string, number>,
+    anchorSet: Set<string>,
+  ): number {
+    const edgeScore = edgeStates.get(edge.id)?.score ?? 0.45;
+    const fromScore = nodeStates.get(edge.from)?.score ?? 0.45;
+    const toScore = nodeStates.get(edge.to)?.score ?? 0.45;
+    const anchorBoost = (anchorSet.has(edge.from) ? 0.08 : 0) + (anchorSet.has(edge.to) ? 0.08 : 0);
+    const degreeBoost = Math.min(0.08, ((degree.get(edge.from) || 0) + (degree.get(edge.to) || 0)) * 0.004);
+    return edgeScore * 0.65 + Math.max(fromScore, toScore) * 0.25 + anchorBoost + degreeBoost;
+  }
+
+  private degreeMap(edges: GauzMemEdge[]): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const edge of edges) {
+      map.set(edge.from, (map.get(edge.from) || 0) + 1);
+      map.set(edge.to, (map.get(edge.to) || 0) + 1);
+    }
+    return map;
+  }
+
+  private buildPromptMemory(
+    selection: {
+      selectedNodeIds: string[];
+      selectedEdgeIds: string[];
+    },
+    sessionKey?: string,
+    nearbyContext?: GauzMemNearbyContext,
+  ): GauzMemPromptMemory {
+    const edgeMap = new Map(this.graph.readEdges().map(edge => [edge.id, edge]));
+    const selectedNodeSet = new Set(selection.selectedNodeIds);
+    const selectedEdgeSet = new Set(selection.selectedEdgeIds);
+    const anchors = this.uniqueStrings([
+      ...selection.selectedNodeIds,
+      ...selection.selectedEdgeIds.flatMap(id => {
+        const edge = edgeMap.get(id);
+        return edge ? [edge.from, edge.to] : [];
+      }),
+    ]);
+    const disclosed = !nearbyContext && anchors.length > 0
+      ? this.filterGraphByScope(this.graph.disclose(anchors), sessionKey)
+      : { nodes: [], edges: [] };
+    return {
+      selectedNodeIds: selection.selectedNodeIds,
+      selectedEdgeIds: selection.selectedEdgeIds,
+      nearbyNodeIds: nearbyContext
+        ? this.uniqueStrings(nearbyContext.nodeIds.filter(id => !selectedNodeSet.has(id)))
+        : this.uniqueStrings(disclosed.nodes.map(node => node.id).filter(id => !selectedNodeSet.has(id))),
+      nearbyEdgeIds: nearbyContext
+        ? this.uniqueStrings(nearbyContext.edgeIds.filter(id => !selectedEdgeSet.has(id)))
+        : this.uniqueStrings(disclosed.edges.map(edge => edge.id).filter(id => !selectedEdgeSet.has(id))),
+    };
+  }
+
+  private buildPromptBundle(rootQuery: string, searchTerms: string[], memory: GauzMemPromptMemory): string {
+    const nodeMap = new Map(this.graph.readNodes().map(node => [node.id, node]));
+    const edgeMap = new Map(this.graph.readEdges().map(edge => [edge.id, edge]));
+    const relevantLines: string[] = [];
+    for (const id of memory.selectedNodeIds) {
+      const node = nodeMap.get(id);
+      if (node) relevantLines.push(`- ${node.text}`);
+    }
+    for (const id of memory.selectedEdgeIds) {
+      const edge = edgeMap.get(id);
+      if (edge) relevantLines.push(`- ${edge.text}`);
+    }
+    const nearbyLines: string[] = [];
+    for (const id of memory.nearbyNodeIds) {
+      const node = nodeMap.get(id);
+      if (node) nearbyLines.push(`- ${node.text}`);
+    }
+    for (const id of memory.nearbyEdgeIds) {
+      const edge = edgeMap.get(id);
+      if (edge) nearbyLines.push(`- ${edge.text}`);
+    }
+    if (relevantLines.length === 0 && nearbyLines.length === 0) return '';
+    const lines = [
+      `Root query: ${rootQuery}`,
+      searchTerms.length > 0 ? `Terms: ${searchTerms.join(', ')}` : '',
+      '',
+    ];
+    if (relevantLines.length > 0) {
+      lines.push('Relevant memory:');
+      lines.push(...relevantLines);
+    }
+    if (nearbyLines.length > 0) {
+      if (relevantLines.length > 0) lines.push('');
+      lines.push('Nearby memory context:');
+      lines.push(...nearbyLines);
+    }
+    return lines.filter((line, index, all) => line !== '' || (index > 0 && all[index - 1] !== '')).join('\n');
   }
 
   private scope(): GauzMemScope {
     return String(process.env.GAUZMEM_SCOPE || 'global').toLowerCase() === 'session' ? 'session' : 'global';
   }
 
-  private isPromptInjectionEnabled(): boolean {
+  isPromptInjectionEnabled(): boolean {
     return ConfigManager.getConfigReadonly().gauzmem?.promptInjectionEnabled !== false;
   }
 
@@ -854,8 +1360,58 @@ export class GauzMemService {
     return Array.from(new Set(items.map(item => item.trim()).filter(Boolean)));
   }
 
+  private uniqueNumbers(items: number[]): number[] {
+    return Array.from(new Set(items.filter(item => Number.isFinite(item))));
+  }
+
+  private ratio(count: number, total: number): number {
+    return total > 0 ? count / total : 0;
+  }
+
+  private percent(value: number): string {
+    return `${(value * 100).toFixed(1)}%`;
+  }
+
   private saveRun(run: GauzMemRunRecord): void {
     appendJsonl(GauzMemFiles.runs(), run);
+  }
+
+  private saveGraphSnapshot(run: GauzMemRunRecord, sessionKey?: string): string {
+    const snapshotId = 'gzs_' + stableHash(`${run.runId}:graph_snapshot`);
+    const nodeStates = this.graph.readNodeStates();
+    const edgeStates = this.graph.readEdgeStates();
+    const scopedGraph = this.filterGraphByScope(
+      { nodes: this.graph.readNodes(), edges: this.graph.readEdges() },
+      sessionKey,
+    );
+    const nodeIds = new Set(scopedGraph.nodes.map(node => node.id));
+    const edgeIds = new Set(scopedGraph.edges.map(edge => edge.id));
+    const stateItem = (id: string, state: { score: number; faded: boolean } | undefined) => ({
+      id,
+      score: state?.score ?? 0.45,
+      faded: Boolean(state?.faded),
+    });
+    const allNodes = scopedGraph.nodes.map(node => stateItem(node.id, nodeStates.get(node.id)));
+    const allEdges = scopedGraph.edges
+      .filter(edge => nodeIds.has(edge.from) && nodeIds.has(edge.to) && edgeIds.has(edge.id))
+      .map(edge => stateItem(edge.id, edgeStates.get(edge.id)));
+    const snapshot: GauzMemGraphSnapshot = {
+      snapshotId,
+      runId: run.runId,
+      timestamp: new Date().toISOString(),
+      scope: this.scope(),
+      sessionKey,
+      normalNodes: allNodes.filter(item => !item.faded && item.score >= SNAPSHOT_NORMAL_THRESHOLD),
+      normalEdges: allEdges.filter(item => !item.faded && item.score >= SNAPSHOT_NORMAL_THRESHOLD),
+      deepNodes: allNodes.filter(item => !item.faded && item.score >= SNAPSHOT_DEEP_THRESHOLD),
+      deepEdges: allEdges.filter(item => !item.faded && item.score >= SNAPSHOT_DEEP_THRESHOLD),
+    };
+    appendJsonl(GauzMemFiles.graphSnapshots(), snapshot);
+    return snapshotId;
+  }
+
+  private saveConstructArtifact(artifact: GauzMemConstructArtifact): void {
+    appendJsonl(GauzMemFiles.constructArtifacts(), artifact);
   }
 
   private extractRecentContext(messages: Message[]): { previousUser?: string; previousAssistant?: string } {

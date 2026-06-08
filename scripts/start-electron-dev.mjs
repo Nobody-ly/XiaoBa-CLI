@@ -4,10 +4,12 @@ import electronPath from 'electron';
 import { resolveElectronDevOptions } from './electron-dev-options.mjs';
 
 const { env, port, userDataDir } = resolveElectronDevOptions();
-fs.mkdirSync(userDataDir, { recursive: true });
+if (userDataDir) {
+  fs.mkdirSync(userDataDir, { recursive: true });
+}
 
 console.log(`[dev] Dashboard port: ${port}`);
-console.log(`[dev] User data: ${userDataDir}`);
+console.log(`[dev] User data: ${userDataDir || 'Electron default'}`);
 
 const child = spawn(electronPath, ['.'], {
   cwd: process.cwd(),

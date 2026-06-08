@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 const moduleUrl = pathToFileURL(path.join(process.cwd(), 'scripts/electron-dev-options.mjs')).href;
 
-test('electron dev defaults to an isolated port and user data directory', async () => {
+test('electron dev defaults to an isolated port and Electron default user data directory', async () => {
   const { resolveElectronDevOptions } = await import(moduleUrl) as any;
   const cwd = path.resolve('D:/XiaoBa-CLI-public');
   const result = resolveElectronDevOptions({
@@ -16,11 +16,10 @@ test('electron dev defaults to an isolated port and user data directory', async 
     },
   });
 
-  const expectedUserDataDir = path.join(cwd, '.dev-user-data');
   assert.equal(result.port, '3810');
-  assert.equal(result.userDataDir, expectedUserDataDir);
+  assert.equal(result.userDataDir, undefined);
   assert.equal(result.env.XIAOBA_DASHBOARD_PORT, '3810');
-  assert.equal(result.env.XIAOBA_ELECTRON_USER_DATA_DIR, expectedUserDataDir);
+  assert.equal(result.env.XIAOBA_ELECTRON_USER_DATA_DIR, undefined);
   assert.equal(result.env.ELECTRON_RUN_AS_NODE, undefined);
   assert.equal(result.env.PATH, 'base-path');
 });

@@ -277,4 +277,43 @@ describe('GauzMemSourceJournal', () => {
     assert.equal(all.some(record => record.text.includes('engine.md')), true);
     assert.equal(all.some(record => record.text.includes('Dawn must reroute power')), true);
   });
+
+  test('preserves full source text without truncating long blocks', () => {
+    const journal = new GauzMemSourceJournal();
+    const longToolResult = `start-${'x'.repeat(7000)}-end`;
+
+    journal.appendTurn({
+      sessionKey: 'session-a',
+      sessionType: 'catscompany',
+      turnId: 'turn-long-source',
+      userInput: 'Read the long archive.',
+      result: {
+        response: 'Done.',
+        finalResponseVisible: true,
+        newMessages: [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: 'call-1',
+              type: 'function',
+              function: { name: 'read_file', arguments: '{"file_path":"archive.md"}' },
+            }],
+          },
+          {
+            role: 'tool',
+            name: 'read_file',
+            tool_call_id: 'call-1',
+            content: longToolResult,
+          },
+        ],
+        messages: [],
+      },
+    });
+
+    const toolResult = journal.readAll().find(record => record.blockType === 'tool_result');
+    assert.ok(toolResult);
+    assert.equal(toolResult.text, longToolResult);
+    assert.equal(toolResult.text.endsWith('-end'), true);
+  });
 });

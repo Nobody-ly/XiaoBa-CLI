@@ -26,5 +26,7 @@ export const GauzMemFiles = {
   nodeState: () => path.join(getGauzMemStoreDir(), 'node_state.jsonl'),
   edgeState: () => path.join(getGauzMemStoreDir(), 'edge_state.jsonl'),
   runs: () => path.join(getGauzMemStoreDir(), 'runs.jsonl'),
+  graphSnapshots: () => path.join(getGauzMemStoreDir(), 'graph_snapshots.jsonl'),
+  constructArtifacts: () => path.join(getGauzMemStoreDir(), 'construct_artifacts.jsonl'),
   events: () => path.join(getGauzMemStoreDir(), 'events.jsonl'),
 };

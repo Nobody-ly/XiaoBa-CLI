@@ -365,13 +365,7 @@
         <div class="run ${run.runId === selectedRunId ? 'active' : ''}" onclick="loadRun('${run.runId}')">
           <div class="run-title">${escapeHtml(cleanQuery(run.query || '(empty)'))}</div>
           <div class="muted">${formatTime(run.timestamp)} · ${escapeHtml(run.kind || 'recall')} · ${escapeHtml(run.callType)} · ${escapeHtml(run.runId)}</div>
-          <div class="run-meta">
-            <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
-            <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
-            <span class="pill">rej ${run.rejectedNodeIds.length}/${run.rejectedEdgeIds.length}</span>
-            <span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>
-            <span class="pill">retriever ${escapeHtml(String(run.stats?.durationMs ?? 0))}ms</span>
-          </div>
+          <div class="run-meta">${runMetaPills(run)}</div>
         </div>
       `).join('') || '<div class="empty">No runs yet.</div>';
       if (selectedRunId) await loadRunDetailOnly(selectedRunId);
@@ -391,40 +385,119 @@
       return (run.reasonerSteps || []).reduce((sum, step) => sum + (Number(step.durationMs) || 0), 0);
     }
 
+    function formatDuration(ms) {
+      const value = Number(ms) || 0;
+      return `${(value / 1000).toFixed(1)}s`;
+    }
+
+    function durationLabel(run) {
+      const label = (run.kind || 'recall') === 'construct' ? 'construct' : 'retriever';
+      return `${label} ${formatDuration(run.stats?.durationMs)}`;
+    }
+
+    function runSucceeded(run) {
+      return run.status === 'ok';
+    }
+
+    function runMetaPills(run) {
+      const statusClass = runSucceeded(run) ? 'ok' : 'err';
+      const statusText = runSucceeded(run) ? 'ok' : 'failed';
+      const pills = [
+        `<span class="pill ${statusClass}">${escapeHtml(statusText)}</span>`,
+        `<span class="pill">${escapeHtml(durationLabel(run))}</span>`,
+      ];
+      if (!runSucceeded(run)) {
+        pills.push('<span class="pill warn">not applied</span>');
+        return pills.join('');
+      }
+      pills.push(`<span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>`);
+      pills.push(`<span class="pill">rej ${run.rejectedNodeIds.length}/${run.rejectedEdgeIds.length}</span>`);
+      pills.push(`<span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>`);
+      return pills.join('');
+    }
+
     function renderRun(run) {
       const queryPlan = run.queryPlan || {};
-      const graphSteps = (run.trace || []).filter(step =>
-        ['graph_scan', 'disclose_initial', 'relevance_graph_initial', 'graph_frontier'].includes(step.step)
-      );
+      const graphGrepSteps = (run.trace || []).filter(step => step.step === 'graph_grep');
+        const relevanceSteps = (run.trace || []).filter(step => step.step === 'relevance_grep');
+        const oneHopSteps = (run.trace || []).filter(step => step.step === 'disclose_selected');
       const rootSteps = (run.trace || []).filter(step => step.step.startsWith('root_') || step.step === 'relevance_construct_root');
       const nodeSteps = (run.trace || []).filter(step => step.step.startsWith('node_') || step.step === 'relevance_construct_node');
+      if (!runSucceeded(run)) return renderFailedRun(run, queryPlan);
       return `
         <div>
-          <span class="pill ${run.status === 'ok' ? 'ok' : 'err'}">${escapeHtml(run.status)}</span>
+          <span class="pill ok">ok</span>
           <span class="pill">${escapeHtml(run.kind || 'recall')}</span>
           <span class="pill">${formatTime(run.timestamp)}</span>
-          <span class="pill">retriever ${escapeHtml(String(run.stats?.durationMs ?? 0))}ms</span>
-          <span class="pill">reasoner ${escapeHtml(String(totalReasonerMs(run)))}ms</span>
+          <span class="pill">${escapeHtml(durationLabel(run))}</span>
+          <span class="pill">reasoner ${escapeHtml(formatDuration(totalReasonerMs(run)))}</span>
           <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
           <span class="pill">rej ${run.rejectedNodeIds.length}/${run.rejectedEdgeIds.length}</span>
           <span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>
+          <span class="pill">${escapeHtml(grepSummary(run))}</span>
           <span class="muted">${escapeHtml(run.runId)}</span>
         </div>
         <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>
         ${run.error ? `<pre>${escapeHtml(run.error)}</pre>` : ''}
         <div class="section"><h2>Query</h2>
           <div class="item"><strong>rootQuery</strong><pre class="compact-json">${escapeHtml(queryPlan.rootQuery || '')}</pre></div>
-          <div class="item"><strong>terms</strong><div>${(queryPlan.searchTerms || []).map(term => `<span class="pill">${escapeHtml(term)}</span>`).join('') || '<span class="muted">none</span>'}</div></div>
+          ${renderQueryTerms(queryPlan)}
         </div>
-        <div class="section"><h2>Graph</h2>${renderStepCards(graphSteps)}<h3>selected</h3>${itemCards(run.selectedNodeIds, 'node')}${itemCards(run.selectedEdgeIds, 'edge')}<h3>rejected</h3>${itemCards(run.rejectedNodeIds, 'node', true)}${itemCards(run.rejectedEdgeIds, 'edge', true)}</div>
+        <div class="section"><h2>Graph Grep</h2><div class="muted">${escapeHtml(grepSummary(run))}</div>${renderStepCards(graphGrepSteps)}</div>
+        <div class="section"><h2>Relevance</h2>${renderStepCards(relevanceSteps)}<h3>selected</h3>${itemCards(run.selectedNodeIds, 'node')}${itemCards(run.selectedEdgeIds, 'edge')}<h3>rejected</h3>${itemCards(run.rejectedNodeIds, 'node', true)}${itemCards(run.rejectedEdgeIds, 'edge', true)}</div>
+        <div class="section"><h2>One-hop Context</h2><div class="muted">${escapeHtml(oneHopSummary(run))}</div>${renderStepCards(oneHopSteps)}</div>
         <div class="section"><h2>Root Construct</h2>${renderStepCards(rootSteps)}</div>
         <div class="section"><h2>Node Construct</h2>${renderStepCards(nodeSteps)}</div>
-        <div class="section"><h2>Reasoner</h2><div class="card-list">${run.reasonerSteps.map(s => `<div class="item"><span class="pill ${s.ok ? 'ok' : 'err'}">${escapeHtml(s.name)}</span><span class="muted">${s.durationMs}ms</span>${s.error ? `<pre>${escapeHtml(s.error)}</pre>` : ''}<pre class="compact-json">${escapeHtml(s.outputPreview || s.inputPreview || '')}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
+        <div class="section"><h2>Reasoner</h2><div class="card-list">${run.reasonerSteps.map(s => `<div class="item"><span class="pill ${s.ok ? 'ok' : 'err'}">${escapeHtml(s.name)}</span><span class="muted">${formatDuration(s.durationMs)}</span>${s.error ? `<pre>${escapeHtml(s.error)}</pre>` : ''}<pre class="compact-json">${escapeHtml(s.outputPreview || s.inputPreview || '')}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
         <div class="section"><h2>Source Windows</h2><div class="card-list">${run.sourceWindows.map(w => `<div class="item"><strong>${escapeHtml(w.windowId)}</strong><div class="muted">${escapeHtml(w.sourceId)} · ${escapeHtml(w.sessionKey)} · terms ${escapeHtml(String(w.distinctTermCount || 0))} · first ${escapeHtml(String(w.firstMatchedTermIndex ?? ''))} · span ${escapeHtml((w.span && `${w.span.start}-${w.span.end}`) || '')}</div><div>${(w.matchedTerms || []).map(term => `<span class="pill">${escapeHtml(term)}</span>`).join('') || '<span class="muted">no matched terms</span>'}</div><pre>${escapeHtml(w.text)}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
         <div class="section"><h2>Evidence</h2><div class="card-list">${run.extractedEvidence.map(e => `<div class="item"><strong>${escapeHtml(e.text || '')}</strong><div class="muted">${escapeHtml(e.sourceId || '')} · span ${escapeHtml((e.span && `${e.span.start}-${e.span.end}`) || '')}</div>${e.sourceSnippet ? `<pre>${escapeHtml(e.sourceSnippet)}</pre>` : ''}</div>`).join('') || '<div class="empty">none</div>'}</div></div>
         <div class="section"><h2>Selections</h2><pre class="compact-json">${escapeHtml(JSON.stringify({selectedNodeIds: run.selectedNodeIds, selectedEdgeIds: run.selectedEdgeIds, rejectedNodeIds: run.rejectedNodeIds, rejectedEdgeIds: run.rejectedEdgeIds, fadedNodeIds: run.fadedNodeIds, fadedEdgeIds: run.fadedEdgeIds}, null, 2))}</pre></div>
         <div class="section"><h2>Weights</h2><div class="card-list">${run.weightChanges.map(w => `<div class="item"><span class="pill ${w.reason === 'selected' ? 'ok' : 'err'}">${escapeHtml(w.reason)} ${escapeHtml(w.kind)}</span> ${escapeHtml(w.id)} <span class="muted">${round(w.before)} -> ${round(w.after)} (${round(w.delta)}) ${w.faded ? 'faded' : ''}</span></div>`).join('') || '<div class="empty">none</div>'}</div></div>
         <div class="section"><h2>Prompt Bundle</h2><pre>${escapeHtml(run.promptBundle || '(empty)')}</pre></div>
+      `;
+    }
+
+    function grepSummary(run) {
+      const s = run.stats || {};
+      if (typeof s.grepNodeCount !== 'number' && typeof s.grepEdgeCount !== 'number') return 'grep n/a';
+      return [
+        `grep nodes ${s.grepNodeCount || 0}/${s.retrievableNodeCount || 0} (${formatRatio(s.grepNodeRatio)})`,
+        `edges ${s.grepEdgeCount || 0}/${s.retrievableEdgeCount || 0} (${formatRatio(s.grepEdgeRatio)})`,
+      ].join(' · ');
+    }
+
+    function renderQueryTerms(queryPlan) {
+      const terms = queryPlan.searchTerms || [];
+      return `<div class="item"><strong>searchTerms</strong><div>${terms.map(term => `<span class="pill">${escapeHtml(term)}</span>`).join('') || '<span class="muted">none</span>'}</div></div>`;
+    }
+
+    function oneHopSummary(run) {
+      const s = run.stats || {};
+      return `one-hop nodes ${s.oneHopNodeCount || 0} · edges ${s.oneHopEdgeCount || 0} · prompt ${s.promptCharCount || 0} chars`;
+    }
+
+    function formatRatio(value) {
+      return `${(Number(value || 0) * 100).toFixed(1)}%`;
+    }
+
+    function renderFailedRun(run, queryPlan) {
+      return `
+        <div>
+          <span class="pill err">failed</span>
+          <span class="pill">${escapeHtml(run.kind || 'recall')}</span>
+          <span class="pill warn">not applied</span>
+          <span class="pill">${formatTime(run.timestamp)}</span>
+          <span class="pill">${escapeHtml(durationLabel(run))}</span>
+          <span class="pill">reasoner ${escapeHtml(formatDuration(totalReasonerMs(run)))}</span>
+          <span class="muted">${escapeHtml(run.runId)}</span>
+        </div>
+        <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>
+        <div class="section"><h2>Error</h2><pre>${escapeHtml(run.error || 'unknown error')}</pre></div>
+        <div class="section"><h2>Query</h2>
+          <div class="item"><strong>rootQuery</strong><pre class="compact-json">${escapeHtml(queryPlan.rootQuery || '')}</pre></div>
+          ${renderQueryTerms(queryPlan)}
+        </div>
+        <div class="section"><h2>Reasoner</h2><div class="card-list">${run.reasonerSteps.map(s => `<div class="item"><span class="pill ${s.ok ? 'ok' : 'err'}">${escapeHtml(s.name)}</span><span class="muted">${formatDuration(s.durationMs)}</span>${s.error ? `<pre>${escapeHtml(s.error)}</pre>` : ''}<pre class="compact-json">${escapeHtml(s.outputPreview || s.inputPreview || '')}</pre></div>`).join('') || '<div class="empty">none</div>'}</div></div>
       `;
     }
 
@@ -462,15 +535,86 @@
       </div>`;
     }
 
-    function findGraphItem(id, kind) {
-      const items = kind === 'node' ? (graphData.nodes || []) : (graphData.edges || []);
-      return items.find(item => item.id === id);
-    }
+      function findGraphItem(id, kind) {
+        const items = kind === 'node' ? (graphData.nodes || []) : (graphData.edges || []);
+        return items.find(item => item.id === id);
+      }
 
-    async function loadGraph() {
-      graphData = await api('/gauzmem/graph');
-      drawGraph();
-    }
+      function renderRun(run) {
+        const queryPlan = run.queryPlan || {};
+        if (!runSucceeded(run)) return renderFailedRun(run, queryPlan);
+        if ((run.kind || 'recall') === 'construct') return renderConstructRun(run);
+        return `
+          <div>
+            <span class="pill ok">ok</span>
+            <span class="pill">recall</span>
+            <span class="pill">${formatTime(run.timestamp)}</span>
+            <span class="pill">${escapeHtml(durationLabel(run))}</span>
+            <span class="pill">reasoner ${escapeHtml(formatDuration(totalReasonerMs(run)))}</span>
+            <span class="pill">sel ${run.selectedNodeIds.length}/${run.selectedEdgeIds.length}</span>
+            <span class="muted">${escapeHtml(run.runId)}</span>
+          </div>
+          <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>
+          <div class="section"><h2>Query</h2>
+            <div class="item"><strong>rootQuery</strong><pre class="compact-json">${escapeHtml(queryPlan.rootQuery || '')}</pre></div>
+            ${renderQueryTerms(queryPlan)}
+          </div>
+          <div class="section"><h2>Selected Memory</h2>
+            ${itemCards(run.selectedNodeIds, 'node')}
+            ${itemCards(run.selectedEdgeIds, 'edge')}
+          </div>
+          <div class="section"><h2>Prompt</h2><pre>${escapeHtml(run.promptBundle || '(empty)')}</pre></div>
+        `;
+      }
+
+      function renderConstructRun(run) {
+        const mergedNodeIds = simpleTraceIds(run, ['construct_merge_node', 'construct_dedup_node'], 'nodeIds');
+        const skipped = simpleTraceDetails(run, ['construct_skipped_edge', 'construct_warning']);
+        return `
+          <div>
+            <span class="pill ok">ok</span>
+            <span class="pill">construct</span>
+            <span class="pill">${formatTime(run.timestamp)}</span>
+            <span class="pill">${escapeHtml(durationLabel(run))}</span>
+            <span class="pill">new ${run.createdNodeIds.length}/${run.createdEdgeIds.length}</span>
+            ${run.artifactId ? `<span class="pill">artifact ${escapeHtml(shortId(run.artifactId))}</span>` : ''}
+            <span class="muted">${escapeHtml(run.runId)}</span>
+          </div>
+          <pre class="compact-json">${escapeHtml(cleanQuery(run.query || ''))}</pre>
+          <div class="section"><h2>Created</h2>
+            <h3>nodes</h3>${itemCards(run.createdNodeIds, 'node')}
+            <h3>edges</h3>${itemCards(run.createdEdgeIds, 'edge')}
+          </div>
+          <div class="section"><h2>Merged</h2>${itemCards(mergedNodeIds, 'node')}</div>
+          <div class="section"><h2>Skipped / Warnings</h2>${renderSimpleDetails(skipped)}</div>
+        `;
+      }
+
+      function simpleTraceIds(run, stepNames, field) {
+        const ids = [];
+        for (const step of run.trace || []) {
+          if (stepNames.includes(step.step)) ids.push(...(step[field] || []));
+        }
+        return Array.from(new Set(ids));
+      }
+
+      function simpleTraceDetails(run, stepNames) {
+        const details = [];
+        for (const step of run.trace || []) {
+          if (stepNames.includes(step.step) && step.detail) details.push(step.detail);
+        }
+        return Array.from(new Set(details));
+      }
+
+      function renderSimpleDetails(details) {
+        if (!details || details.length === 0) return '<div class="empty">none</div>';
+        return `<div class="card-list">${details.map(detail => `<div class="item">${escapeHtml(detail)}</div>`).join('')}</div>`;
+      }
+  
+      async function loadGraph() {
+        graphData = await api('/gauzmem/graph');
+        drawGraph();
+      }
 
     function drawGraph() {
       const svg = document.getElementById('graph');
@@ -591,8 +735,8 @@
     }
 
     function isMutedInCurrentMode(item) {
-      if (graphDisplayMode !== 'all') return isFaded(item);
-      return isFaded(item) || scoreOf(item) < NORMAL_GRAPH_THRESHOLD;
+      if (graphDisplayMode === 'normal') return isFaded(item);
+      return isFaded(item) || isLowScoreInExpandedMode(item);
     }
 
     function updateGraphSummary(fullNodes, fullEdges, filtered) {
@@ -877,8 +1021,8 @@
     }
 
     function nodeColor(score, clusterIndex = 0, muted = false) {
-      if (muted) return '#e5e7eb';
       const hue = CLUSTER_HUES[Math.abs(clusterIndex) % CLUSTER_HUES.length];
+      if (muted) return `hsl(${hue} 70% 48%)`;
       const intensity = visualScoreIntensity(score);
       if (intensity < 0.08) return '#e5e7eb';
       const saturation = 18 + intensity * 70;
@@ -887,13 +1031,18 @@
     }
 
     function edgeColor(score, clusterIndex = 0, muted = false) {
-      if (muted) return '#c7ced8';
       const hue = CLUSTER_HUES[Math.abs(clusterIndex) % CLUSTER_HUES.length];
+      if (muted) return `hsl(${hue} 66% 48%)`;
       const intensity = visualScoreIntensity(score);
       if (intensity < 0.08) return '#cbd5e1';
       const saturation = 16 + intensity * 60;
       const lightness = 82 - intensity * 48;
       return `hsl(${hue} ${saturation}% ${lightness}%)`;
+    }
+
+    function mutedTextColor(clusterIndex = 0) {
+      const hue = CLUSTER_HUES[Math.abs(clusterIndex) % CLUSTER_HUES.length];
+      return `hsl(${hue} 48% 36%)`;
     }
 
     function scoreIntensity(score) {
@@ -906,9 +1055,7 @@
       const relative = span > 0.001
         ? clamp((Number(score || 0) - range.min) / span, 0, 1)
         : scoreIntensity(score);
-      if (graphDisplayMode !== 'normal' && Number(score || 0) < NORMAL_GRAPH_THRESHOLD) {
-        return clamp(relative * 0.18, 0, 0.18);
-      }
+      if (isLowScoreInExpandedModeScore(score)) return clamp(0.18 + relative * 0.18, 0.18, 0.36);
       return 0.34 + relative * 0.66;
     }
 
@@ -918,6 +1065,15 @@
 
     function isFaded(item) {
       return Boolean(item.state && item.state.faded);
+    }
+
+    function isLowScoreInExpandedMode(item) {
+      return isLowScoreInExpandedModeScore(scoreOf(item));
+    }
+
+    function isLowScoreInExpandedModeScore(score) {
+      return graphDisplayMode !== 'normal'
+        && Number(score || 0) < NORMAL_GRAPH_THRESHOLD;
     }
 
     function labelFor(text) {
@@ -1010,7 +1166,7 @@
         ...node,
         index,
         cluster: clusterByNode.get(node.id) || 0,
-        radius: isMutedInCurrentMode(node) ? 7 : 10 + Math.min(9, scoreIntensity(scoreOf(node)) * 9),
+        radius: isMutedInCurrentMode(node) ? 8.8 : 10 + Math.min(9, scoreIntensity(scoreOf(node)) * 9),
         labelWidth: Math.min(280, 40 + cleanQuery(node.text || node.id).length * 6.4),
         x: 0,
         y: 0,
@@ -1169,9 +1325,11 @@
         ctx.lineTo(tx, ty);
         const intensity = visualScoreIntensity(scoreOf(edge));
         ctx.strokeStyle = edgeColor(scoreOf(edge), edge.source.cluster, muted);
-        ctx.globalAlpha = muted ? 0.18 : 0.22 + intensity * 0.58;
-        ctx.lineWidth = (muted ? 0.8 : 0.9 + intensity * 3.4) / Math.sqrt(state.transform.k);
+        ctx.globalAlpha = muted ? 0.68 : 0.22 + intensity * 0.58;
+        ctx.lineWidth = (muted ? 1.8 : 0.9 + intensity * 3.4) / Math.sqrt(state.transform.k);
+        if (muted) ctx.setLineDash([5 / Math.sqrt(state.transform.k), 5 / Math.sqrt(state.transform.k)]);
         ctx.stroke();
+        if (muted) ctx.setLineDash([]);
         ctx.globalAlpha = 1;
       }
 
@@ -1184,11 +1342,13 @@
         ctx.fill();
         ctx.beginPath();
         ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-        ctx.fillStyle = nodeColor(scoreOf(node), node.cluster, muted);
+        ctx.fillStyle = muted ? 'rgba(255,255,255,.82)' : nodeColor(scoreOf(node), node.cluster, muted);
         ctx.fill();
-        ctx.lineWidth = muted ? 1 : 1.1 + intensity * 2.2;
-        ctx.strokeStyle = muted ? 'rgba(203,213,225,.8)' : 'rgba(255,255,255,.95)';
+        ctx.lineWidth = muted ? 1.9 : 1.1 + intensity * 2.2;
+        ctx.strokeStyle = muted ? edgeColor(scoreOf(node), node.cluster, true) : 'rgba(255,255,255,.95)';
+        if (muted) ctx.setLineDash([4 / Math.sqrt(state.transform.k), 4 / Math.sqrt(state.transform.k)]);
         ctx.stroke();
+        if (muted) ctx.setLineDash([]);
       }
 
       ctx.font = '650 12px system-ui, -apple-system, Segoe UI, sans-serif';
@@ -1203,7 +1363,7 @@
         ctx.fillStyle = muted ? 'rgba(248,250,252,.56)' : 'rgba(248,250,252,.78)';
         roundCanvasRect(ctx, x - 4, y - 10, width, 20, 5);
         ctx.fill();
-        ctx.fillStyle = muted ? '#94a3b8' : '#26354a';
+        ctx.fillStyle = muted ? mutedTextColor(node.cluster) : '#26354a';
         ctx.fillText(label, x, y);
       }
       ctx.restore();

@@ -123,6 +123,8 @@ export interface GauzMemWeightChange {
 export interface GauzMemRunRecord {
   runId: string;
   kind?: GauzMemRunKind;
+  snapshotId?: string;
+  artifactId?: string;
   callType: GauzMemCallType;
   sessionKey?: string;
   sessionType?: string;
@@ -168,7 +170,75 @@ export interface GauzMemRunRecord {
     mergedNodeCount?: number;
     skippedEdgeCount?: number;
     warningCount?: number;
+    grepNodeCount?: number;
+    grepEdgeCount?: number;
+    relevanceCandidateNodeCount?: number;
+    relevanceCandidateEdgeCount?: number;
+    relevanceCandidateDroppedNodeCount?: number;
+    relevanceCandidateDroppedEdgeCount?: number;
+    retrievableNodeCount?: number;
+    retrievableEdgeCount?: number;
+    grepNodeRatio?: number;
+    grepEdgeRatio?: number;
+    relevanceSelectedNodeCount?: number;
+    relevanceSelectedEdgeCount?: number;
+    relevanceRejectedNodeCount?: number;
+    relevanceRejectedEdgeCount?: number;
+    oneHopNodeCount?: number;
+    oneHopEdgeCount?: number;
+    oneHopRawNodeCount?: number;
+    oneHopRawEdgeCount?: number;
+    promptCharCount?: number;
   };
+}
+
+export interface GauzMemGraphSnapshotItem {
+  id: string;
+  score: number;
+  faded: boolean;
+}
+
+export interface GauzMemGraphSnapshot {
+  snapshotId: string;
+  runId: string;
+  timestamp: string;
+  scope: 'global' | 'session';
+  sessionKey?: string;
+  normalNodes: GauzMemGraphSnapshotItem[];
+  normalEdges: GauzMemGraphSnapshotItem[];
+  deepNodes: GauzMemGraphSnapshotItem[];
+  deepEdges: GauzMemGraphSnapshotItem[];
+}
+
+export interface GauzMemConstructArtifact {
+  artifactId: string;
+  runId: string;
+  timestamp: string;
+  sessionKey?: string;
+  sessionType?: string;
+  input: {
+    sourceBatch: Array<{
+      sourceId: string;
+      turnId: string;
+      role: string;
+      blockType?: string;
+      text: string;
+    }>;
+    graph: {
+      nodes: Array<{ id: string; text: string; score?: number }>;
+      edges: Array<{ id: string; from: string; to: string; text: string; score?: number }>;
+    };
+  };
+  patch?: GauzMemGraphPatch;
+  applyResult?: {
+    tempToNodeId: Array<[string, string]>;
+    createdNodeIds: string[];
+    createdEdgeIds: string[];
+    mergedNodeIds: string[];
+    skippedEdges: string[];
+    warnings: string[];
+  };
+  error?: string;
 }
 
 export interface GauzMemRecallResult {

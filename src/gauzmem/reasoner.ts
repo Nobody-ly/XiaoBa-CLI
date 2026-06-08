@@ -44,14 +44,28 @@ export class GauzMemReasoner {
       `Call ${QUERY_PLAN_TOOL} with the result.`,
       'Rules:',
       '- rootQuery is a concise resolved query, using recent context only to resolve references like "continue", "that", "he/she/it".',
-      '- If the current input starts by addressing someone (for example "小零，Dawn，..."), treat those names as addressees, not necessarily the subject being asked about.',
-      '- Resolve pronouns such as 他/她/它/that/he/she/it from the recent context instead of assuming the addressee is the subject.',
-      '- searchTerms are grep literals, not natural-language descriptions.',
-      '- Prefer short concrete entities, names, places, factions, files, decisions, and task nouns.',
-      '- Include useful aliases or near-synonyms directly as separate search terms.',
-      '- Avoid filler terms, one-character terms, pronouns, generic verbs, and long phrases with spaces.',
-      '- Prefer 2-6 Chinese characters or 1-3 English tokens, unless a proper name is naturally longer.',
-      '- Keep 4-10 search terms.',
+      '- If the current input starts by naming or addressing a character/person, usually include that name when the user is roleplaying them, asking about them, observing them, or acting through them.',
+      '- Do not automatically drop addressee/speaker names. Drop them only when they are pure UI routing labels and clearly irrelevant to the memory search.',
+      '- Resolve pronouns such as 他/她/它/that/he/she/it from the recent context, then include the resolved name if it is central to the request.',
+      '- searchTerms are literal grep anchors for a long-term memory graph, not explanations.',
+      '- A good anchor is a literal word or short phrase likely to appear verbatim in memory: person/entity, place, object, rule, file/module, state, event, decision, identifier, date, number, or unique phrase.',
+      '- Cover each explicit question or requested check with at least one anchor when possible.',
+      '- Include core participants even if they may be frequent, because the retriever will handle high-frequency terms after grep.',
+      '- Avoid obvious generic/filler words, pronouns, current-only instructions, generic verbs, and vague labels like 情况/信息/东西/问题.',
+      '- Prefer atomic grep terms over combined fact phrases. Split compound phrases unless the whole phrase is a stable proper name or fixed title.',
+      '- For example, prefer ["父亲", "昏迷"] over ["父亲昏迷"], and ["书房", "抽屉"] over ["书房抽屉"].',
+      '- Each array item must be one standalone anchor. Do not pack multiple anchors into one item with spaces.',
+      '- Include stable aliases only when likely to appear in memory; do not add broad synonyms that are unlikely to be written verbatim.',
+      '- Prefer 2-3 Chinese characters for ordinary terms, unless the term is a proper name, title, file/module name, protocol, identifier, or other fixed phrase.',
+      '- Prefer 1-2 English tokens for ordinary terms. Use 3+ English tokens only for stable proper names, official titles, file paths, module names, protocol names, or established identifiers likely to appear verbatim.',
+      '- Prefer 4-6 search terms. Use 7-8 only when the request truly has multiple stable anchors.',
+      '- Prefer a compact but sufficient set; every term should be independently useful for grep.',
+      '- If unsure, prefer cleaner atomic anchors over fewer combined phrases.',
+      'Bad searchTerms examples:',
+      '- ["客户A 合同延期", "报价表 价格", "父亲昏迷", "书房抽屉", "劳伦 伊莲娜"]',
+      'Good searchTerms examples:',
+      '- ["客户A", "延期", "报价表", "价格"]',
+      '- ["父亲", "昏迷", "书房", "抽屉", "劳伦", "伊莲娜"]',
       '',
       `Session: ${params.sessionType || 'unknown'} ${params.sessionKey || ''}`,
       `Current user input: ${truncateText(params.userInput, 1600)}`,
@@ -61,7 +75,7 @@ export class GauzMemReasoner {
     const json = await this.callSubmitTool('query_build', prompt, this.queryPlanTool());
     return {
       rootQuery: this.stringValue(json.rootQuery) || params.userInput,
-      searchTerms: this.stringArray(json.searchTerms).slice(0, 12),
+      searchTerms: this.uniqueStrings(this.stringArray(json.searchTerms)),
     };
   }
 
@@ -185,9 +199,9 @@ export class GauzMemReasoner {
       '',
       `Root query: ${params.rootQuery}`,
       'Nodes:',
-      JSON.stringify(params.nodes.map(n => ({ id: n.id, text: truncateText(n.text, 700) }))),
+      JSON.stringify(params.nodes.map(n => ({ id: n.id, text: n.text }))),
       'Edges:',
-      JSON.stringify(params.edges.map(e => ({ id: e.id, from: e.from, to: e.to, text: truncateText(e.text, 700) }))),
+      JSON.stringify(params.edges.map(e => ({ id: e.id, from: e.from, to: e.to, text: e.text }))),
     ].join('\n');
     const json = await this.callSubmitTool('relevance', prompt, this.relevanceTool());
     const nodeIds = new Set(params.nodes.map(n => n.id));
@@ -415,6 +429,10 @@ export class GauzMemReasoner {
     return value.map(item => String(item || '').trim()).filter(Boolean);
   }
 
+  private uniqueStrings(values: string[]): string[] {
+    return Array.from(new Set(values.map(value => value.trim()).filter(Boolean)));
+  }
+
   private stringValue(value: unknown): string {
     return String(value || '').trim();
   }
@@ -467,13 +485,23 @@ export class GauzMemReasoner {
   private queryPlanTool(): ToolDefinition {
     return {
       name: QUERY_PLAN_TOOL,
-      description: 'Submit the GauzMem query plan.',
+      description: 'Submit a short memory search plan with one resolved query and a compact list of literal keywords.',
       parameters: {
         type: 'object',
         required: ['rootQuery', 'searchTerms'],
         properties: {
-          rootQuery: { type: 'string' },
-          searchTerms: { type: 'array', items: { type: 'string' } },
+          rootQuery: {
+            type: 'string',
+              description: 'A concise natural-language summary of what the user wants to recall or continue. Do not write keywords here.',
+            },
+            searchTerms: {
+              type: 'array',
+              description: 'Return 4-6 standalone literal keywords for substring search. Use 7-8 only for clearly separate stable anchors. Prefer short names, places, objects, states, identifiers, and numbers. Do not output sentence-like descriptions or pack multiple anchors into one item.',
+              items: {
+                type: 'string',
+                description: 'One standalone keyword. Prefer 父亲 and 昏迷 as separate items instead of 父亲昏迷; keep fixed proper names such as Lady Blackbird intact.',
+              },
+            },
         },
       },
     };

@@ -137,21 +137,31 @@ export class GauzMemGraphStore {
       if (this.matchedTermIndexes(node.text, lowered).length === 0) continue;
       nodeMap.set(node.id, node);
     }
-    const nodes = this.sortByTermMatches(Array.from(nodeMap.values()), lowered, node => node.text);
-    const nodeIds = new Set(nodes.map(node => node.id));
+    const nodes = Array.from(nodeMap.values());
     const edgeMap = new Map<string, GauzMemEdge>();
     for (const edge of this.readEdges()) {
       const state = edgeStates.get(edge.id);
       if (!this.isNormallyRetrievable(state)) continue;
       if (!this.isNormallyRetrievable(nodeStates.get(edge.from)) || !this.isNormallyRetrievable(nodeStates.get(edge.to))) continue;
-      if (nodeIds.has(edge.from) || nodeIds.has(edge.to)) {
-        edgeMap.set(edge.id, edge);
-        continue;
-      }
       if (this.matchedTermIndexes(edge.text, lowered).length === 0) continue;
       edgeMap.set(edge.id, edge);
     }
-    const edges = this.sortByTermMatches(Array.from(edgeMap.values()), lowered, edge => edge.text);
+    const edges = Array.from(edgeMap.values());
+    return { nodes, edges };
+  }
+
+  normalRetrievableGraph(): { nodes: GauzMemNode[]; edges: GauzMemEdge[] } {
+    const nodeStates = this.readNodeStates();
+    const edgeStates = this.readEdgeStates();
+    const nodes = this.readNodes().filter(node => this.isNormallyRetrievable(nodeStates.get(node.id)));
+    const nodeIds = new Set(nodes.map(node => node.id));
+    const edges = this.readEdges().filter(edge =>
+      nodeIds.has(edge.from)
+      && nodeIds.has(edge.to)
+      && this.isNormallyRetrievable(edgeStates.get(edge.id))
+      && this.isNormallyRetrievable(nodeStates.get(edge.from))
+      && this.isNormallyRetrievable(nodeStates.get(edge.to))
+    );
     return { nodes, edges };
   }
 

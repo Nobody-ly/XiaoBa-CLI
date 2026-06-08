@@ -1,7 +1,6 @@
 import path from 'node:path';
 
 export const DEFAULT_ELECTRON_DEV_PORT = '3810';
-export const DEFAULT_ELECTRON_DEV_USER_DATA_DIR = '.dev-user-data';
 
 export function resolveElectronDevOptions(options = {}) {
   const cwd = options.cwd || process.cwd();
@@ -11,9 +10,12 @@ export function resolveElectronDevOptions(options = {}) {
   const env = {
     ...sourceEnv,
     XIAOBA_DASHBOARD_PORT: port,
-    XIAOBA_ELECTRON_USER_DATA_DIR: userDataDir,
-    XIAOBA_ELECTRON_DEV_ISOLATED: '1',
   };
+  if (userDataDir) {
+    env.XIAOBA_ELECTRON_USER_DATA_DIR = userDataDir;
+  } else {
+    delete env.XIAOBA_ELECTRON_USER_DATA_DIR;
+  }
 
   delete env.ELECTRON_RUN_AS_NODE;
 
@@ -35,7 +37,7 @@ function normalizePort(value) {
 function resolveUserDataDir(cwd, value) {
   const text = String(value || '').trim();
   if (!text) {
-    return path.join(cwd, DEFAULT_ELECTRON_DEV_USER_DATA_DIR);
+    return undefined;
   }
   return path.isAbsolute(text) ? text : path.resolve(cwd, text);
 }

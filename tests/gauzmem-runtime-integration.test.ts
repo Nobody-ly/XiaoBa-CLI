@@ -30,6 +30,11 @@ test('GauzMem recall is retrieval-only and does not invoke construct processors'
   assert.match(recallBody, /graphScan/);
   assert.match(recallBody, /disclose/);
   assert.match(recallBody, /selectRelevant/);
+  assert.match(recallBody, /grepQueryPlan/);
+  assert.match(recallBody, /buildPromptBundle/);
+  assert.doesNotMatch(recallBody, /selectRelevanceCandidates/);
+  assert.doesNotMatch(recallBody, /relevance_candidates/);
+  assert.doesNotMatch(recallBody, /disclose_grep/);
   assert.doesNotMatch(recallBody, /processRootConstruct/);
   assert.doesNotMatch(recallBody, /processNodeConstruct/);
 });
@@ -52,10 +57,14 @@ test('GauzMem graph patch apply treats merges and bad edges as warnings', () => 
   assert.match(source, /construct_skipped_edge/);
 });
 
-test('GauzMem query build uses full previous assistant reply and addressee guidance', () => {
+test('GauzMem query build uses full previous assistant reply and atomic participant guidance', () => {
   const source = readFileSync(join(process.cwd(), 'src/gauzmem/reasoner.ts'), 'utf-8');
-  assert.match(source, /treat those names as addressees/);
+  assert.match(source, /Do not automatically drop addressee\/speaker names/);
   assert.match(source, /Previous assistant final reply: \$\{params\.previousAssistant \|\| ''\}/);
+  assert.match(source, /required: \['rootQuery', 'searchTerms'\]/);
+  assert.match(source, /literal grep anchors/);
+  assert.match(source, /Prefer atomic grep terms/);
+  assert.doesNotMatch(source, /queryGroupsValue/);
 });
 
 test('GauzMem session allowlist gates recall, source recording, and construct batches', () => {
@@ -74,13 +83,71 @@ test('GauzMem prompt injection setting gates only passive prompt injection', () 
   assert.match(source, /return \{ run \}/);
 });
 
+test('GauzMem recall runs in background when prompt injection is disabled', () => {
+  const source = readFileSync(join(process.cwd(), 'src/core/turn-context-builder.ts'), 'utf-8');
+  const serviceSource = readFileSync(join(process.cwd(), 'src/gauzmem/service.ts'), 'utf-8');
+  assert.match(source, /!gauzMem\.isPromptInjectionEnabled\(\)/);
+  assert.match(source, /gauzMem\.enqueueRecall\(recallParams\)/);
+  assert.match(source, /await withTimeout\(gauzMem\.recall\(recallParams\)/);
+  assert.match(serviceSource, /private recallQueue: Promise<void> = Promise\.resolve\(\)/);
+  assert.match(serviceSource, /enqueueRecall\(params: GauzMemRecallParams\)/);
+});
+
+test('GauzMem runs by default unless explicitly disabled', () => {
+  const source = readFileSync(join(process.cwd(), 'src/gauzmem/service.ts'), 'utf-8');
+  assert.match(source, /GAUZMEM_ENABLED/);
+  assert.match(source, /0\|false\|no\|off/);
+  assert.doesNotMatch(source, /\^\(1\|true\|yes\)\$/);
+});
+
 test('GauzMem dashboard exposes memory assist settings without user-facing enabled switch', () => {
   const routeSource = readFileSync(join(process.cwd(), 'src/dashboard/routes/gauzmem.ts'), 'utf-8');
   const dashboardSource = readFileSync(join(process.cwd(), 'dashboard/gauzmem.html'), 'utf-8');
   assert.match(routeSource, /router\.get\('\/gauzmem\/settings'/);
   assert.match(routeSource, /router\.post\('\/gauzmem\/settings'/);
   assert.match(dashboardSource, /toggleMemoryAssist/);
-  assert.match(dashboardSource, /retriever \$\{escapeHtml\(String\(run\.stats\?\.durationMs/);
+  assert.match(dashboardSource, /function durationLabel\(run\)/);
+  assert.match(dashboardSource, /formatDuration\(run\.stats\?\.durationMs\)/);
   assert.doesNotMatch(dashboardSource, /scope:/);
   assert.doesNotMatch(dashboardSource, /sessionAllowlist/);
+});
+
+test('GauzMem run logs reference graph snapshots and construct artifacts', () => {
+  const pathSource = readFileSync(join(process.cwd(), 'src/gauzmem/paths.ts'), 'utf-8');
+  const typeSource = readFileSync(join(process.cwd(), 'src/gauzmem/types.ts'), 'utf-8');
+  const serviceSource = readFileSync(join(process.cwd(), 'src/gauzmem/service.ts'), 'utf-8');
+  assert.match(pathSource, /graph_snapshots\.jsonl/);
+  assert.match(pathSource, /construct_artifacts\.jsonl/);
+  assert.match(typeSource, /snapshotId\?: string/);
+  assert.match(typeSource, /artifactId\?: string/);
+  assert.match(typeSource, /interface GauzMemGraphSnapshot/);
+  assert.match(typeSource, /interface GauzMemConstructArtifact/);
+  assert.match(serviceSource, /run\.snapshotId = this\.saveGraphSnapshot/);
+  assert.match(serviceSource, /appendJsonl\(GauzMemFiles\.graphSnapshots\(\), snapshot\)/);
+  assert.match(serviceSource, /run\.artifactId = artifact\.artifactId/);
+  assert.match(serviceSource, /artifact\.patch = patch/);
+  assert.match(serviceSource, /artifact\.applyResult =/);
+  assert.match(serviceSource, /appendJsonl\(GauzMemFiles\.constructArtifacts\(\), artifact\)/);
+});
+
+test('GauzMem dashboard run replay is simplified for recall and construct', () => {
+  const dashboardSource = readFileSync(join(process.cwd(), 'dashboard/gauzmem.html'), 'utf-8');
+  assert.match(dashboardSource, /function renderConstructRun\(run\)/);
+  assert.match(dashboardSource, /<h2>Selected Memory<\/h2>/);
+  assert.match(dashboardSource, /<h2>Prompt<\/h2>/);
+  assert.match(dashboardSource, /<h2>Created<\/h2>/);
+  assert.match(dashboardSource, /<h2>Merged<\/h2>/);
+  assert.match(dashboardSource, /Skipped \/ Warnings/);
+});
+
+test('GauzMem construct failures advance the batch cursor and do not block later batches', () => {
+  const source = readFileSync(join(process.cwd(), 'src/gauzmem/service.ts'), 'utf-8');
+  const cursorBlock = source.slice(source.indexOf('const latestCompleted'), source.indexOf('const startIndex'));
+  assert.match(cursorBlock, /run\.kind === 'construct'/);
+  assert.match(cursorBlock, /run\.stats\.constructBatchEnd/);
+  assert.doesNotMatch(cursorBlock, /run\.status === 'ok'/);
+  assert.match(source, /run\.status = 'error'/);
+  assert.match(source, /constructBatchEnd: batch\.newTurns\[batch\.newTurns\.length - 1\]\?\.turnKey/);
+  assert.match(source, /recordErrorTurnSource/);
+  assert.match(source, /this\.scheduleConstruct\(\)/);
 });
