@@ -21,6 +21,7 @@ export interface EvalCommandOptions {
   autoApproveTools?: string | boolean;
   noInteractive?: boolean;
   noDashboard?: boolean;
+  streaming?: boolean;
 }
 
 export interface EvalResultJson {
@@ -135,6 +136,7 @@ export async function evalCommand(options: EvalCommandOptions): Promise<void> {
         sessionRoute: route,
         executionScope,
         localDeviceGrant,
+        streaming: normalized.streaming,
         callbacks: {
           confirmToolExecution: createEvalToolConfirmer(normalized.autoApproveTools),
         },
@@ -210,6 +212,7 @@ export function normalizeEvalOptions(options: EvalCommandOptions): {
   outputJson?: string;
   maxMinutes: number;
   autoApproveTools: Set<string>;
+  streaming?: boolean;
 } {
   const cwd = path.resolve(options.cwd || process.cwd());
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -247,6 +250,7 @@ export function normalizeEvalOptions(options: EvalCommandOptions): {
     outputJson,
     maxMinutes,
     autoApproveTools: parseAutoApproveTools(options.autoApproveTools),
+    streaming: options.streaming,
   };
 }
 

@@ -51,6 +51,7 @@ test('normalizeEvalOptions requires a prompt and resolves paths', () => {
     sessionKey: 'case 1',
     maxMinutes: '3',
     autoApproveTools: 'read_file,write_file',
+    streaming: false,
   });
 
   assert.equal(options.cwd, path.resolve(dir));
@@ -59,6 +60,7 @@ test('normalizeEvalOptions requires a prompt and resolves paths', () => {
   assert.equal(options.maxMinutes, 3);
   assert.equal(options.autoApproveTools.has('read_file'), true);
   assert.equal(options.autoApproveTools.has('write_file'), true);
+  assert.equal(options.streaming, false);
 });
 
 test('parseModelSource accepts supported model source names', () => {

@@ -42,6 +42,7 @@ function main() {
     .option('--output-json <path>', 'Write a machine-readable result JSON file')
     .option('--max-minutes <minutes>', 'Maximum wall-clock time before interrupting the turn', '20')
     .option('--auto-approve-tools [tools]', 'Comma-separated local tool names to auto-approve')
+    .option('--no-streaming', 'Use non-streaming model calls for compatible eval endpoints')
     .option('--no-interactive', 'Compatibility flag for benchmark runners')
     .option('--no-dashboard', 'Compatibility flag for benchmark runners')
     .action(evalCommand);

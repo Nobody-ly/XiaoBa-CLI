@@ -106,6 +106,8 @@ export interface HandleMessageOptions {
   runtimeFeedback?: RuntimeFeedbackInput[];
   /** Pulls user messages that arrived while this session was busy. */
   pendingUserInputProvider?: PendingUserInputProvider;
+  /** false uses non-streaming provider calls for endpoints with incompatible streaming. */
+  streaming?: boolean;
 }
 
 export interface HandleRuntimeObservationOptions extends HandleMessageOptions {
@@ -420,6 +422,7 @@ export class AgentSession {
       let localFileGrants: ScopedLocalFileGrant[] | undefined;
       let runtimeFeedbackInputs: RuntimeFeedbackInput[] = [];
       let pendingUserInputProvider: PendingUserInputProvider | undefined;
+      let streaming: boolean | undefined;
 
       if (callbacksOrOptions) {
         if (
@@ -434,6 +437,7 @@ export class AgentSession {
           || 'callbacks' in callbacksOrOptions
           || 'runtimeFeedback' in callbacksOrOptions
           || 'pendingUserInputProvider' in callbacksOrOptions
+          || 'streaming' in callbacksOrOptions
         ) {
           // 新签名 HandleMessageOptions
           const opts = callbacksOrOptions as HandleMessageOptions;
@@ -448,6 +452,7 @@ export class AgentSession {
           localFileGrants = opts.localFileGrants;
           runtimeFeedbackInputs = opts.runtimeFeedback || [];
           pendingUserInputProvider = opts.pendingUserInputProvider;
+          streaming = opts.streaming;
         } else {
           // 旧签名 SessionCallbacks
           callbacks = callbacksOrOptions as SessionCallbacks;
@@ -496,6 +501,7 @@ export class AgentSession {
           deviceRpc,
           localFileGrants,
           pendingUserInputProvider,
+          streaming,
           abortSignal: this.activeAbortController.signal,
           shouldContinue: () => !this.interruptRequested,
         });

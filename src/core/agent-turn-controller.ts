@@ -68,6 +68,7 @@ export interface RunAgentTurnParams {
   deviceRpc?: DeviceRpcTransport;
   localFileGrants?: ScopedLocalFileGrant[];
   pendingUserInputProvider?: PendingUserInputProvider;
+  streaming?: boolean;
   abortSignal?: AbortSignal;
   shouldContinue: () => boolean;
 }
@@ -163,6 +164,7 @@ export class AgentTurnController {
       deviceRpc: params.deviceRpc,
       localFileGrants: params.localFileGrants,
       pendingUserInputProvider: params.pendingUserInputProvider,
+      streaming: params.streaming,
       confirmToolExecution: params.callbacks?.confirmToolExecution,
       syntheticObservationProvider: () => this.drainMemoryObservations(
         carryoverMemoryBranch,
@@ -227,6 +229,7 @@ export class AgentTurnController {
     deviceRpc?: DeviceRpcTransport;
     localFileGrants?: ScopedLocalFileGrant[];
     pendingUserInputProvider?: PendingUserInputProvider;
+    streaming?: boolean;
     confirmToolExecution?: AgentTurnCallbacks['confirmToolExecution'];
     syntheticObservationProvider?: () => SyntheticObservation[];
     abortSignal?: AbortSignal;
@@ -238,6 +241,7 @@ export class AgentTurnController {
       this.options.services.toolManager,
       {
         shouldContinue: options.shouldContinue,
+        stream: options.streaming,
         pendingUserInputProvider: options.pendingUserInputProvider,
         syntheticObservationProvider: options.syntheticObservationProvider,
         // AgentSession/ContextWindowManager compacts durable history before the turn.
