@@ -278,7 +278,7 @@ export class AIService {
 
         // 计算等待时间：优先用 Retry-After，否则指数退避
         const retryAfter = this.getRetryAfter(error);
-        const delay = retryAfter
+        const delay = retryAfter !== null
           ? retryAfter * 1000
           : BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 500;
 

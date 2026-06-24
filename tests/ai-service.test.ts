@@ -77,6 +77,63 @@ test('AIService retries transient stream errors before any text is emitted', asy
   assert.deepStrictEqual(chunks, ['ok']);
 });
 
+test('AIService stops transient stream retries after the configured retry budget', async () => {
+  const service = createTestService();
+  let attempts = 0;
+  const retryableError = Object.assign(new Error('Connection error.'), {
+    response: {
+      status: 503,
+      headers: { 'retry-after': '0' },
+      data: { message: 'Connection error.' },
+    },
+  });
+  (service as any).provider = {
+    chat: async () => ({ content: null }),
+    chatStream: async () => {
+      attempts += 1;
+      throw retryableError;
+    },
+  };
+
+  const retries: Array<[number, number]> = [];
+  await assert.rejects(
+    () => service.chatStream([], undefined, {
+      onRetry: (attempt, maxRetries) => retries.push([attempt, maxRetries]),
+    }),
+    /503.*Connection error\./,
+  );
+
+  assert.equal(attempts, 4);
+  assert.deepStrictEqual(retries, [[1, 3]]);
+});
+
+test('AIService retries transient non-stream errors with the same retry budget', async () => {
+  const service = createTestService();
+  let attempts = 0;
+  const finalResponse: ChatResponse = { content: 'ok' };
+  (service as any).provider = {
+    chat: async () => {
+      attempts += 1;
+      if (attempts <= 3) {
+        throw Object.assign(new Error('Connection error.'), {
+          response: {
+            status: 503,
+            headers: { 'retry-after': '0' },
+            data: { message: 'Connection error.' },
+          },
+        });
+      }
+      return finalResponse;
+    },
+    chatStream: async () => ({ content: null }),
+  };
+
+  const result = await service.chat([]);
+
+  assert.equal(result, finalResponse);
+  assert.equal(attempts, 4);
+});
+
 test('AIService does not retry stream errors after visible text is emitted', async () => {
   const service = createTestService();
   let attempts = 0;
