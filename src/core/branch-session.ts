@@ -6,6 +6,7 @@ import { Logger } from '../utils/logger';
 import { Tool } from '../types/tool';
 import { AgentToolExecutor } from '../agents/agent-tool-executor';
 import { ConversationRunner, RunResult, RunnerCallbacks } from './conversation-runner';
+import { resolveBranchLogDir } from '../utils/runtime-paths';
 
 export interface BranchSessionOptions {
   id: string;
@@ -147,7 +148,7 @@ export class BranchSessionLogger {
     }
     const date = new Date();
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    const dir = path.resolve(options.workingDirectory, 'logs', 'branches', options.branchType, dateStr);
+    const dir = path.resolve(resolveBranchLogDir(), options.branchType, dateStr);
     fs.mkdirSync(dir, { recursive: true });
     this.filePath = path.join(dir, `${sanitizeFilePart(options.branchId)}.jsonl`);
   }

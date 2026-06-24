@@ -4,6 +4,7 @@ import { AIService } from '../utils/ai-service';
 import { ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResult, ToolTranscriptMode } from '../types/tool';
 import { StreamCallbacks } from '../providers/provider';
 import { Logger } from '../utils/logger';
+import { resolveProviderMessagesLogDir } from '../utils/runtime-paths';
 import { Metrics } from '../utils/metrics';
 import { ContextCompressor } from './context-compressor';
 import { estimateMessagesTokens, estimateToolsTokens } from './token-estimator';
@@ -1096,7 +1097,7 @@ export class ConversationRunner {
     try {
       const date = new Date();
       const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-      const dir = path.resolve('logs', 'provider-messages', dateStr);
+      const dir = path.resolve(resolveProviderMessagesLogDir(), dateStr);
       fs.mkdirSync(dir, { recursive: true });
       const safeSession = (this.toolExecutionContext?.sessionId || 'unknown').replace(/[:<>"|?*]/g, '_');
       const filePath = path.join(dir, `${safeSession}.jsonl`);

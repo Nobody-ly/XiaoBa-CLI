@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { SessionToolCallLog, SessionTurnLogEntry } from '../utils/session-log-schema';
+import { resolveSessionLogDir } from '../utils/runtime-paths';
 
 export interface MemorySearchMatch {
   ref: string;
@@ -272,7 +273,7 @@ function normalizeKeywords(value: unknown): string[] {
 function resolveLogRoots(workingDirectory: string): string[] {
   const roots = [
     path.resolve(workingDirectory, 'logs', 'sessions'),
-    path.resolve(process.cwd(), 'logs', 'sessions'),
+    resolveSessionLogDir(),
   ];
   return Array.from(new Set(roots)).filter(root => {
     try {

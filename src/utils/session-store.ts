@@ -6,12 +6,11 @@ import {
   contentToText,
   stripAssistantTranscriptArtifacts,
 } from './transcript-artifacts';
-
-const SESSIONS_DIR = path.resolve(process.cwd(), 'data', 'sessions');
-const SESSION_STATE_DIR = path.resolve(process.cwd(), 'data', 'session-state');
+import { resolveSessionDataDir, resolveSessionStateDir } from './runtime-paths';
 
 function ensureDir(): void {
-  if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  const sessionsDir = resolveSessionDataDir();
+  if (!fs.existsSync(sessionsDir)) fs.mkdirSync(sessionsDir, { recursive: true });
 }
 
 function keyToFilename(key: string): string {
@@ -19,11 +18,11 @@ function keyToFilename(key: string): string {
 }
 
 function filePath(key: string): string {
-  return path.join(SESSIONS_DIR, keyToFilename(key));
+  return path.join(resolveSessionDataDir(), keyToFilename(key));
 }
 
 function stateFilePath(key: string): string {
-  return path.join(SESSION_STATE_DIR, keyToFilename(key).replace(/\.jsonl$/, '.json'));
+  return path.join(resolveSessionStateDir(), keyToFilename(key).replace(/\.jsonl$/, '.json'));
 }
 
 function hasHiddenProviderReplay(message: Message): boolean {
@@ -187,7 +186,8 @@ export class SessionStore {
 
   saveRuntimeState(sessionKey: string, state: SessionRuntimeState): void {
     try {
-      if (!fs.existsSync(SESSION_STATE_DIR)) fs.mkdirSync(SESSION_STATE_DIR, { recursive: true });
+      const stateDir = resolveSessionStateDir();
+      if (!fs.existsSync(stateDir)) fs.mkdirSync(stateDir, { recursive: true });
       fs.writeFileSync(stateFilePath(sessionKey), JSON.stringify({
         ...state,
         updatedAt: new Date().toISOString(),

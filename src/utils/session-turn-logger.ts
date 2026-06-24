@@ -14,6 +14,7 @@ import type {
 import type { SubAgentRuntimeEvent } from '../core/sub-agent-events';
 import type { SubAgentInfo } from '../core/sub-agent-session';
 import type { PromptTraceSnapshot } from './prompt-observability';
+import { resolveSessionLogDir } from './runtime-paths';
 
 export type {
   LegacySessionTurnLogEntry,
@@ -27,7 +28,6 @@ export type {
   SessionTurnLogEntry,
 } from './session-log-schema';
 
-const SESSION_LOG_DIR = path.resolve('logs/sessions');
 const MAX_TOOL_RESULT_LENGTH = parseOptionalLimit(process.env.XIAOBA_SESSION_TOOL_RESULT_LIMIT);
 const MAX_RUNTIME_FEEDBACK_LENGTH = Number(process.env.XIAOBA_SESSION_RUNTIME_FEEDBACK_LIMIT || 4000);
 
@@ -61,7 +61,7 @@ export class SessionTurnLogger {
 
     const date = new Date();
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    const dir = path.join(SESSION_LOG_DIR, sessionType, dateStr);
+    const dir = path.join(resolveSessionLogDir(), sessionType, dateStr);
 
     fs.mkdirSync(dir, { recursive: true });
     const safeSessionId = sessionId.replace(/[:<>"|?*]/g, '_');

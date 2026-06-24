@@ -10,6 +10,13 @@ import {
   parseAutoApproveTools,
   parseModelSource,
 } from '../src/commands/eval';
+import {
+  resolveBranchLogDir,
+  resolveProviderMessagesLogDir,
+  resolveSessionDataDir,
+  resolveSessionLogDir,
+  resolveSessionStateDir,
+} from '../src/utils/runtime-paths';
 
 test('parseAutoApproveTools handles empty, boolean, explicit, and all forms', () => {
   assert.deepEqual(Array.from(parseAutoApproveTools(undefined)), []);
@@ -107,6 +114,38 @@ test('applyEvalEnvironment maps custom model profile into GAUZ env', () => {
     assert.equal(process.env.GAUZ_LLM_MODEL, 'gpt-test');
     assert.equal(process.env.GAUZ_LLM_API_KEY, 'secret');
     assert.equal(process.env.GAUZ_LLM_CONTEXT_WINDOW_TOKENS, '128000');
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('runtime path helpers respect eval runtime env overrides', () => {
+  const keys = [
+    'XIAOBA_RUNTIME_ROOT',
+    'XIAOBA_SESSION_DIR',
+    'XIAOBA_SESSION_STATE_DIR',
+    'XIAOBA_SESSION_LOG_DIR',
+    'XIAOBA_BRANCH_LOG_DIR',
+    'XIAOBA_PROVIDER_MESSAGES_LOG_DIR',
+  ];
+  const previous = new Map(keys.map(key => [key, process.env[key]]));
+  try {
+    const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-eval-runtime-root-'));
+    process.env.XIAOBA_RUNTIME_ROOT = runRoot;
+    process.env.XIAOBA_SESSION_DIR = path.join(runRoot, 'custom-sessions');
+    process.env.XIAOBA_SESSION_STATE_DIR = path.join(runRoot, 'custom-state');
+    process.env.XIAOBA_SESSION_LOG_DIR = path.join(runRoot, 'custom-session-logs');
+    process.env.XIAOBA_BRANCH_LOG_DIR = path.join(runRoot, 'custom-branch-logs');
+    process.env.XIAOBA_PROVIDER_MESSAGES_LOG_DIR = path.join(runRoot, 'custom-provider-logs');
+
+    assert.equal(resolveSessionDataDir(), path.join(runRoot, 'custom-sessions'));
+    assert.equal(resolveSessionStateDir(), path.join(runRoot, 'custom-state'));
+    assert.equal(resolveSessionLogDir(), path.join(runRoot, 'custom-session-logs'));
+    assert.equal(resolveBranchLogDir(), path.join(runRoot, 'custom-branch-logs'));
+    assert.equal(resolveProviderMessagesLogDir(), path.join(runRoot, 'custom-provider-logs'));
   } finally {
     for (const [key, value] of previous) {
       if (value === undefined) delete process.env[key];

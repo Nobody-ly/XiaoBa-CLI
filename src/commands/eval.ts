@@ -90,6 +90,7 @@ export async function evalCommand(options: EvalCommandOptions): Promise<void> {
   try {
     const normalized = normalizeEvalOptions(options);
     fs.mkdirSync(normalized.runRoot, { recursive: true });
+    applyEvalRuntimeRoot(normalized.runRoot);
     applyEvalEnvironment(normalized);
     process.chdir(normalized.runRoot);
     Logger.openLogFile('eval', normalized.sessionKey, true);
@@ -265,6 +266,7 @@ export function parseModelSource(value: string | undefined): 'env' | 'custom' | 
 export function applyEvalEnvironment(options: {
   envFile?: string;
   modelSource: 'env' | 'custom' | 'relay';
+  runRoot?: string;
 }): void {
   if (options.envFile) {
     const loaded = loadEnvFile(options.envFile);
@@ -303,6 +305,15 @@ export function applyEvalEnvironment(options: {
   if (contextWindow) {
     process.env.GAUZ_LLM_CONTEXT_WINDOW_TOKENS = contextWindow;
   }
+}
+
+function applyEvalRuntimeRoot(runRoot: string): void {
+  process.env.XIAOBA_RUNTIME_ROOT = runRoot;
+  process.env.XIAOBA_SESSION_DIR = path.join(runRoot, 'data', 'sessions');
+  process.env.XIAOBA_SESSION_STATE_DIR = path.join(runRoot, 'data', 'session-state');
+  process.env.XIAOBA_SESSION_LOG_DIR = path.join(runRoot, 'logs', 'sessions');
+  process.env.XIAOBA_BRANCH_LOG_DIR = path.join(runRoot, 'logs', 'branches');
+  process.env.XIAOBA_PROVIDER_MESSAGES_LOG_DIR = path.join(runRoot, 'logs', 'provider-messages');
 }
 
 export function isDangerousShellCommand(value: string): boolean {
