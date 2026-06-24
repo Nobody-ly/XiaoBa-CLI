@@ -13,17 +13,47 @@ const runId = String(args['run-id'] || new Date().toISOString().replace(/[:.]/g,
 const fixtureDir = resolveFromRoot(String(args.fixture || 'tests/fixtures/eval-fake-repo'));
 const defaultOutputRoot = path.resolve(rootDir, '..', 'tmp', 'xiaoba-eval-smoke', runId);
 const outputRoot = args['output-root'] ? resolveFromRoot(String(args['output-root'])) : defaultOutputRoot;
-const caseRoot = path.join(outputRoot, 'repo');
-const evalRunRoot = path.join(outputRoot, 'xiaoba-run');
-const resultPath = path.join(outputRoot, 'result.json');
-const diffPath = path.join(outputRoot, 'repo.diff');
 const summaryPath = path.join(outputRoot, 'summary.json');
+const maxAttempts = parseMaxAttempts(args['max-attempts'] ?? '6');
+const retryDelayMs = numberOption(args['retry-delay-ms'], 3000);
 
 await main();
 
 async function main() {
   ensureCleanTarget(outputRoot);
   fs.mkdirSync(outputRoot, { recursive: true });
+
+  const attempts = [];
+  let attemptNumber = 1;
+  while (maxAttempts === null || attemptNumber <= maxAttempts) {
+    const attempt = await runAttempt(attemptNumber);
+    attempts.push(attempt);
+    writeSummary({
+      ok: attempt.ok,
+      attempts,
+      final_attempt: attempt,
+    });
+    if (attempt.ok) {
+      process.exit(0);
+    }
+    if (maxAttempts !== null && attemptNumber >= maxAttempts) break;
+    await sleep(retryDelayMs);
+    attemptNumber++;
+  }
+
+  process.exit(1);
+}
+
+async function runAttempt(attemptNumber) {
+  const attemptId = `attempt-${String(attemptNumber).padStart(2, '0')}`;
+  const attemptRoot = path.join(outputRoot, attemptId);
+  const caseRoot = path.join(attemptRoot, 'repo');
+  const evalRunRoot = path.join(attemptRoot, 'xiaoba-run');
+  const resultPath = path.join(attemptRoot, 'result.json');
+  const diffPath = path.join(attemptRoot, 'repo.diff');
+
+  fs.rmSync(attemptRoot, { recursive: true, force: true });
+  fs.mkdirSync(attemptRoot, { recursive: true });
   copyDirectory(fixtureDir, caseRoot);
 
   await run('git', ['init'], { cwd: caseRoot });
@@ -31,15 +61,41 @@ async function main() {
   await run('git', ['-c', 'user.name=XiaoBa-Eval', '-c', 'user.email=eval@example.test', 'commit', '-m', 'initial-fake-repo'], { cwd: caseRoot });
 
   const beforeTest = await run('npm', ['test'], { cwd: caseRoot, allowFailure: true });
+  const evalResult = await run(process.execPath, buildEvalArgs({
+    attemptNumber,
+    caseRoot,
+    evalRunRoot,
+    resultPath,
+  }), { cwd: rootDir, allowFailure: true, inherit: true });
+  const afterTest = await run('npm', ['test'], { cwd: caseRoot, allowFailure: true });
+  const diffResult = await run('git', ['diff', '--', '.'], { cwd: caseRoot, allowFailure: true });
+  fs.writeFileSync(diffPath, diffResult.stdout, 'utf-8');
 
+  const resultJson = readJsonIfExists(resultPath);
+  return {
+    ok: evalResult.code === 0 && afterTest.code === 0 && Boolean(diffResult.stdout.trim()),
+    attempt: attemptNumber,
+    attempt_root: attemptRoot,
+    case_root: caseRoot,
+    result_json: resultPath,
+    diff_path: diffPath,
+    before_test_exit_code: beforeTest.code,
+    eval_exit_code: evalResult.code,
+    after_test_exit_code: afterTest.code,
+    diff_nonempty: Boolean(diffResult.stdout.trim()),
+    eval_result: resultJson,
+  };
+}
+
+function buildEvalArgs(input) {
   const evalArgs = [
     'dist/index.js',
     'eval',
-    '--cwd', caseRoot,
-    '--prompt-file', path.join(caseRoot, 'task.md'),
-    '--session-key', String(args['session-key'] || `eval-fake-${runId}`),
-    '--run-root', evalRunRoot,
-    '--output-json', resultPath,
+    '--cwd', input.caseRoot,
+    '--prompt-file', path.join(input.caseRoot, 'task.md'),
+    '--session-key', String(args['session-key'] || `eval-fake-${runId}-${input.attemptNumber}`),
+    '--run-root', input.evalRunRoot,
+    '--output-json', input.resultPath,
     '--max-minutes', String(args['max-minutes'] || '10'),
     '--auto-approve-tools', String(args['auto-approve-tools'] || 'read_file,glob,grep,write_file,edit_file,execute_shell'),
     '--model-source', String(args['model-source'] || 'env'),
@@ -52,29 +108,21 @@ async function main() {
   if (args['no-streaming'] === true) {
     evalArgs.push('--no-streaming');
   }
+  return evalArgs;
+}
 
-  const evalResult = await run(process.execPath, evalArgs, { cwd: rootDir, allowFailure: true, inherit: true });
-  const afterTest = await run('npm', ['test'], { cwd: caseRoot, allowFailure: true });
-  const diffResult = await run('git', ['diff', '--', '.'], { cwd: caseRoot, allowFailure: true });
-  fs.writeFileSync(diffPath, diffResult.stdout, 'utf-8');
-
-  const resultJson = readJsonIfExists(resultPath);
+function writeSummary(extra) {
   const summary = {
-    ok: evalResult.code === 0 && afterTest.code === 0 && Boolean(diffResult.stdout.trim()),
+    ok: Boolean(extra.ok),
     run_id: runId,
-    case_root: caseRoot,
     output_root: outputRoot,
-    result_json: resultPath,
-    diff_path: diffPath,
-    before_test_exit_code: beforeTest.code,
-    eval_exit_code: evalResult.code,
-    after_test_exit_code: afterTest.code,
-    diff_nonempty: Boolean(diffResult.stdout.trim()),
-    eval_result: resultJson,
+    max_attempts: maxAttempts === null ? 'infinite' : maxAttempts,
+    retry_delay_ms: retryDelayMs,
+    attempts: extra.attempts,
+    final_attempt: extra.final_attempt,
   };
   fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf-8');
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
-  process.exit(summary.ok ? 0 : 1);
 }
 
 function parseArgs(argv) {
@@ -92,6 +140,31 @@ function parseArgs(argv) {
     i++;
   }
   return parsed;
+}
+
+function parseMaxAttempts(value) {
+  const text = String(value).trim().toLowerCase();
+  if (text === 'infinite' || text === 'inf' || text === 'while' || text === 'forever') {
+    return null;
+  }
+  const parsed = Number.parseInt(text, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`--max-attempts must be a positive integer or "infinite": ${value}`);
+  }
+  return parsed;
+}
+
+function numberOption(value, defaultValue) {
+  if (value === undefined || value === true) return defaultValue;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Expected a non-negative number, got: ${value}`);
+  }
+  return parsed;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function resolveFromRoot(value) {
