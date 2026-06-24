@@ -4,9 +4,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  applyEvalEnvironment,
   isDangerousShellCommand,
   normalizeEvalOptions,
   parseAutoApproveTools,
+  parseModelSource,
 } from '../src/commands/eval';
 
 test('parseAutoApproveTools handles empty, boolean, explicit, and all forms', () => {
@@ -57,4 +59,56 @@ test('normalizeEvalOptions requires a prompt and resolves paths', () => {
   assert.equal(options.maxMinutes, 3);
   assert.equal(options.autoApproveTools.has('read_file'), true);
   assert.equal(options.autoApproveTools.has('write_file'), true);
+});
+
+test('parseModelSource accepts supported model source names', () => {
+  assert.equal(parseModelSource(undefined), 'env');
+  assert.equal(parseModelSource('current'), 'env');
+  assert.equal(parseModelSource('custom'), 'custom');
+  assert.equal(parseModelSource('relay'), 'relay');
+  assert.throws(() => parseModelSource('minimax'), /must be one of/);
+});
+
+test('applyEvalEnvironment maps custom model profile into GAUZ env', () => {
+  const keys = [
+    'CATSCO_MODEL_SOURCE',
+    'CATSCO_CUSTOM_LLM_PROVIDER',
+    'CATSCO_CUSTOM_LLM_API_BASE',
+    'CATSCO_CUSTOM_LLM_MODEL',
+    'CATSCO_CUSTOM_LLM_API_KEY',
+    'CATSCO_CUSTOM_LLM_CONTEXT_WINDOW_TOKENS',
+    'GAUZ_LLM_PROVIDER',
+    'GAUZ_LLM_API_BASE',
+    'GAUZ_LLM_MODEL',
+    'GAUZ_LLM_API_KEY',
+    'GAUZ_LLM_CONTEXT_WINDOW_TOKENS',
+  ];
+  const previous = new Map(keys.map(key => [key, process.env[key]]));
+  try {
+    for (const key of keys) delete process.env[key];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-eval-env-test-'));
+    const envFile = path.join(dir, '.env');
+    fs.writeFileSync(envFile, [
+      'CATSCO_CUSTOM_LLM_PROVIDER=openai',
+      'CATSCO_CUSTOM_LLM_API_BASE=https://example.test/v1',
+      'CATSCO_CUSTOM_LLM_MODEL=gpt-test',
+      'CATSCO_CUSTOM_LLM_API_KEY=secret',
+      'CATSCO_CUSTOM_LLM_CONTEXT_WINDOW_TOKENS=128000',
+      '',
+    ].join('\n'), 'utf-8');
+
+    applyEvalEnvironment({ envFile, modelSource: 'custom' });
+
+    assert.equal(process.env.CATSCO_MODEL_SOURCE, 'custom');
+    assert.equal(process.env.GAUZ_LLM_PROVIDER, 'openai');
+    assert.equal(process.env.GAUZ_LLM_API_BASE, 'https://example.test/v1');
+    assert.equal(process.env.GAUZ_LLM_MODEL, 'gpt-test');
+    assert.equal(process.env.GAUZ_LLM_API_KEY, 'secret');
+    assert.equal(process.env.GAUZ_LLM_CONTEXT_WINDOW_TOKENS, '128000');
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });

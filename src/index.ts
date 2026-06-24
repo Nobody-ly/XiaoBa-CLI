@@ -37,6 +37,8 @@ function main() {
     .option('-m, --message <message>', 'Use an inline evaluation prompt')
     .option('--session-key <key>', 'Isolated session key for this case')
     .option('--run-root <path>', 'Isolated runtime/log root for this case')
+    .option('--env-file <path>', 'Load model/API environment variables from a file')
+    .option('--model-source <source>', 'Model profile to use: env, custom, or relay', 'env')
     .option('--output-json <path>', 'Write a machine-readable result JSON file')
     .option('--max-minutes <minutes>', 'Maximum wall-clock time before interrupting the turn', '20')
     .option('--auto-approve-tools [tools]', 'Comma-separated local tool names to auto-approve')

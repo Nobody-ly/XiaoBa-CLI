@@ -1,0 +1,9 @@
+{
+  "name": "xiaoba-eval-fake-repo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test.js"
+  }
+}

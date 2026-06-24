@@ -14,6 +14,8 @@ export interface EvalCommandOptions {
   message?: string;
   sessionKey?: string;
   runRoot?: string;
+  envFile?: string;
+  modelSource?: string;
   outputJson?: string;
   maxMinutes?: string;
   autoApproveTools?: string | boolean;
@@ -87,6 +89,7 @@ export async function evalCommand(options: EvalCommandOptions): Promise<void> {
   try {
     const normalized = normalizeEvalOptions(options);
     fs.mkdirSync(normalized.runRoot, { recursive: true });
+    applyEvalEnvironment(normalized);
     process.chdir(normalized.runRoot);
     Logger.openLogFile('eval', normalized.sessionKey, true);
     logOpened = true;
@@ -202,6 +205,8 @@ export function normalizeEvalOptions(options: EvalCommandOptions): {
   message?: string;
   sessionKey: string;
   runRoot: string;
+  envFile?: string;
+  modelSource: 'env' | 'custom' | 'relay';
   outputJson?: string;
   maxMinutes: number;
   autoApproveTools: Set<string>;
@@ -226,6 +231,10 @@ export function normalizeEvalOptions(options: EvalCommandOptions): {
 
   const sessionKey = sanitizeSessionKey(options.sessionKey || `eval-${Date.now()}`);
   const runRoot = path.resolve(options.runRoot || path.join(cwd, '.xiaoba-eval-runs', sessionKey));
+  const envFile = options.envFile ? path.resolve(options.envFile) : undefined;
+  if (envFile && (!fs.existsSync(envFile) || !fs.statSync(envFile).isFile())) {
+    throw new Error(`--env-file must be an existing file: ${envFile}`);
+  }
   const outputJson = options.outputJson ? path.resolve(options.outputJson) : undefined;
   return {
     cwd,
@@ -233,10 +242,63 @@ export function normalizeEvalOptions(options: EvalCommandOptions): {
     message: options.message,
     sessionKey,
     runRoot,
+    envFile,
+    modelSource: parseModelSource(options.modelSource),
     outputJson,
     maxMinutes,
     autoApproveTools: parseAutoApproveTools(options.autoApproveTools),
   };
+}
+
+export function parseModelSource(value: string | undefined): 'env' | 'custom' | 'relay' {
+  const text = String(value || 'env').trim().toLowerCase();
+  if (!text || text === 'env' || text === 'current') return 'env';
+  if (text === 'custom') return 'custom';
+  if (text === 'relay') return 'relay';
+  throw new Error(`--model-source must be one of env, custom, relay. Received: ${value}`);
+}
+
+export function applyEvalEnvironment(options: {
+  envFile?: string;
+  modelSource: 'env' | 'custom' | 'relay';
+}): void {
+  if (options.envFile) {
+    const loaded = loadEnvFile(options.envFile);
+    for (const [key, value] of Object.entries(loaded)) {
+      process.env[key] = value;
+    }
+  }
+  if (options.modelSource === 'env') return;
+
+  const prefix = options.modelSource === 'custom'
+    ? 'CATSCO_CUSTOM_LLM'
+    : 'CATSCO_RELAY_LLM';
+  const provider = readNonEmptyEnv(`${prefix}_PROVIDER`);
+  const apiBase = readNonEmptyEnv(`${prefix}_API_BASE`);
+  const model = readNonEmptyEnv(`${prefix}_MODEL`);
+  const apiKey = readNonEmptyEnv(`${prefix}_API_KEY`);
+  const contextWindow = readNonEmptyEnv(`${prefix}_CONTEXT_WINDOW_TOKENS`);
+  const missing = [
+    !provider && `${prefix}_PROVIDER`,
+    !apiBase && `${prefix}_API_BASE`,
+    !model && `${prefix}_MODEL`,
+    !apiKey && `${prefix}_API_KEY`,
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    throw new Error(`--model-source ${options.modelSource} is incomplete. Missing: ${missing.join(', ')}`);
+  }
+  if (provider !== 'openai' && provider !== 'anthropic') {
+    throw new Error(`${prefix}_PROVIDER must be "openai" or "anthropic"; got "${provider}".`);
+  }
+
+  process.env.CATSCO_MODEL_SOURCE = options.modelSource;
+  process.env.GAUZ_LLM_PROVIDER = provider;
+  process.env.GAUZ_LLM_API_BASE = apiBase;
+  process.env.GAUZ_LLM_MODEL = model;
+  process.env.GAUZ_LLM_API_KEY = apiKey;
+  if (contextWindow) {
+    process.env.GAUZ_LLM_CONTEXT_WINDOW_TOKENS = contextWindow;
+  }
 }
 
 export function isDangerousShellCommand(value: string): boolean {
@@ -365,6 +427,34 @@ function shellCommandFromArgs(args: unknown): string {
   const record = args as Record<string, unknown>;
   const value = record.command ?? record.cmd ?? record.script;
   return typeof value === 'string' ? value : '';
+}
+
+function loadEnvFile(filePath: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  const content = fs.readFileSync(filePath, 'utf-8');
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const normalized = line.startsWith('export ') ? line.slice('export '.length).trim() : line;
+    const equalsIndex = normalized.indexOf('=');
+    if (equalsIndex <= 0) continue;
+    const key = normalized.slice(0, equalsIndex).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = normalized.slice(equalsIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"'))
+      || (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    values[key] = value;
+  }
+  return values;
+}
+
+function readNonEmptyEnv(key: string): string | undefined {
+  const value = process.env[key]?.trim();
+  return value || undefined;
 }
 
 function isDeviceGrantOperation(value: string): value is DeviceGrantOperation {
