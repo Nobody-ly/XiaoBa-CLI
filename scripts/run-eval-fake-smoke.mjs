@@ -14,7 +14,7 @@ const fixtureDir = resolveFromRoot(String(args.fixture || 'tests/fixtures/eval-f
 const defaultOutputRoot = path.resolve(rootDir, '..', 'tmp', 'xiaoba-eval-smoke', runId);
 const outputRoot = args['output-root'] ? resolveFromRoot(String(args['output-root'])) : defaultOutputRoot;
 const summaryPath = path.join(outputRoot, 'summary.json');
-const maxAttempts = parseMaxAttempts(args['max-attempts'] ?? '6');
+const maxInfraRetries = parseRetryLimit(args['max-infra-retries'] ?? args['max-attempts'] ?? '6');
 const retryDelayMs = numberOption(args['retry-delay-ms'], 3000);
 
 await main();
@@ -23,37 +23,40 @@ async function main() {
   ensureCleanTarget(outputRoot);
   fs.mkdirSync(outputRoot, { recursive: true });
 
-  const attempts = [];
-  let attemptNumber = 1;
-  while (maxAttempts === null || attemptNumber <= maxAttempts) {
-    const attempt = await runAttempt(attemptNumber);
-    attempts.push(attempt);
+  const infraTries = [];
+  let tryNumber = 1;
+  while (maxInfraRetries === null || tryNumber <= maxInfraRetries + 1) {
+    const infraTry = await runInfraTry(tryNumber);
+    infraTries.push(infraTry);
     writeSummary({
-      ok: attempt.ok,
-      attempts,
-      final_attempt: attempt,
+      ok: infraTry.ok,
+      infra_tries: infraTries,
+      final_try: infraTry,
     });
-    if (attempt.ok) {
+    if (infraTry.ok) {
       process.exit(0);
     }
-    if (maxAttempts !== null && attemptNumber >= maxAttempts) break;
+    if (!infraTry.retryable) {
+      break;
+    }
+    if (maxInfraRetries !== null && tryNumber > maxInfraRetries) break;
     await sleep(retryDelayMs);
-    attemptNumber++;
+    tryNumber++;
   }
 
   process.exit(1);
 }
 
-async function runAttempt(attemptNumber) {
-  const attemptId = `attempt-${String(attemptNumber).padStart(2, '0')}`;
-  const attemptRoot = path.join(outputRoot, attemptId);
-  const caseRoot = path.join(attemptRoot, 'repo');
-  const evalRunRoot = path.join(attemptRoot, 'xiaoba-run');
-  const resultPath = path.join(attemptRoot, 'result.json');
-  const diffPath = path.join(attemptRoot, 'repo.diff');
+async function runInfraTry(tryNumber) {
+  const tryId = `infra-try-${String(tryNumber).padStart(2, '0')}`;
+  const tryRoot = path.join(outputRoot, tryId);
+  const caseRoot = path.join(tryRoot, 'repo');
+  const evalRunRoot = path.join(tryRoot, 'xiaoba-run');
+  const resultPath = path.join(tryRoot, 'result.json');
+  const diffPath = path.join(tryRoot, 'repo.diff');
 
-  fs.rmSync(attemptRoot, { recursive: true, force: true });
-  fs.mkdirSync(attemptRoot, { recursive: true });
+  fs.rmSync(tryRoot, { recursive: true, force: true });
+  fs.mkdirSync(tryRoot, { recursive: true });
   copyDirectory(fixtureDir, caseRoot);
 
   await run('git', ['init'], { cwd: caseRoot });
@@ -62,20 +65,29 @@ async function runAttempt(attemptNumber) {
 
   const beforeTest = await run('npm', ['test'], { cwd: caseRoot, allowFailure: true });
   const evalResult = await run(process.execPath, buildEvalArgs({
-    attemptNumber,
+    tryNumber,
     caseRoot,
     evalRunRoot,
     resultPath,
-  }), { cwd: rootDir, allowFailure: true, inherit: true });
-  const afterTest = await run('npm', ['test'], { cwd: caseRoot, allowFailure: true });
-  const diffResult = await run('git', ['diff', '--', '.'], { cwd: caseRoot, allowFailure: true });
+  }), { cwd: rootDir, allowFailure: true });
+  const resultJson = readJsonIfExists(resultPath);
+  const retryReason = getRetryReason({ evalResult, resultJson });
+  const afterTest = retryReason
+    ? { code: null, stdout: '', stderr: '' }
+    : await run('npm', ['test'], { cwd: caseRoot, allowFailure: true });
+  const diffResult = retryReason
+    ? { code: null, stdout: '', stderr: '' }
+    : await run('git', ['diff', '--', '.'], { cwd: caseRoot, allowFailure: true });
   fs.writeFileSync(diffPath, diffResult.stdout, 'utf-8');
 
-  const resultJson = readJsonIfExists(resultPath);
+  const ok = !retryReason && evalResult.code === 0 && afterTest.code === 0 && Boolean(diffResult.stdout.trim());
   return {
-    ok: evalResult.code === 0 && afterTest.code === 0 && Boolean(diffResult.stdout.trim()),
-    attempt: attemptNumber,
-    attempt_root: attemptRoot,
+    ok,
+    retryable: !ok && Boolean(retryReason),
+    retry_reason: ok ? null : retryReason,
+    eval_round: 1,
+    infra_try: tryNumber,
+    try_root: tryRoot,
     case_root: caseRoot,
     result_json: resultPath,
     diff_path: diffPath,
@@ -84,6 +96,8 @@ async function runAttempt(attemptNumber) {
     after_test_exit_code: afterTest.code,
     diff_nonempty: Boolean(diffResult.stdout.trim()),
     eval_result: resultJson,
+    eval_stdout_tail: tail(evalResult.stdout),
+    eval_stderr_tail: tail(evalResult.stderr),
   };
 }
 
@@ -93,7 +107,7 @@ function buildEvalArgs(input) {
     'eval',
     '--cwd', input.caseRoot,
     '--prompt-file', path.join(input.caseRoot, 'task.md'),
-    '--session-key', String(args['session-key'] || `eval-fake-${runId}-${input.attemptNumber}`),
+    '--session-key', String(args['session-key'] || `eval-fake-${runId}`),
     '--run-root', input.evalRunRoot,
     '--output-json', input.resultPath,
     '--max-minutes', String(args['max-minutes'] || '10'),
@@ -116,10 +130,12 @@ function writeSummary(extra) {
     ok: Boolean(extra.ok),
     run_id: runId,
     output_root: outputRoot,
-    max_attempts: maxAttempts === null ? 'infinite' : maxAttempts,
+    eval_rounds: 1,
+    max_infra_retries: maxInfraRetries === null ? 'infinite' : maxInfraRetries,
     retry_delay_ms: retryDelayMs,
-    attempts: extra.attempts,
-    final_attempt: extra.final_attempt,
+    infra_tries: extra.infra_tries,
+    infra_retries_used: Math.max(0, extra.infra_tries.length - 1),
+    final_try: extra.final_try,
   };
   fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf-8');
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
@@ -142,14 +158,14 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function parseMaxAttempts(value) {
+function parseRetryLimit(value) {
   const text = String(value).trim().toLowerCase();
   if (text === 'infinite' || text === 'inf' || text === 'while' || text === 'forever') {
     return null;
   }
   const parsed = Number.parseInt(text, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`--max-attempts must be a positive integer or "infinite": ${value}`);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`--max-infra-retries must be a non-negative integer or "infinite": ${value}`);
   }
   return parsed;
 }
@@ -198,6 +214,29 @@ function readJsonIfExists(filePath) {
   } catch {
     return undefined;
   }
+}
+
+function getRetryReason({ evalResult, resultJson }) {
+  const text = [
+    evalResult.stdout,
+    evalResult.stderr,
+    resultJson?.error,
+    resultJson?.final_text,
+  ].filter(Boolean).join('\n');
+
+  if (isRetryableInfraText(text)) {
+    return 'retryable-infra-error';
+  }
+  return null;
+}
+
+function isRetryableInfraText(text) {
+  return /connection error|network error|fetch failed|socket hang up|premature close|ECONNRESET|ECONNREFUSED|ETIMEDOUT|timeout|timed out|429|rate limit|temporarily unavailable|service unavailable|bad gateway|gateway timeout|502|503|504|520|524|529|服务临时异常|临时异常|请求失败/i.test(String(text || ''));
+}
+
+function tail(text, maxLength = 8000) {
+  const value = String(text || '');
+  return value.length > maxLength ? value.slice(-maxLength) : value;
 }
 
 function run(command, commandArgs, options = {}) {
