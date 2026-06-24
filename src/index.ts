@@ -7,12 +7,15 @@ import { configCommand } from './commands/config';
 import { registerSkillCommand } from './commands/skill';
 import { feishuCommand } from './commands/feishu';
 import { runtimeCommand } from './commands/runtime';
+import { evalCommand } from './commands/eval';
 import { APP_VERSION } from './version';
 
 function main() {
   const program = new Command();
 
-  Logger.brand();
+  if (process.argv[2] !== 'eval') {
+    Logger.brand();
+  }
 
   program
     .name('catsco')
@@ -25,6 +28,21 @@ function main() {
     .option('-i, --interactive', 'Enter interactive mode')
     .option('-m, --message <message>', 'Send a single message')
     .action(chatCommand);
+
+  program
+    .command('eval')
+    .description('Run a non-interactive CatsCo coding evaluation turn')
+    .requiredOption('--cwd <path>', 'Repository working directory for tools')
+    .option('--prompt-file <path>', 'Read the evaluation prompt from a file')
+    .option('-m, --message <message>', 'Use an inline evaluation prompt')
+    .option('--session-key <key>', 'Isolated session key for this case')
+    .option('--run-root <path>', 'Isolated runtime/log root for this case')
+    .option('--output-json <path>', 'Write a machine-readable result JSON file')
+    .option('--max-minutes <minutes>', 'Maximum wall-clock time before interrupting the turn', '20')
+    .option('--auto-approve-tools [tools]', 'Comma-separated local tool names to auto-approve')
+    .option('--no-interactive', 'Compatibility flag for benchmark runners')
+    .option('--no-dashboard', 'Compatibility flag for benchmark runners')
+    .action(evalCommand);
 
   program
     .command('config')
