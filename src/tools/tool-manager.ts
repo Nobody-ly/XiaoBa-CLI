@@ -19,6 +19,9 @@ import { RecordDecisionTool } from './record-decision-tool';
 import { ShareSkillHubSkillTool } from './share-skillhub-skill-tool';
 import { AskParentTool } from './ask-parent-tool';
 import { PromptModeTool } from './prompt-mode-tool';
+import { WebSearchTool } from './web-search-tool';
+import { ReadPageTool } from './read-page-tool';
+import { ResolveSystemProxyTool } from './system-proxy-tool';
 import { DEFAULT_TOOL_NAMES } from './default-tool-names';
 import { mergeToolExecutionContext } from '../utils/tool-context';
 import { confirmLocalToolExecution } from './local-tool-risk';
@@ -83,6 +86,9 @@ export class ToolManager implements ToolExecutor {
       new EditTool(),
       new GlobTool(),
       new GrepTool(),
+      new WebSearchTool(),
+      new ReadPageTool(),
+      new ResolveSystemProxyTool(),
       new CommonDirectoryTool(),
       new ShellTool(),
       new SendTextTool(),

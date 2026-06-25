@@ -65,7 +65,7 @@ export async function executeRemoteDeviceRpcTool(
 export async function executeRemoteReadonlyTool(
   context: ToolExecutionContext,
   gateway: ToolGatewayDecision,
-  toolName: 'read_file' | 'glob' | 'grep',
+  toolName: 'read_file' | 'resolve_common_directory' | 'glob' | 'grep',
   operation: DeviceGrantOperation,
   args: Record<string, unknown>,
 ): Promise<ToolExecutionResult | undefined> {
