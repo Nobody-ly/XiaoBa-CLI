@@ -11,6 +11,8 @@ import type {
 import {
   ChannelCallbacks,
   DeviceRpcTransport,
+  TargetRoutes,
+  ThinToolRpcTransport,
   ToolExecutionConfirmationRequest,
   ToolExecutionConfirmationResult,
 } from '../types/tool';
@@ -68,6 +70,8 @@ export interface RunAgentTurnParams {
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   deviceRpc?: DeviceRpcTransport;
+  thinToolRpc?: ThinToolRpcTransport;
+  targetRoutes?: TargetRoutes;
   localFileGrants?: ScopedLocalFileGrant[];
   pendingUserInputProvider?: PendingUserInputProvider;
   abortSignal?: AbortSignal;
@@ -145,6 +149,7 @@ export class AgentTurnController {
       localDeviceGrant: params.localDeviceGrant,
       deviceGrants: params.deviceGrants,
       deviceSelection: params.deviceSelection,
+      targetRoutes: params.targetRoutes,
       localFileGrants: params.localFileGrants,
       durableMessages: params.messages,
       runtimeFeedback: params.runtimeFeedback,
@@ -166,6 +171,8 @@ export class AgentTurnController {
       deviceGrants: params.deviceGrants,
       deviceSelection: params.deviceSelection,
       deviceRpc: params.deviceRpc,
+      thinToolRpc: params.thinToolRpc,
+      targetRoutes: params.targetRoutes,
       localFileGrants: params.localFileGrants,
       executionContext: turnContext.executionContext,
       pendingUserInputProvider: params.pendingUserInputProvider,
@@ -244,6 +251,8 @@ export class AgentTurnController {
     deviceGrants?: ScopedDeviceGrant[];
     deviceSelection?: ScopedDeviceSelection;
     deviceRpc?: DeviceRpcTransport;
+    thinToolRpc?: ThinToolRpcTransport;
+    targetRoutes?: TargetRoutes;
     localFileGrants?: ScopedLocalFileGrant[];
     executionContext?: import('./runtime-context-builder').ExecutionContextSnapshot;
     pendingUserInputProvider?: PendingUserInputProvider;
@@ -285,6 +294,8 @@ export class AgentTurnController {
           deviceGrants: options.deviceGrants,
           deviceSelection: options.deviceSelection,
           deviceRpc: options.deviceRpc,
+          thinToolRpc: options.thinToolRpc,
+          targetRoutes: options.targetRoutes,
           executionContext: options.executionContext,
           localFileGrants: options.localFileGrants,
           confirmToolExecution: options.confirmToolExecution,
