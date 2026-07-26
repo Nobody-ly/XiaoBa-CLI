@@ -905,6 +905,74 @@ describe('AgentSession lifecycle', () => {
     assert.equal((session as any).messages.length, 0);
   });
 
+  test('durable remote context persists beyond the transient 30-message injection cap', async () => {
+    const { AgentSession, SessionStore } = loadSessionModules();
+    const sessionKey = 'cc_group:durable-remote-context';
+    const session = new AgentSession(sessionKey, buildMockServices(), 'catscompany');
+    session.setSystemPromptProvider(() => 'system prompt');
+    const history = Array.from({ length: 31 }, (_, index) => `remote group history ${index + 1}`);
+
+    assert.equal(await session.appendDurableContext(history), true);
+    const inMemory = (session as any).messages as any[];
+    assert.equal(inMemory.filter(message => history.includes(message.content)).length, 31);
+    assert.equal(inMemory.some(message => message.__injected), false);
+
+    const persisted = SessionStore.getInstance().loadContext(sessionKey);
+    assert.deepStrictEqual(persisted.map(message => message.content), history);
+
+    const restored = new AgentSession(sessionKey, buildMockServices(), 'catscompany');
+    restored.setSystemPromptProvider(() => 'system prompt');
+    assert.equal(restored.restoreFromStore(), true);
+    await restored.init();
+    assert.equal((restored as any).messages.filter((message: any) => history.includes(message.content)).length, 31);
+  });
+
+  test('durable remote context rolls back on cursor failure and deduplicates after restart', async () => {
+    const { AgentSession, SessionStore } = loadSessionModules();
+    const sessionKey = 'cc_group:remote-cursor-transaction';
+    const entry = { source: 'catscompany.agent_context', id: 91, content: '[发言人: Alice]\nremote message' };
+    const session = new AgentSession(sessionKey, buildMockServices(), 'catscompany');
+    session.setSystemPromptProvider(() => 'system prompt');
+    const lifecycle = (session as any).lifecycleManager;
+    let cursorWrites = 0;
+    const originalSaveCursor = lifecycle.saveRemoteContextCursor.bind(lifecycle);
+    lifecycle.saveRemoteContextCursor = () => {
+      cursorWrites++;
+      return false;
+    };
+
+    assert.equal(await session.appendDurableContext([entry], { source: entry.source, cursor: 92 }), false);
+    assert.equal((session as any).messages.some((message: any) => message.content === entry.content), false);
+    assert.equal(SessionStore.getInstance().loadContext(sessionKey).some(message => message.content === entry.content), false);
+
+    lifecycle.saveRemoteContextCursor = originalSaveCursor;
+    assert.equal(await session.appendDurableContext([entry], { source: entry.source, cursor: 92 }), true);
+    assert.equal((session as any).messages.filter((message: any) => message.content === entry.content).length, 1);
+
+    const restored = new AgentSession(sessionKey, buildMockServices(), 'catscompany');
+    restored.setSystemPromptProvider(() => 'system prompt');
+    assert.equal(restored.restoreFromStore(), true);
+    await restored.init();
+    assert.equal(await restored.appendDurableContext([entry], { source: entry.source, cursor: 93 }), true);
+    assert.equal((restored as any).messages.filter((message: any) => message.content === entry.content).length, 1);
+    assert.equal(cursorWrites, 1);
+  });
+
+  test('clear --all reports local deletion failure instead of claiming files were deleted', async () => {
+    const { AgentSession } = loadSessionModules();
+    const session = new AgentSession('cc_group:clear-all-failure', buildMockServices(), 'catscompany');
+    (session as any).lifecycleManager.clear = () => ({
+      initialized: false,
+      lastActiveAt: Date.now(),
+      persisted: false,
+    });
+
+    const result = await session.handleCommand('clear', ['--all']);
+
+    assert.equal(result.handled, true);
+    assert.match(result.reply || '', /文件删除失败.*重试 \/clear --all/);
+  });
+
   test('summarizeAndDestroy returns false for an already empty session', async () => {
     const { AgentSession } = loadSessionModules();
     const session = new AgentSession('user:lifecycle-exit-empty', buildMockServices(), 'feishu');

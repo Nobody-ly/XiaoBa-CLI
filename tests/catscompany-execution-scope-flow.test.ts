@@ -120,10 +120,20 @@ function createHarness(options: {
       contextEvents.push('inject');
       injectedContext.push(text);
     },
+    appendDurableContext: async (entries: Array<string | { content: string }>, cursorUpdate?: { source: string; cursor: number }) => {
+      contextEvents.push('inject');
+      injectedContext.push(...entries.map(entry => typeof entry === 'string' ? entry : entry.content));
+      if (cursorUpdate) {
+        remoteContextCursor = cursorUpdate.cursor;
+        savedContextCursors.push([cursorUpdate.source, cursorUpdate.cursor]);
+      }
+      return true;
+    },
     getRemoteContextCursor: () => remoteContextCursor,
     saveRemoteContextCursor: (source: string, cursor: number) => {
       remoteContextCursor = cursor;
       savedContextCursors.push([source, cursor]);
+      return true;
     },
   };
 
@@ -169,7 +179,10 @@ function createHarness(options: {
       fetchedMessages: 0,
       compressed: false,
     }),
-    markLocalSessionCleared: (sessionKey: string) => clearedSessionMarkers.push(sessionKey),
+    markLocalSessionCleared: (sessionKey: string) => {
+      clearedSessionMarkers.push(sessionKey);
+      return true;
+    },
   };
 
   return {
@@ -398,6 +411,23 @@ describe('CatsCompany execution scope flow', () => {
       seq: 13,
     });
     assert.deepEqual(all.clearedSessionMarkers, []);
+  });
+
+  test('regular clear reports a durable persistence failure instead of claiming success', async () => {
+    const harness = createHarness();
+    harness.bot.cloudSessionRestorer.markLocalSessionCleared = () => false;
+
+    await (harness.bot as any).onMessage({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: '/clear',
+      content: '/clear',
+      metadata: canonicalMetadata('usr7', 'p2p_7_43'),
+      isGroup: false,
+      seq: 12,
+    });
+
+    assert.match(harness.replies.at(-1) || '', /持久化失败.*重试 \/clear/);
   });
 
   test('text that only resembles a clear command remains a normal user message', async () => {

@@ -60,7 +60,7 @@ import {
   agentContextMessageSeq,
   isNativeFeishuGroupTrigger,
   isNativeFeishuClearBoundary,
-  selectNativeFeishuGroupContext,
+  selectNativeFeishuGroupContextEntries,
 } from './agent-context-history';
 import {
   CatsCompanyCloudSessionRestorer,
@@ -139,7 +139,6 @@ const BACKGROUND_SUBAGENT_COMPLETION_DEBOUNCE_MS = 1_500;
 const BACKGROUND_SUBAGENT_COMPLETION_MAX_DELAY_MS = 15_000;
 const SUBAGENT_FALLBACK_MAX_DELIVERY_ATTEMPTS = 3;
 const NATIVE_FEISHU_CONTEXT_PAGE_SIZE = 100;
-const NATIVE_FEISHU_CONTEXT_MAX_PAGES = 10;
 const BACKGROUND_SUBAGENT_COMPLETION_MAX_ITEMS = 6;
 const DEVICE_REGISTRATION_REFRESH_MS = 120_000;
 const DEVICE_RPC_DEFAULT_TTL_MS = 60_000;
@@ -1373,12 +1372,17 @@ export class CatsCompanyBot {
       }
 
       const result = await session.handleCommand(command, args);
+      let commandReply = result.reply;
       if (result.handled && isClear && !args.includes('--all')) {
-        this.cloudSessionRestorer.markLocalSessionCleared(sessionRoute?.sessionKey || key);
+        const clearPersisted = this.cloudSessionRestorer.markLocalSessionCleared(sessionRoute?.sessionKey || key);
+        if (!clearPersisted) {
+          commandReply = '历史已在当前进程清空，但本地持久化失败，请立即重试 /clear。';
+          Logger.error(`[${key}] /clear 哨兵连续两次落盘失败，禁止误报持久清空成功`);
+        }
       }
-      if (result.handled && result.reply) {
+      if (result.handled && commandReply) {
         try {
-          await this.sender.reply(msg.topic, result.reply);
+          await this.sender.reply(msg.topic, commandReply);
         } catch (err: any) {
           Logger.warning(`命令回复发送失败: ${err.message}`);
         }
@@ -1565,9 +1569,12 @@ export class CatsCompanyBot {
 
   private async hydrateNativeFeishuGroupContext(
     session: {
-      injectContext(text: string): void;
+      appendDurableContext(
+        messages: Array<string | { source: string; id: number; content: string }>,
+        cursorUpdate?: { source: string; cursor: number },
+      ): Promise<boolean>;
       getRemoteContextCursor(source: string): number;
-      saveRemoteContextCursor(source: string, cursor: number): void;
+      saveRemoteContextCursor(source: string, cursor: number): boolean;
     },
     hydration: NativeFeishuContextHydration,
     sessionKey: string,
@@ -1576,41 +1583,41 @@ export class CatsCompanyBot {
     if (!shouldHydrateCatsCompanyGroupContext(msg)) return true;
     if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) return false;
     const cursorKey = 'catscompany.agent_context';
-    const memberCount = Number(msg.memberCount);
-    const sourceChannel = typeof msg.metadata?.source_channel === 'string'
-      ? msg.metadata.source_channel.trim()
-      : '';
-    if (!sourceChannel && Number.isFinite(memberCount) && memberCount > 0 && memberCount <= 2) {
-      session.saveRemoteContextCursor(
-        cursorKey,
-        Math.max(session.getRemoteContextCursor(cursorKey), msg.seq),
-      );
-      return true;
-    }
-    if (cloudRestoreStatus === 'restored' || cloudRestoreStatus === 'empty') {
-      if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) return false;
-      session.saveRemoteContextCursor(
-        cursorKey,
-        Math.max(session.getRemoteContextCursor(cursorKey), msg.seq),
-      );
-      return true;
-    }
     try {
       const previousCursor = session.getRemoteContextCursor(cursorKey);
+      const nextCursor = Math.max(previousCursor, msg.seq);
+      const cursorUpdate = { source: cursorKey, cursor: nextCursor };
+      const memberCount = Number(msg.memberCount);
+      const sourceChannel = typeof msg.metadata?.source_channel === 'string'
+        ? msg.metadata.source_channel.trim()
+        : '';
+      if (!sourceChannel && Number.isFinite(memberCount) && memberCount > 0 && memberCount <= 2) {
+        if (!session.saveRemoteContextCursor(cursorKey, nextCursor)) {
+          throw new Error('remote context cursor could not be persisted');
+        }
+        return true;
+      }
+      if (cloudRestoreStatus === 'restored' || cloudRestoreStatus === 'empty') {
+        if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) return false;
+        if (!session.saveRemoteContextCursor(cursorKey, nextCursor)) {
+          throw new Error('remote context cursor could not be persisted after cloud restore');
+        }
+        return true;
+      }
+
       const history = await this.fetchNativeFeishuGroupContextHistory(msg.topic, msg.seq, previousCursor);
       if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) return false;
-      const contextMessages = selectNativeFeishuGroupContext(history, previousCursor);
-      for (const message of contextMessages) {
-        session.injectContext(message);
-      }
-      session.saveRemoteContextCursor(cursorKey, Math.max(previousCursor, msg.seq));
-      if (contextMessages.length > 0) {
-        Logger.info(`[${sessionKey}] 已补入 ${contextMessages.length} 条群聊普通消息上下文`);
+      const contextEntries = selectNativeFeishuGroupContextEntries(history, previousCursor, msg.seq);
+      const persisted = await session.appendDurableContext(contextEntries, cursorUpdate);
+      if (!persisted) throw new Error('durable group context and cursor could not be persisted');
+      if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) return false;
+      if (contextEntries.length > 0) {
+        Logger.info(`[${sessionKey}] 已补入 ${contextEntries.length} 条完整群聊消息上下文`);
       }
       return true;
     } catch (err: any) {
-      Logger.warning(`[${sessionKey}] 群聊历史上下文恢复失败，继续处理当前消息: ${err?.message || err}`);
-      return clearGeneration === this.getSessionClearGeneration(sessionKey);
+      Logger.warning(`[${sessionKey}] 群聊历史上下文恢复失败，本次消息不执行: ${err?.message || err}`);
+      return false;
     }
   }
 
@@ -1623,7 +1630,7 @@ export class CatsCompanyBot {
     let pageBeforeId = beforeId;
     const signal = AbortSignal.timeout(10_000);
 
-    for (let pageIndex = 0; pageIndex < NATIVE_FEISHU_CONTEXT_MAX_PAGES; pageIndex++) {
+    for (;;) {
       const page = await this.bot.getAgentContextHistory(topic, {
         beforeId: pageBeforeId,
         limit: NATIVE_FEISHU_CONTEXT_PAGE_SIZE,
@@ -1658,13 +1665,6 @@ export class CatsCompanyBot {
       }
       pageBeforeId = page.next_before_id;
     }
-
-    Logger.warning(
-      `[${topic}] 群聊历史超过 ${NATIVE_FEISHU_CONTEXT_MAX_PAGES * NATIVE_FEISHU_CONTEXT_PAGE_SIZE} 条，`
-      + '仅补入最近一段并推进游标',
-    );
-    return [...messagesBySeq.values()]
-      .sort((left, right) => agentContextMessageSeq(left) - agentContextMessageSeq(right));
   }
 
   private tryReserveSessionExecution(

@@ -40,6 +40,9 @@ export interface Message {
   __episodeId?: string;
   /** Distinguishes the initial user input from user messages merged while a turn is running. */
   __episodeInputKind?: 'root' | 'pending';
+  /** 远端耐久上下文来源和消息序号，用于游标写盘失败后的幂等补拉。 */
+  __remoteContextSource?: string;
+  __remoteContextId?: number;
   /** Provider 原始 assistant content blocks，仅用于下次请求回放，不展示给用户。 */
   providerContent?: ProviderContentBlock[];
 }
