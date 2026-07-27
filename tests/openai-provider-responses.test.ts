@@ -404,8 +404,83 @@ describe('OpenAIProvider Responses API mode', () => {
       (axios as any).post = originalPost;
     }
   });
+
+  test('preserves Chinese text when a UTF-8 character crosses Responses SSE chunks', async () => {
+    const originalPost = axios.post;
+    (axios as any).post = async () => ({
+      data: Readable.from([
+        ...splitSseInsideUtf8({ type: 'response.output_text.delta', delta: '中文' }, '中'),
+        sse({
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [{
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: '中文' }],
+            }],
+          },
+        }),
+      ]),
+    });
+
+    try {
+      const chunks: string[] = [];
+      const result = await createProvider().chatStream(
+        [{ role: 'user', content: 'hello' }],
+        undefined,
+        { onText: value => chunks.push(value) },
+      );
+
+      assert.equal(chunks.join(''), '中文');
+      assert.equal(result.content, '中文');
+    } finally {
+      (axios as any).post = originalPost;
+    }
+  });
+
+  test('preserves Chinese text when a UTF-8 character crosses Chat Completions SSE chunks', async () => {
+    const originalPost = axios.post;
+    (axios as any).post = async () => ({
+      data: Readable.from([
+        ...splitSseInsideUtf8({
+          choices: [{ index: 0, delta: { content: '中文' }, finish_reason: null }],
+        }, '中'),
+        sse({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      ]),
+    });
+
+    const provider = new OpenAIProvider({
+      apiKey: 'test-key',
+      apiUrl: 'https://example.test/v1/chat/completions',
+      model: 'gpt-test',
+      openaiApiMode: 'chat_completions',
+    });
+
+    try {
+      const chunks: string[] = [];
+      const result = await provider.chatStream(
+        [{ role: 'user', content: 'hello' }],
+        undefined,
+        { onText: value => chunks.push(value) },
+      );
+
+      assert.equal(chunks.join(''), '中文');
+      assert.equal(result.content, '中文');
+    } finally {
+      (axios as any).post = originalPost;
+    }
+  });
 });
 
 function sse(payload: unknown): string {
   return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+function splitSseInsideUtf8(payload: unknown, character: string): Buffer[] {
+  const bytes = Buffer.from(sse(payload), 'utf8');
+  const characterBytes = Buffer.from(character, 'utf8');
+  const index = bytes.indexOf(characterBytes);
+  assert.notEqual(index, -1, `expected ${character} in SSE payload`);
+  return [bytes.subarray(0, index + 1), bytes.subarray(index + 1)];
 }
