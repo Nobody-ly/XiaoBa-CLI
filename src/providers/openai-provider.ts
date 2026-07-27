@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { createHash } from 'crypto';
+import { StringDecoder } from 'string_decoder';
 import { Message, ChatConfig, ChatResponse, ContentBlock } from '../types';
 import { ToolDefinition } from '../types/tool';
 import { AIProvider, AIRequestOptions, StreamCallbacks } from './provider';
@@ -235,6 +236,7 @@ export class OpenAIProvider implements AIProvider {
       let contentStripper = new OpenAIThinkingStripper();
       const toolCallsMap = new Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }>();
       let buffer = '';
+      const decoder = new StringDecoder('utf8');
       let streamUsage: ChatResponse['usage'] = undefined;
       let finishReason: string | undefined;
 
@@ -249,7 +251,7 @@ export class OpenAIProvider implements AIProvider {
       }
 
       stream.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
+        buffer += decoder.write(chunk);
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
@@ -325,6 +327,7 @@ export class OpenAIProvider implements AIProvider {
 
       stream.on('end', () => {
         options?.signal?.removeEventListener('abort', onAbort);
+        buffer += decoder.end();
         const tail = contentStripper.flush();
         if (tail) {
           fullContent += tail;
@@ -629,6 +632,7 @@ export class OpenAIProvider implements AIProvider {
       const outputItems: any[] = [];
       let streamedVisibleText = '';
       let buffer = '';
+      const decoder = new StringDecoder('utf8');
       let finalResponse: any;
       let settled = false;
 
@@ -675,7 +679,7 @@ export class OpenAIProvider implements AIProvider {
       };
 
       stream.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
+        buffer += decoder.write(chunk);
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
         for (const line of lines) {
@@ -693,6 +697,7 @@ export class OpenAIProvider implements AIProvider {
 
       stream.on('end', () => {
         options?.signal?.removeEventListener('abort', onAbort);
+        buffer += decoder.end();
         if (settled) return;
         const tail = contentStripper.flush();
         emitVisibleText(tail);
