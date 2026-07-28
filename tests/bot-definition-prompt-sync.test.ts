@@ -56,7 +56,7 @@ describe('BotDefinition system prompt sync', () => {
       version: 1,
       currentBot: {
         uid: botId,
-        apiKey: 'bot-api-key',
+        apiKey: '',
         boundByUserUid: 'owner-a',
         bindingSource: 'test',
       },
@@ -76,7 +76,16 @@ describe('BotDefinition system prompt sync', () => {
       repository,
     });
     return {
-      coordinator: new PromptReconcileCoordinator({ runtimeRoot, env, definitionService }),
+      coordinator: new PromptReconcileCoordinator({
+        runtimeRoot,
+        env,
+        definitionService,
+        cloudSyncService: {
+          pushPrompt: async () => undefined,
+          flushPending: async () => undefined,
+          readState: () => ({ pendingPrompt: false }),
+        } as any,
+      }),
       repository,
     };
   }

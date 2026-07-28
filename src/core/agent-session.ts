@@ -52,6 +52,7 @@ import {
   reconcileCurrentBotPromptBeforeTurn,
   scheduleCurrentBotPromptReconcile,
 } from '../bot-definition/prompt-sync';
+import { scheduleCurrentBotSkillSync } from '../bot-skills/runtime';
 
 export type { RuntimeFeedbackInput, RuntimeFeedbackOptions } from './runtime-feedback-inbox';
 
@@ -643,6 +644,7 @@ export class AgentSession {
       } finally {
         this.planRuntime.clear();
         scheduleCurrentBotPromptReconcile();
+        scheduleCurrentBotSkillSync();
         this.busy = false;
         this.activeAbortController = null;
       }

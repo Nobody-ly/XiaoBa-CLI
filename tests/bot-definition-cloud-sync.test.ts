@@ -60,7 +60,10 @@ describe('BotDefinition cloud synchronization', () => {
     const snapshot = await sync.pull('43', auth);
 
     assert.equal(snapshot?.revision, 5);
-    assert.deepStrictEqual(definitionService.read('43'), definition('gpt-5.6-sol'));
+    assert.deepStrictEqual(definitionService.read('43'), {
+      ...definition('gpt-5.6-sol'),
+      skills: [],
+    });
     assert.deepStrictEqual(sync.readState('43'), {
       schema: 'xiaoba.bot-definition-cloud-sync.v1',
       botId: '43',
@@ -210,7 +213,7 @@ describe('BotDefinition cloud synchronization', () => {
 
     assert.equal(snapshot?.revision, 2);
     assert.equal(patchCount, 0);
-    assert.deepStrictEqual(definitionService.read('43'), cloud);
+    assert.deepStrictEqual(definitionService.read('43'), { ...cloud, skills: [] });
     assert.equal(sync.readState('43').pendingModel, false);
   });
 

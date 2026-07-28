@@ -47,6 +47,7 @@ describe('cloud bot model client local handoff', () => {
         botId: '43',
         model: { kind: 'catalog', modelId: 'minimax-m3' },
         prompt: { selected: 'default' },
+        skills: [],
       },
       runtime: { desiredRevision: 4, appliedRevision: 3 },
     });
@@ -100,6 +101,7 @@ describe('cloud bot model client local handoff', () => {
         selected: 'custom',
         customSystemPrompt: '\nPreserve this spacing.\n',
       },
+      skills: [],
     });
   });
 
