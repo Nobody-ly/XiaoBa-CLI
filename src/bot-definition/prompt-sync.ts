@@ -10,6 +10,10 @@ import {
   SYSTEM_PROMPT_RELATIVE_PATH,
 } from '../utils/prompt-template';
 import { createBotDefinitionSyncService, type BotDefinitionSyncService } from './service';
+import {
+  createBotDefinitionCloudSyncService,
+  type BotDefinitionCloudSyncService,
+} from './cloud-sync';
 import type { BotDefinition, BotPromptDefinition } from './types';
 
 const PROMPT_SYNC_STATE_SCHEMA = 'xiaoba.active-prompt-sync.v1';
@@ -41,12 +45,14 @@ export interface PromptReconcileCoordinatorOptions {
   runtimeRoot?: string;
   env?: NodeJS.ProcessEnv;
   definitionService?: BotDefinitionSyncService;
+  cloudSyncService?: BotDefinitionCloudSyncService;
 }
 
 export class PromptReconcileCoordinator {
   private readonly runtimeRoot: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly definitionService: BotDefinitionSyncService;
+  private readonly cloudSyncService: BotDefinitionCloudSyncService;
   private tail: Promise<unknown> = Promise.resolve();
 
   constructor(options: PromptReconcileCoordinatorOptions = {}) {
@@ -55,6 +61,11 @@ export class PromptReconcileCoordinator {
     this.definitionService = options.definitionService ?? createBotDefinitionSyncService({
       runtimeRoot: this.runtimeRoot,
       env: this.env,
+    });
+    this.cloudSyncService = options.cloudSyncService ?? createBotDefinitionCloudSyncService({
+      runtimeRoot: this.runtimeRoot,
+      env: this.env,
+      definitionService: this.definitionService,
     });
   }
 
@@ -198,6 +209,15 @@ export class PromptReconcileCoordinator {
         this.restoreActiveSnapshot(snapshot);
         throw error;
       }
+      try {
+        const auth = createCatsCoLocalConfigService({
+          runtimeRoot: this.runtimeRoot,
+          env: this.env,
+        }).getAuthState();
+        await this.cloudSyncService.pushPrompt(botId, auth, prompt);
+      } catch (error) {
+        Logger.warning(`Prompt cloud sync deferred: ${errorMessage(error)}`);
+      }
       return this.getSelection(botId);
     });
   }
@@ -291,10 +311,16 @@ export class PromptReconcileCoordinator {
     if (!active || active.hash === state.lastSyncedHash) return false;
 
     this.requireDefinition(botId);
-    this.definitionService.updatePrompt(botId, {
+    const prompt: BotPromptDefinition = {
       selected: 'custom',
       customSystemPrompt: active.text,
-    });
+    };
+    this.definitionService.updatePrompt(botId, prompt);
+    const auth = createCatsCoLocalConfigService({
+      runtimeRoot: this.runtimeRoot,
+      env: this.env,
+    }).getAuthState();
+    await this.cloudSyncService.pushPrompt(botId, auth, prompt);
     this.writeState({
       schema: PROMPT_SYNC_STATE_SCHEMA,
       activeBotId: botId,
@@ -403,9 +429,11 @@ export function getPromptReconcileCoordinator(
 ): PromptReconcileCoordinator {
   const runtimeRoot = path.resolve(options.runtimeRoot ?? PathResolver.getRuntimeDataRoot());
   const existing = coordinators.get(runtimeRoot);
-  if (existing && !options.definitionService && !options.env) return existing;
+  if (existing && !options.definitionService && !options.cloudSyncService && !options.env) return existing;
   const coordinator = new PromptReconcileCoordinator({ ...options, runtimeRoot });
-  if (!options.definitionService && !options.env) coordinators.set(runtimeRoot, coordinator);
+  if (!options.definitionService && !options.cloudSyncService && !options.env) {
+    coordinators.set(runtimeRoot, coordinator);
+  }
   return coordinator;
 }
 
