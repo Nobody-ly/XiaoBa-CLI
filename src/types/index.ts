@@ -21,6 +21,11 @@ export interface Message {
   name?: string;
   /** 标记由 injectContext 注入的消息，用于滑动窗口清理 */
   __injected?: boolean;
+  /**
+   * Provider-only cache placement hint. Dynamic system context remains system-priority
+   * but is appended to Responses input instead of destabilizing instructions.
+   */
+  __cacheScope?: 'stable' | 'dynamic';
   /** 标记注入给 agent 看的运行时反馈，仅供内部清理和日志记录使用 */
   __runtimeFeedback?: boolean;
   /** 标记内部 runtime observation，例如子 agent 完成结果；对模型仍以 user role 承载 */
