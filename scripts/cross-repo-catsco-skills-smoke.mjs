@@ -42,7 +42,7 @@ const listedCatsTests = new Set(
 );
 for (const testName of catsExpectedTests) {
   if (!listedCatsTests.has(testName)) {
-    console.error(`[cross-repo] Missing expected CatsCo test: ${testName}`);
+    console.error(`[cross-repo] Missing expected CatsCo contract test: ${testName}`);
     process.exit(1);
   }
 }
