@@ -54,6 +54,7 @@ export class PromptReconcileCoordinator {
   private readonly definitionService: BotDefinitionSyncService;
   private readonly cloudSyncService: BotDefinitionCloudSyncService;
   private tail: Promise<unknown> = Promise.resolve();
+  private readonly cloudRetries = new Set<string>();
 
   constructor(options: PromptReconcileCoordinatorOptions = {}) {
     this.runtimeRoot = path.resolve(options.runtimeRoot ?? PathResolver.getRuntimeDataRoot());
@@ -128,14 +129,18 @@ export class PromptReconcileCoordinator {
     };
   }
 
-  activateBot(botId: string): Promise<PromptSelectionState> {
-    return this.enqueue(() => this.activateBotNow(botId));
+  activateBot(
+    botId: string,
+    options: { preferDefinition?: boolean } = {},
+  ): Promise<PromptSelectionState> {
+    return this.enqueue(() => this.activateBotNow(botId, options));
   }
 
   reconcileCurrent(options: { force?: boolean } = {}): Promise<boolean> {
     return this.enqueue(async () => {
       const botId = this.getCurrentBotId();
       if (!botId) return false;
+      this.schedulePendingCloudRetry(botId);
       return this.reconcileBotNow(botId, options);
     });
   }
@@ -159,6 +164,7 @@ export class PromptReconcileCoordinator {
         }
         return undefined;
       }
+      await this.reconcileBotNow(botId, { force: true });
       return this.activateBotNow(botId);
     });
   }
@@ -217,6 +223,7 @@ export class PromptReconcileCoordinator {
         await this.cloudSyncService.pushPrompt(botId, auth, prompt);
       } catch (error) {
         Logger.warning(`Prompt cloud sync deferred: ${errorMessage(error)}`);
+        this.schedulePendingCloudRetry(botId);
       }
       return this.getSelection(botId);
     });
@@ -246,25 +253,63 @@ export class PromptReconcileCoordinator {
     }
   }
 
-  private async activateBotNow(botId: string): Promise<PromptSelectionState> {
+  private async activateBotNow(
+    botId: string,
+    options: { preferDefinition?: boolean } = {},
+  ): Promise<PromptSelectionState> {
     let definition = this.requireDefinition(botId);
     const state = this.readState();
     const active = await this.readStableActivePrompt();
+    const bundledDefault = this.readBundledDefault();
+    let migratedLegacyDefault = false;
 
     if (!definition.prompt) {
       const canMigrateActive = Boolean(active && (!state || state.activeBotId === botId));
+      const activeIsTrackedCustom = Boolean(
+        active
+        && state?.activeBotId === botId
+        && (
+          state.materializedSelection === 'custom'
+          || active.hash !== state.lastSyncedHash
+        ),
+      );
       const prompt: BotPromptDefinition = canMigrateActive
-        ? { selected: 'custom', customSystemPrompt: active!.text }
+        ? activeIsTrackedCustom
+          ? { selected: 'custom', customSystemPrompt: active!.text }
+          : { selected: 'default', customSystemPrompt: active!.text }
         : { selected: 'default' };
       definition = this.definitionService.updatePrompt(botId, prompt).definition;
+      migratedLegacyDefault = canMigrateActive && !activeIsTrackedCustom;
+    } else if (
+      active
+      && !state
+      && definition.prompt.selected === 'default'
+    ) {
+      definition = this.definitionService.updatePrompt(botId, {
+        ...definition.prompt,
+        customSystemPrompt: definition.prompt.customSystemPrompt || active.text,
+      }).definition;
+      migratedLegacyDefault = true;
     }
 
-    const bundledDefault = this.readBundledDefault();
+    if (migratedLegacyDefault) {
+      this.writeActivePrompt(bundledDefault);
+      this.writeState({
+        schema: PROMPT_SYNC_STATE_SCHEMA,
+        activeBotId: botId,
+        lastSyncedHash: hashPrompt(bundledDefault),
+        materializedSelection: 'default',
+      });
+      return this.toSelection(definition, bundledDefault, bundledDefault);
+    }
+
     const prompt = definition.prompt!;
     const expected = prompt.selected === 'custom'
       ? prompt.customSystemPrompt || bundledDefault
       : bundledDefault;
     const activeHasUnsyncedChange = Boolean(
+      !options.preferDefinition
+      &&
       active
       && (
         (state?.activeBotId === botId && active.hash !== state.lastSyncedHash)
@@ -419,6 +464,27 @@ export class PromptReconcileCoordinator {
     const next = this.tail.then(operation, operation);
     this.tail = next.then(() => undefined, () => undefined);
     return next;
+  }
+
+  private schedulePendingCloudRetry(botId: string): void {
+    if (
+      this.cloudRetries.has(botId)
+      || !this.cloudSyncService.readState(botId).pendingPrompt
+    ) {
+      return;
+    }
+    this.cloudRetries.add(botId);
+    const auth = createCatsCoLocalConfigService({
+      runtimeRoot: this.runtimeRoot,
+      env: this.env,
+    }).getAuthState();
+    void this.cloudSyncService.flushPending(botId, auth)
+      .catch(error => {
+        Logger.warning(`Prompt cloud sync retry deferred: ${errorMessage(error)}`);
+      })
+      .finally(() => {
+        this.cloudRetries.delete(botId);
+      });
   }
 }
 

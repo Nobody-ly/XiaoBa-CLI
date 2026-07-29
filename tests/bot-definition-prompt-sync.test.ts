@@ -204,6 +204,24 @@ describe('BotDefinition system prompt sync', () => {
     assert.equal(fs.readFileSync(coordinator.getActivePromptPath(), 'utf-8'), 'last local edit\n');
   });
 
+  test('materializes the cloud-selected prompt over an offline file edit', async () => {
+    const { coordinator, repository } = createCoordinator();
+    await coordinator.activateBot('bot-a');
+    fs.writeFileSync(coordinator.getActivePromptPath(), 'offline local edit\n', 'utf-8');
+    repository.writeCache({
+      ...repository.readCache('bot-a')!,
+      prompt: { selected: 'custom', customSystemPrompt: 'cloud prompt' },
+    });
+
+    await coordinator.activateBot('bot-a', { preferDefinition: true });
+
+    assert.deepStrictEqual(repository.readCache('bot-a')?.prompt, {
+      selected: 'custom',
+      customSystemPrompt: 'cloud prompt',
+    });
+    assert.equal(fs.readFileSync(coordinator.getActivePromptPath(), 'utf-8'), 'cloud prompt\n');
+  });
+
   test('model and prompt field updates preserve each other', async () => {
     const { coordinator, repository } = createCoordinator();
     await coordinator.activateBot('bot-a');
@@ -307,14 +325,18 @@ describe('BotDefinition system prompt sync', () => {
     assert.deepStrictEqual(repository.readCache('bot-a')?.prompt, { selected: 'default' });
   });
 
-  test('migrates an existing active override only for the active bot', async () => {
+  test('backs up a legacy active override while selecting the current bundled default', async () => {
     const { coordinator, repository } = createCoordinator('bot-a');
     fs.mkdirSync(path.dirname(coordinator.getActivePromptPath()), { recursive: true });
     fs.writeFileSync(coordinator.getActivePromptPath(), 'legacy override\n', 'utf-8');
 
     await coordinator.activateBot('bot-a');
-    assert.equal(repository.readCache('bot-a')?.prompt?.selected, 'custom');
+    assert.equal(repository.readCache('bot-a')?.prompt?.selected, 'default');
     assert.equal(repository.readCache('bot-a')?.prompt?.customSystemPrompt, 'legacy override');
+    assert.equal(fs.readFileSync(coordinator.getActivePromptPath(), 'utf-8'), 'bundled v1\n');
+    await coordinator.select('bot-a', 'custom');
+    assert.equal(fs.readFileSync(coordinator.getActivePromptPath(), 'utf-8'), 'legacy override\n');
+    await coordinator.select('bot-a', 'default');
 
     repository.writeCanonical({
       schema: BOT_DEFINITION_SCHEMA,
@@ -325,6 +347,27 @@ describe('BotDefinition system prompt sync', () => {
     await coordinator.activateBot('bot-b');
 
     assert.equal(repository.readCache('bot-b')?.prompt?.selected, 'default');
+    assert.equal(fs.readFileSync(coordinator.getActivePromptPath(), 'utf-8'), 'bundled v1\n');
+  });
+
+  test('backs up a legacy override even when cloud bootstrap already supplied default prompt', async () => {
+    const { coordinator, repository } = createCoordinator('bot-a');
+    repository.writeCanonical({
+      schema: BOT_DEFINITION_SCHEMA,
+      botId: 'bot-a',
+      model: { kind: 'catalog', modelId: 'minimax-m3' },
+      prompt: { selected: 'default' },
+    });
+    repository.writeCache(repository.readCanonical('bot-a')!);
+    fs.mkdirSync(path.dirname(coordinator.getActivePromptPath()), { recursive: true });
+    fs.writeFileSync(coordinator.getActivePromptPath(), 'legacy override\n', 'utf-8');
+
+    await coordinator.activateBot('bot-a');
+
+    assert.deepStrictEqual(repository.readCache('bot-a')?.prompt, {
+      selected: 'default',
+      customSystemPrompt: 'legacy override',
+    });
     assert.equal(fs.readFileSync(coordinator.getActivePromptPath(), 'utf-8'), 'bundled v1\n');
   });
 
@@ -352,7 +395,7 @@ describe('BotDefinition system prompt sync', () => {
     await coordinator.activateBot('bot-b');
 
     assert.deepStrictEqual(repository.readCache('bot-a')?.prompt, {
-      selected: 'custom',
+      selected: 'default',
       customSystemPrompt: 'legacy prompt from bot A',
     });
     assert.deepStrictEqual(repository.readCache('bot-b')?.prompt, {

@@ -103,6 +103,117 @@ describe('BotDefinition cloud synchronization', () => {
     assert.equal(sync.readState('43').pendingModel, false);
   });
 
+  test('flushes model and prompt from the same pending local snapshot', async () => {
+    const runtimeRoot = makeRoot();
+    const definitionService = createBotDefinitionSyncService({ runtimeRoot, env: {} });
+    const local = definition('gpt-5.6-sol', 'local prompt');
+    definitionService.publish('43', local.model);
+    definitionService.updatePrompt('43', local.prompt!);
+    let cloud = definition('minimax-m3', 'cloud prompt');
+    let revision = 1;
+    const fetchImpl = (async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/bots/definition/model')) {
+        const body = JSON.parse(String(init?.body));
+        cloud = { ...cloud, model: body.model };
+        revision++;
+        return Response.json({ revision });
+      }
+      if (url.includes('/api/bots/definition/prompt')) {
+        const body = JSON.parse(String(init?.body));
+        cloud = { ...cloud, prompt: body.prompt };
+        revision++;
+        return Response.json({ revision });
+      }
+      return response(revision, cloud);
+    }) as typeof fetch;
+    const sync = new BotDefinitionCloudSyncService({
+      runtimeRoot,
+      env: {},
+      definitionService,
+      fetchImpl,
+    });
+    sync.markModelPending('43');
+    sync.markPromptPending('43');
+
+    const snapshot = await sync.flushPending('43', auth);
+
+    assert.equal(snapshot?.revision, 3);
+    assert.deepStrictEqual(cloud, local);
+    assert.equal(sync.readState('43').pendingModel, false);
+    assert.equal(sync.readState('43').pendingPrompt, false);
+  });
+
+  test('retries startup pending data only when the cloud revision is unchanged', async () => {
+    const runtimeRoot = makeRoot();
+    const definitionService = createBotDefinitionSyncService({ runtimeRoot, env: {} });
+    definitionService.publish('43', definition('gpt-5.6-sol').model);
+    let cloud = definition('minimax-m3');
+    let revision = 1;
+    let patchCount = 0;
+    const fetchImpl = (async (input, init) => {
+      const url = String(input);
+      if (url.includes('/api/bots/definition/model')) {
+        patchCount++;
+        const body = JSON.parse(String(init?.body));
+        cloud = { ...cloud, model: body.model };
+        revision++;
+        return Response.json({ revision });
+      }
+      return response(revision, cloud);
+    }) as typeof fetch;
+    const sync = new BotDefinitionCloudSyncService({
+      runtimeRoot,
+      env: {},
+      definitionService,
+      fetchImpl,
+    });
+    await sync.pull('43', auth);
+    definitionService.updateModel('43', definition('gpt-5.6-sol').model);
+    sync.markModelPending('43');
+
+    const snapshot = await sync.reconcileStartup('43', auth);
+
+    assert.equal(snapshot?.revision, 2);
+    assert.equal(patchCount, 1);
+    assert.deepStrictEqual(definitionService.read('43')?.model, definition('gpt-5.6-sol').model);
+    assert.equal(sync.readState('43').pendingModel, false);
+  });
+
+  test('does not overwrite a newer cloud revision with stale startup pending data', async () => {
+    const runtimeRoot = makeRoot();
+    const definitionService = createBotDefinitionSyncService({ runtimeRoot, env: {} });
+    let cloud = definition('minimax-m3');
+    let revision = 1;
+    let patchCount = 0;
+    const fetchImpl = (async input => {
+      const url = String(input);
+      if (url.includes('/api/bots/definition/model')) {
+        patchCount++;
+        return Response.json({ error: 'unexpected patch' }, { status: 500 });
+      }
+      return response(revision, cloud);
+    }) as typeof fetch;
+    const sync = new BotDefinitionCloudSyncService({
+      runtimeRoot,
+      env: {},
+      definitionService,
+      fetchImpl,
+    });
+    await sync.pull('43', auth);
+    definitionService.updateModel('43', definition('gpt-5.6-sol').model);
+    sync.markModelPending('43');
+    cloud = definition('deepseek-v4-flash');
+    revision = 2;
+
+    const snapshot = await sync.reconcileStartup('43', auth);
+
+    assert.equal(snapshot?.revision, 2);
+    assert.equal(patchCount, 0);
+    assert.deepStrictEqual(definitionService.read('43'), cloud);
+    assert.equal(sync.readState('43').pendingModel, false);
+  });
+
   test('retries one explicit local field update after a stale revision', async () => {
     const runtimeRoot = makeRoot();
     const definitionService = createBotDefinitionSyncService({ runtimeRoot, env: {} });

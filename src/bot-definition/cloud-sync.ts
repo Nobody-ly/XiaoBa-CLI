@@ -116,14 +116,59 @@ export class BotDefinitionCloudSyncService {
       const state = this.readState(botId);
       const definition = this.definitionService.read(botId);
       if (!definition) return this.pullUnlocked(botId, auth);
+      const pendingPrompt = definition.prompt;
       if (state.pendingModel) {
         snapshot = await this.pushFieldUnlocked(botId, auth, 'model', definition.model);
       }
-      const current = this.definitionService.read(botId) ?? definition;
-      if (this.readState(botId).pendingPrompt && current.prompt) {
-        snapshot = await this.pushFieldUnlocked(botId, auth, 'prompt', current.prompt);
+      if (this.readState(botId).pendingPrompt && pendingPrompt) {
+        snapshot = await this.pushFieldUnlocked(botId, auth, 'prompt', pendingPrompt);
       }
       return snapshot ?? this.pullUnlocked(botId, auth);
+    });
+  }
+
+  reconcileStartup(
+    botId: string,
+    auth: CatsCoAuthSnapshot,
+  ): Promise<CloudBotDefinitionSnapshot | undefined> {
+    return this.enqueue(botId, async () => {
+      const state = this.readState(botId);
+      const pendingDefinition = (
+        state.pendingModel || state.pendingPrompt
+          ? this.definitionService.read(botId)
+          : undefined
+      );
+      const snapshot = await this.pullUnlocked(botId, auth);
+      if (!snapshot || (!state.pendingModel && !state.pendingPrompt)) return snapshot;
+
+      if (snapshot.revision !== state.revision) {
+        this.writeState({
+          ...this.readState(botId),
+          pendingModel: false,
+          pendingPrompt: false,
+        });
+        return snapshot;
+      }
+      if (!pendingDefinition) return snapshot;
+
+      let applied = snapshot;
+      if (state.pendingModel) {
+        applied = await this.pushFieldUnlocked(
+          botId,
+          auth,
+          'model',
+          pendingDefinition.model,
+        ) ?? applied;
+      }
+      if (state.pendingPrompt && pendingDefinition.prompt) {
+        applied = await this.pushFieldUnlocked(
+          botId,
+          auth,
+          'prompt',
+          pendingDefinition.prompt,
+        ) ?? applied;
+      }
+      return applied;
     });
   }
 

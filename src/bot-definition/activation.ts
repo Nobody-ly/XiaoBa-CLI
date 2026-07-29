@@ -72,10 +72,7 @@ export async function prepareBoundBotDefinition(
 
   if (!options.cloudSelection) {
     try {
-      const pending = cloudDefinitionSync.readState(botId);
-      let cloudSnapshot = pending.pendingModel || pending.pendingPrompt
-        ? await cloudDefinitionSync.flushPending(botId, auth)
-        : await cloudDefinitionSync.pull(botId, auth);
+      let cloudSnapshot = await cloudDefinitionSync.reconcileStartup(botId, auth);
       if (cloudSnapshot) {
         if (selectedCatalogRuntime) {
           definitionService.storeCatalogRuntime(selectedCatalogRuntime);
@@ -147,7 +144,7 @@ export async function prepareBoundBotDefinition(
           env: options.env,
           definitionService,
         });
-        await promptCoordinator.activateBot(botId);
+        await promptCoordinator.activateBot(botId, { preferDefinition: true });
         definition = definitionService.read(botId)!;
         if (!cloudSnapshot.definition?.prompt && definition.prompt) {
           cloudDefinitionSync.markPromptPending(botId);
