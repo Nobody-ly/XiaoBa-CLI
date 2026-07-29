@@ -108,6 +108,7 @@ describe('AnthropicProvider prompt caching', () => {
       'https://api.anthropic.com/',
       'https://api.anthropic.com/v1',
       'https://api.anthropic.com/v1/messages',
+      'https://api.anthropic.com/v1/messages//',
       'https://api.anthropic.com:443/v1/messages',
     ];
     const nonNativeUrls = [
@@ -124,6 +125,13 @@ describe('AnthropicProvider prompt caching', () => {
     for (const url of nonNativeUrls) {
       assert.equal((createProvider(url) as any).supportsNativePromptCaching(), false, url);
     }
+  });
+
+  test('normalizes repeated trailing slashes before configuring the native Anthropic client', () => {
+    const provider = createProvider('https://api.anthropic.com/v1/messages//');
+
+    assert.equal((provider as any).client.baseURL, 'https://api.anthropic.com');
+    assert.equal((provider as any).supportsNativePromptCaching(), true);
   });
 
   test('uses native prompt-caching create and preserves cache usage totals', async () => {

@@ -54,7 +54,7 @@ export class AnthropicProvider implements AIProvider {
    * 标准化 base URL（去掉末尾的 /v1/messages 等路径）
    */
   private normalizeBaseURL(url: string): string {
-    return url.replace(/\/v1\/messages\/?$/, '').replace(/\/v1\/?$/, '');
+    return url.replace(/\/+$/, '').replace(/\/v1\/messages$/, '').replace(/\/v1$/, '');
   }
 
   /**
