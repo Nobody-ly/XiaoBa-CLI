@@ -500,6 +500,10 @@ export class BotSkillSyncService {
     if (!cloud.definition) {
       throw new Error('CatsCo cloud returned skills without a canonical BotDefinition.');
     }
+    if (this.definitionService.read(this.botId)) {
+      this.definitionService.updateSkills(this.botId, cloud.skills);
+      return;
+    }
     this.definitionService.acceptCanonical(cloud.definition);
   }
 }

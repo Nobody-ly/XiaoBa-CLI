@@ -294,7 +294,13 @@ function parseCloudBotDefinitionSnapshot(
     throw new Error(`CatsCo cloud returned an unsupported BotDefinition model kind: ${kind}`);
   }
   const prompt = parseCloudPromptDefinition(raw.prompt);
-  const skills = canonicalizeBotSkillRefs(Array.isArray(raw.skills) ? raw.skills as BotSkillRef[] : []);
+  const hasSkills = Object.prototype.hasOwnProperty.call(raw, 'skills');
+  if (hasSkills && !Array.isArray(raw.skills)) {
+    throw new Error('CatsCo cloud returned an invalid BotDefinition Skills field.');
+  }
+  const skills = hasSkills
+    ? canonicalizeBotSkillRefs(raw.skills as BotSkillRef[])
+    : undefined;
   return {
     configured: true,
     revision,
@@ -303,7 +309,7 @@ function parseCloudBotDefinitionSnapshot(
       botId,
       model,
       ...(prompt ? { prompt } : {}),
-      skills,
+      ...(skills !== undefined ? { skills } : {}),
     },
     ...(response?.runtime && typeof response.runtime === 'object'
       ? { runtime: response.runtime as Record<string, unknown> }

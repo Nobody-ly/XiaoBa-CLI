@@ -105,4 +105,35 @@ describe('BotDefinition Skill slice', () => {
     assert.equal(snapshot?.revision, 9);
     assert.equal(snapshot?.definition?.skills?.[0]?.contentHash, HASH_A);
   });
+
+  test('preserves whether the cloud BotDefinition omitted or explicitly cleared Skills', async () => {
+    const pull = (definition: Record<string, unknown>) => pullCloudBotDefinition({
+      botId: 'bot-a',
+      auth: {
+        apiKey: 'bot-key',
+        httpBaseUrl: 'https://cats.test',
+        serverUrl: 'wss://cats.test',
+      },
+      fetchImpl: (async () => Response.json({
+        configured: true,
+        revision: 10,
+        definition: {
+          schema: 'xiaoba.bot-definition.v1',
+          botId: 'bot-a',
+          model: { kind: 'catalog', modelId: 'minimax-m3' },
+          ...definition,
+        },
+      })) as typeof fetch,
+    });
+
+    const unsupported = await pull({});
+    const explicitlyEmpty = await pull({ skills: [] });
+
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(unsupported?.definition ?? {}, 'skills'),
+      false,
+    );
+    assert.deepStrictEqual(explicitlyEmpty?.definition?.skills, []);
+    await assert.rejects(pull({ skills: null }), /invalid BotDefinition Skills field/);
+  });
 });

@@ -39,9 +39,10 @@ export async function pullCloudBotSkills(
       revision: snapshot.revision,
     };
   }
+  if (snapshot.definition.skills === undefined) return undefined;
   return {
     botId: snapshot.definition.botId,
-    skills: canonicalizeBotSkillRefs(snapshot.definition.skills ?? []),
+    skills: canonicalizeBotSkillRefs(snapshot.definition.skills),
     revision: snapshot.revision,
     definition: snapshot.definition,
     ...(typeof snapshot.runtime?.updatedAt === 'string'

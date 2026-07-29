@@ -206,7 +206,7 @@ describe('BotDefinition activation', () => {
     });
 
     assert.equal(prepared?.cloudRevision, 2);
-    assert.deepStrictEqual(prepared?.definition, { ...legacyDefinition, skills: [] });
+    assert.deepStrictEqual(prepared?.definition, legacyDefinition);
     assert.deepStrictEqual(cloudDefinition, legacyDefinition);
     assert.equal(
       requests.filter(item => item.path === '/api/bots/definition/model').length,

@@ -4,9 +4,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createBotDefinitionSyncService } from '../src/bot-definition/service';
-import type { BotSkillRef } from '../src/bot-definition/types';
+import type { BotDefinition, BotSkillRef } from '../src/bot-definition/types';
 import { BotSkillBaseStore } from '../src/bot-skills/base-store';
-import { scanLocalBotSkill } from '../src/bot-skills/local-manifest';
+import {
+  readBotSkillLocalMarker,
+  scanLocalBotSkill,
+} from '../src/bot-skills/local-manifest';
 import { BotSkillSyncService } from '../src/bot-skills/sync-service';
 import type { BotSkillPackage, LocalBotSkillManifestEntry } from '../src/bot-skills/types';
 import { readSkillHubInstallMarker } from '../src/skillhub/install-marker';
@@ -106,6 +109,171 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       fs.readFileSync(path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'), 'utf8'),
       marker,
     );
+  });
+
+  test('keeps Local and Base unchanged when the cloud Definition omits Skills', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'stable local');
+    await fixture.sync();
+    const previousBase = new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId);
+    const previousDefinition = fixture.definitionService.read(fixture.botId);
+    fixture.omitSkillsField = true;
+
+    const result = await fixture.sync();
+
+    assert.equal(result.direction, 'feature_unavailable');
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'), 'utf8'),
+      /stable local/,
+    );
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId),
+      previousBase,
+    );
+    assert.deepStrictEqual(fixture.definitionService.read(fixture.botId), previousDefinition);
+  });
+
+  test('merges cloud Skills without overwriting pending local model or prompt fields', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'stable local');
+    await fixture.sync();
+    fixture.definitionService.updateModel(fixture.botId, {
+      kind: 'catalog',
+      modelId: 'gpt-5.6-sol',
+    });
+    fixture.definitionService.updatePrompt(fixture.botId, {
+      selected: 'custom',
+      customSystemPrompt: 'pending local prompt',
+    });
+    fixture.cloud = { ...fixture.cloud, revision: fixture.cloud.revision + 1 };
+
+    const result = await fixture.sync();
+
+    assert.equal(result.direction, 'none');
+    assert.deepStrictEqual(fixture.definitionService.read(fixture.botId)?.model, {
+      kind: 'catalog',
+      modelId: 'gpt-5.6-sol',
+    });
+    assert.deepStrictEqual(fixture.definitionService.read(fixture.botId)?.prompt, {
+      selected: 'custom',
+      customSystemPrompt: 'pending local prompt',
+    });
+    assert.deepStrictEqual(
+      fixture.definitionService.read(fixture.botId)?.skills,
+      fixture.cloud.skills,
+    );
+  });
+
+  test('treats explicit cloud skills: [] as deletion of all managed local Skills', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'managed local');
+    await fixture.sync();
+    fixture.cloud = {
+      revision: fixture.cloud.revision + 1,
+      skills: [],
+    };
+
+    const result = await fixture.sync();
+
+    assert.equal(result.direction, 'cloud_to_local');
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'local-a')), false);
+    assert.deepStrictEqual(fixture.definitionService.read(fixture.botId)?.skills, []);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills,
+      [],
+    );
+  });
+
+  test('accepts the complete cloud Definition during first bootstrap without a local Definition', async () => {
+    const fixture = createFixture(roots, { initializeLocalDefinition: false });
+    fixture.cloud = { revision: 1, skills: [] };
+    fixture.cloudModel = { kind: 'catalog', modelId: 'cloud-model' };
+    fixture.cloudPrompt = {
+      selected: 'custom',
+      customSystemPrompt: 'cloud bootstrap prompt',
+    };
+
+    const result = await fixture.sync();
+
+    assert.equal(result.direction, 'none');
+    assert.deepStrictEqual(fixture.definitionService.read(fixture.botId), {
+      schema: 'xiaoba.bot-definition.v1',
+      botId: fixture.botId,
+      model: fixture.cloudModel,
+      prompt: fixture.cloudPrompt,
+      skills: [],
+    });
+  });
+
+  test('uses the canonical workspace hash instead of a public package archive checksum', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'public-skill', 'public-skill', 'public package');
+    const skillRoot = path.join(fixture.skillsRoot, 'public-skill');
+    const archiveChecksum = 'f'.repeat(64);
+    fs.writeFileSync(path.join(skillRoot, '.xiaoba-skillhub-install.json'), JSON.stringify({
+      source: 'skillhub',
+      skillId: 'public/public-skill',
+      name: 'public-skill',
+      installName: 'public-skill',
+      version: '1.0.0',
+      packageChecksumSha256: archiveChecksum,
+      signature: {},
+      packageUrl: 'https://hub.test/public-skill.skillpkg',
+      installedAt: '2026-07-29T00:00:00.000Z',
+    }));
+    const scanned = scanLocalBotSkill(skillRoot, fixture.skillsRoot);
+
+    assert.deepStrictEqual(scanned.origin, {
+      skillId: 'public/public-skill',
+      version: '1.0.0',
+    });
+    assert.equal(scanned.reference, undefined);
+    assert.notEqual(scanned.contentHash, archiveChecksum);
+
+    const result = await fixture.sync();
+
+    assert.equal(result.direction, 'local_to_cloud');
+    assert.equal(fixture.uploads, 1);
+    assert.equal(fixture.cloud.skills[0]?.contentHash, scanned.contentHash);
+    assert.equal(
+      readBotSkillLocalMarker(skillRoot)?.reference?.contentHash,
+      scanned.contentHash,
+    );
+    assert.deepStrictEqual(readBotSkillLocalMarker(skillRoot)?.origin, scanned.origin);
+  });
+
+  test('migrates a stale Draft marker that used a public package archive checksum', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'public-skill', 'public-skill', 'public package');
+    const skillRoot = path.join(fixture.skillsRoot, 'public-skill');
+    const archiveChecksum = 'f'.repeat(64);
+    fs.writeFileSync(path.join(skillRoot, '.xiaoba-bot-skill.json'), JSON.stringify({
+      schema: 'xiaoba.bot-skill-local.v1',
+      localSkillId: 'legacy-public-local-id',
+      reference: {
+        source: 'skillhub',
+        skillId: 'public/public-skill',
+        version: '1.0.0',
+        contentHash: archiveChecksum,
+      },
+      origin: {
+        skillId: 'public/public-skill',
+        version: '1.0.0',
+      },
+    }));
+
+    const scanned = scanLocalBotSkill(skillRoot, fixture.skillsRoot);
+
+    assert.equal(scanned.reference, undefined);
+    assert.notEqual(scanned.contentHash, archiveChecksum);
+    const result = await fixture.sync();
+    assert.equal(result.direction, 'local_to_cloud');
+    assert.equal(fixture.uploads, 1);
+    assert.equal(
+      readBotSkillLocalMarker(skillRoot)?.reference?.contentHash,
+      scanned.contentHash,
+    );
+    assert.deepStrictEqual(readBotSkillLocalMarker(skillRoot)?.origin, scanned.origin);
   });
 
   test('does not replace a good local workspace or Base when a cloud package fails verification', async () => {
@@ -250,7 +418,10 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
   });
 });
 
-function createFixture(roots: string[]) {
+function createFixture(
+  roots: string[],
+  options: { initializeLocalDefinition?: boolean } = {},
+) {
   const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-bot-skills-runtime-'));
   const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-bot-skills-definition-'));
   roots.push(runtimeRoot, simulatedCloudRoot);
@@ -258,7 +429,9 @@ function createFixture(roots: string[]) {
   fs.mkdirSync(skillsRoot, { recursive: true });
   const botId = 'bot-a';
   const definitionService = createBotDefinitionSyncService({ runtimeRoot, simulatedCloudRoot });
-  definitionService.publish(botId, { kind: 'catalog', modelId: 'minimax-m3' });
+  if (options.initializeLocalDefinition !== false) {
+    definitionService.publish(botId, { kind: 'catalog', modelId: 'minimax-m3' });
+  }
   const packages = new Map<string, BotSkillPackage>();
   let cloud = {
     revision: 0,
@@ -276,6 +449,9 @@ function createFixture(roots: string[]) {
     conflictNextPatch: false,
     cloudReadStatus: 200,
     patchStatus: 200,
+    omitSkillsField: false,
+    cloudModel: { kind: 'catalog', modelId: 'minimax-m3' } as BotDefinition['model'],
+    cloudPrompt: { selected: 'default' } as NonNullable<BotDefinition['prompt']>,
     sync: async (workspaceExisted = true) => new BotSkillSyncService({
       runtimeRoot,
       skillsRoot,
@@ -307,9 +483,9 @@ function createFixture(roots: string[]) {
             definition: {
               schema: 'xiaoba.bot-definition.v1',
               botId,
-              model: { kind: 'catalog', modelId: 'minimax-m3' },
-              prompt: { selected: 'default' },
-              skills: fixture.cloud.skills,
+              model: fixture.cloudModel,
+              prompt: fixture.cloudPrompt,
+              ...(!fixture.omitSkillsField ? { skills: fixture.cloud.skills } : {}),
             },
           }
         : { configured: false, revision: fixture.cloud.revision });

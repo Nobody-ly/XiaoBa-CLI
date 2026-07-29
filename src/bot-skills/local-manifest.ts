@@ -111,6 +111,10 @@ export function scanLocalBotSkill(
   assertRealPathContained(fs.realpathSync(root), skillFile);
   const marker = ensureBotSkillLocalMarker(root);
   const files = collectPackageFiles(root);
+  const contentHash = computeBotSkillPackageHash(files);
+  const reference = marker.reference?.contentHash === contentHash
+    ? marker.reference
+    : undefined;
   const parsed = matter(fs.readFileSync(skillFile, 'utf8'));
   const name = String(parsed.data?.name || path.basename(root)).trim() || path.basename(root);
   return {
@@ -120,9 +124,9 @@ export function scanLocalBotSkill(
       ? path.relative(path.resolve(workspaceRoot), root).replace(/\\/g, '/')
       : path.basename(root),
     path: root,
-    contentHash: computeBotSkillPackageHash(files),
+    contentHash,
     files,
-    ...(marker.reference ? { reference: marker.reference } : {}),
+    ...(reference ? { reference } : {}),
     ...(marker.origin ? { origin: marker.origin } : {}),
   };
 }
@@ -179,19 +183,10 @@ function ensureBotSkillLocalMarker(skillDir: string): BotSkillLocalMarker {
   const origin = installed
     ? { skillId: installed.skillId, version: installed.version }
     : undefined;
-  const reference = installed && /^[a-f0-9]{64}$/.test(installed.packageChecksumSha256)
-    ? {
-        source: 'skillhub' as const,
-        skillId: installed.skillId,
-        version: installed.version,
-        contentHash: installed.packageChecksumSha256,
-      }
-    : undefined;
   const marker: BotSkillLocalMarker = {
     schema: BOT_SKILL_LOCAL_MARKER_SCHEMA,
     localSkillId: crypto.randomUUID(),
     ...(origin ? { origin } : {}),
-    ...(reference ? { reference } : {}),
   };
   writeBotSkillLocalMarker(skillDir, marker);
   return marker;
