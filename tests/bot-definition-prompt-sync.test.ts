@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
 import { PromptReconcileCoordinator } from '../src/bot-definition/prompt-sync';
+import type { BotDefinitionCloudSyncService } from '../src/bot-definition/cloud-sync';
 import { FileBotDefinitionRepository } from '../src/bot-definition/repository';
 import { createBotDefinitionSyncService } from '../src/bot-definition/service';
 import { BOT_DEFINITION_SCHEMA, type BotDefinition } from '../src/bot-definition/types';
@@ -35,6 +36,8 @@ describe('BotDefinition system prompt sync', () => {
       XIAOBA_APP_ROOT: appRoot,
       XIAOBA_USER_DATA_DIR: runtimeRoot,
       XIAOBA_BOT_DEFINITION_SIMULATED_CLOUD_DIR: simulatedCloudRoot,
+      CATSCO_HTTP_BASE_URL: 'https://example.invalid',
+      CATSCO_USER_TOKEN: 'host-token-that-must-not-be-used',
     } as NodeJS.ProcessEnv;
   });
 
@@ -75,8 +78,24 @@ describe('BotDefinition system prompt sync', () => {
       env,
       repository,
     });
+    const cloudSyncService = {
+      pushPrompt: async () => undefined,
+      readState: (uid: string) => ({
+        schema: 'xiaoba.bot-definition-cloud-sync.v1',
+        botId: uid,
+        revision: 0,
+        pendingModel: false,
+        pendingPrompt: false,
+      }),
+      flushPending: async () => undefined,
+    } as unknown as BotDefinitionCloudSyncService;
     return {
-      coordinator: new PromptReconcileCoordinator({ runtimeRoot, env, definitionService }),
+      coordinator: new PromptReconcileCoordinator({
+        runtimeRoot,
+        env,
+        definitionService,
+        cloudSyncService,
+      }),
       repository,
     };
   }
