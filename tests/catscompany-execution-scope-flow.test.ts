@@ -96,6 +96,7 @@ function createHarness(options: {
   const sessionKeys: string[] = [];
   const sessionInputs: any[] = [];
   const replies: string[] = [];
+  const progressEvents: string[] = [];
   const clearedSessionMarkers: string[] = [];
   const injectedContext: string[] = [];
   const contextEvents: string[] = [];
@@ -152,9 +153,9 @@ function createHarness(options: {
     reply: async (_topic: string, text: string) => { replies.push(text); },
     sendFile: async () => undefined,
     sendText: async () => undefined,
-    sendThinking: async () => undefined,
-    sendToolUse: async () => undefined,
-    sendToolResult: async () => undefined,
+    sendThinking: async (_topic: string, text: string) => { progressEvents.push(`thinking:${text}`); },
+    sendToolUse: async (_topic: string, toolUseId: string) => { progressEvents.push(`tool_start:${toolUseId}`); },
+    sendToolResult: async (_topic: string, toolUseId: string) => { progressEvents.push(`tool_end:${toolUseId}`); },
   };
   bot.pendingAttachments = new Map();
   bot.messageQueue = new Map();
@@ -193,6 +194,7 @@ function createHarness(options: {
     sessionInputs,
     session,
     replies,
+    progressEvents,
     clearedSessionMarkers,
     injectedContext,
     contextEvents,
@@ -895,7 +897,7 @@ describe('CatsCompany execution scope flow', () => {
     assert.deepEqual(harness.replies, ['历史已清空']);
   });
 
-  test('clear keeps a stale turn from consuming new input or replying after reset', async () => {
+  test('clear keeps a stale turn from consuming new input or emitting callbacks after reset', async () => {
     const harness = createHarness();
     let oldTurnStarted!: () => void;
     let releaseOldTurn!: () => void;
@@ -910,6 +912,11 @@ describe('CatsCompany execution scope flow', () => {
         oldPendingInputProvider = options.pendingUserInputProvider;
         oldTurnStarted();
         await oldTurnGate;
+        await options.callbacks.onRetry(1, 2, {});
+        await options.callbacks.onAssistantText('stale tool prelude after clear');
+        await options.callbacks.onThinking('stale thinking after clear');
+        await options.callbacks.onToolStart('execute_shell', 'stale-tool', {});
+        await options.callbacks.onToolEnd('execute_shell', 'stale-tool', 'stale result');
         return { visibleToUser: true, text: 'stale reply after clear' };
       }
       return { visibleToUser: false, text: '' };
@@ -935,6 +942,7 @@ describe('CatsCompany execution scope flow', () => {
     await oldTurn;
 
     assert.deepEqual(harness.replies, ['历史已清空']);
+    assert.deepEqual(harness.progressEvents, []);
     assert.equal(harness.handledTurns.length, 2);
     assert.match(String(harness.handledTurns[1].userMessage), /new turn/);
     assert.equal(harness.bot.messageQueue.has('cc_group:grp_80'), false);

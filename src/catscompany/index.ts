@@ -1195,12 +1195,24 @@ export class CatsCompanyBot {
 
   private buildSessionCallbacks(
     topic: string,
-    opts?: { sessionKey?: string; senderId?: string; channelSource?: string },
+    opts?: {
+      sessionKey?: string;
+      senderId?: string;
+      channelSource?: string;
+      clearGeneration?: number;
+    },
   ): SessionCallbacks {
     const suppressToolProgress = shouldSuppressStructuredToolProgress(opts?.channelSource);
+    const callbackGeneration = opts?.sessionKey
+      ? opts.clearGeneration ?? this.getSessionClearGeneration(opts.sessionKey)
+      : undefined;
+    const isStaleCallback = (): boolean => Boolean(
+      opts?.sessionKey
+      && callbackGeneration !== this.getSessionClearGeneration(opts.sessionKey),
+    );
     return {
       onRetry: async (attempt, maxRetries, info) => {
-        if (suppressToolProgress) {
+        if (isStaleCallback() || suppressToolProgress) {
           return;
         }
         try {
@@ -1216,6 +1228,7 @@ export class CatsCompanyBot {
         }
       },
       onAssistantText: async (text: string) => {
+        if (isStaleCallback()) return;
         try {
           await this.sender.reply(topic, text);
         } catch (err: any) {
@@ -1223,7 +1236,7 @@ export class CatsCompanyBot {
         }
       },
       onThinking: async (thinking: string) => {
-        if (suppressToolProgress) {
+        if (isStaleCallback() || suppressToolProgress) {
           return;
         }
         try {
@@ -1234,7 +1247,7 @@ export class CatsCompanyBot {
       },
       onToolStart: async (toolName: string, toolUseId: string, input: any) => {
         // 跳过输出型工具的 WORKING 消息
-        if (suppressToolProgress || shouldHideCatsToolProgress(toolName)) {
+        if (isStaleCallback() || suppressToolProgress || shouldHideCatsToolProgress(toolName)) {
           return;
         }
         try {
@@ -1245,7 +1258,7 @@ export class CatsCompanyBot {
       },
       onToolEnd: async (toolName: string, toolUseId: string, result: string) => {
         // 跳过输出型工具的 WORKING 消息
-        if (suppressToolProgress || shouldHideCatsToolProgress(toolName)) {
+        if (isStaleCallback() || suppressToolProgress || shouldHideCatsToolProgress(toolName)) {
           return;
         }
         try {
@@ -1541,6 +1554,7 @@ export class CatsCompanyBot {
             sessionKey: key,
             senderId: msg.senderId,
             channelSource: msg.executionScope?.channelSource,
+            clearGeneration: entryClearGeneration,
           }),
         });
 
@@ -2043,6 +2057,7 @@ export class CatsCompanyBot {
           sessionKey,
           senderId,
           channelSource: executionScope?.channelSource,
+          clearGeneration,
         }),
         source: 'subagent_result',
         suppressFinalResponse,
@@ -2205,6 +2220,7 @@ export class CatsCompanyBot {
           sessionKey,
           senderId: batch.senderId,
           channelSource: batch.channelSource,
+          clearGeneration: batch.clearGeneration,
         }),
         source: 'subagent_result_batch',
         suppressFinalResponse: false,
@@ -2728,6 +2744,7 @@ export class CatsCompanyBot {
               sessionKey,
               senderId: msg.senderId,
               channelSource: msg.executionScope?.channelSource,
+              clearGeneration,
             }),
             source: 'subagent_result',
             suppressFinalResponse: suppressSubAgentFinalResponse,
@@ -2754,6 +2771,7 @@ export class CatsCompanyBot {
               sessionKey,
               senderId: msg.senderId,
               channelSource: msg.executionScope?.channelSource,
+              clearGeneration,
             }),
           });
         if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {

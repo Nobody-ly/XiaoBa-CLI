@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
+import { createBotDefinitionCloudSyncService } from '../src/bot-definition/cloud-sync';
 import { PromptReconcileCoordinator } from '../src/bot-definition/prompt-sync';
 import { FileBotDefinitionRepository } from '../src/bot-definition/repository';
 import { createBotDefinitionSyncService } from '../src/bot-definition/service';
@@ -75,8 +76,19 @@ describe('BotDefinition system prompt sync', () => {
       env,
       repository,
     });
+    const cloudSyncService = createBotDefinitionCloudSyncService({
+      runtimeRoot,
+      env,
+      definitionService,
+      fetchImpl: (async () => new Response(null, { status: 404 })) as typeof fetch,
+    });
     return {
-      coordinator: new PromptReconcileCoordinator({ runtimeRoot, env, definitionService }),
+      coordinator: new PromptReconcileCoordinator({
+        runtimeRoot,
+        env,
+        definitionService,
+        cloudSyncService,
+      }),
       repository,
     };
   }
