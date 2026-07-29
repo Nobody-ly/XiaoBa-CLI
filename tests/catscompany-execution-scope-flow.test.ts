@@ -2,6 +2,7 @@ import { describe, test } from 'node:test';
 import * as assert from 'node:assert';
 import { CatsCompanyBot } from '../src/catscompany';
 import { createCatsCoMessageEnvelope, createExecutionScope } from '../src/catscompany/message-envelope';
+import { SubAgentManager } from '../src/core/sub-agent-manager';
 
 function canonicalMetadata(actorUserId: string, topicId: string, agentId = 'usr43', bodyId = 'body-main') {
   return {
@@ -610,6 +611,53 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(harness.bot.messageQueue.has(sessionKey), false);
   });
 
+  test('notifies the user when direct incremental group history recovery fails', async () => {
+    const harness = createHarness();
+    harness.bot.bot.getAgentContextHistory = async () => {
+      throw new Error('history unavailable');
+    };
+
+    await harness.bot.onMessage({
+      topic: 'grp_80',
+      senderId: 'usr8',
+      text: '@usr43 回答上面的问题',
+      content: '@usr43 回答上面的问题',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'),
+      isGroup: true,
+      seq: 20,
+    });
+
+    assert.equal(harness.handledTurns.length, 0);
+    assert.equal(harness.replies.length, 1);
+    assert.match(harness.replies[0] || '', /历史暂时恢复失败.*重新发送/);
+  });
+
+  test('notifies the user when queued incremental group history recovery fails', async () => {
+    const harness = createHarness({ busy: true });
+    harness.bot.bot.getAgentContextHistory = async () => {
+      throw new Error('history unavailable');
+    };
+
+    await harness.bot.onMessage({
+      topic: 'grp_80',
+      senderId: 'usr8',
+      text: '@usr43 回答上面的问题',
+      content: '@usr43 回答上面的问题',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'),
+      isGroup: true,
+      seq: 20,
+    });
+    assert.deepEqual(harness.replies, []);
+
+    harness.session.setBusy(false);
+    await harness.bot.drainMessageQueue('cc_group:grp_80');
+
+    assert.equal(harness.handledTurns.length, 0);
+    assert.equal(harness.replies.length, 1);
+    assert.match(harness.replies[0] || '', /历史暂时恢复失败.*重新发送/);
+    assert.equal(harness.bot.messageQueue.has('cc_group:grp_80'), false);
+  });
+
   test('hydrates a busy native Feishu trigger only when its queued turn executes', async () => {
     const harness = createHarness({ busy: true });
     let historyFetches = 0;
@@ -804,6 +852,143 @@ describe('CatsCompany execution scope flow', () => {
       assert.equal(harness.handledTurns.length, 0, clearCommand);
       assert.equal(harness.bot.messageQueue.has('cc_group:grp_80'), false, clearCommand);
     }
+  });
+
+  test('clear prevents an already drained failing message from re-entering the queue', async () => {
+    const harness = createHarness({ busy: true });
+    let executionStarted!: () => void;
+    let releaseExecution!: () => void;
+    const executionStartedPromise = new Promise<void>(resolve => { executionStarted = resolve; });
+    const executionGate = new Promise<void>(resolve => { releaseExecution = resolve; });
+    harness.session.handleMessage = async () => {
+      executionStarted();
+      await executionGate;
+      throw new Error('old turn failed after clear');
+    };
+
+    await harness.bot.onMessage({
+      topic: 'grp_80',
+      senderId: 'usr8',
+      text: '@usr43 old queued trigger',
+      content: '@usr43 old queued trigger',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'),
+      isGroup: true,
+      seq: 20,
+    });
+
+    harness.session.setBusy(false);
+    const drain = harness.bot.drainMessageQueue('cc_group:grp_80');
+    await executionStartedPromise;
+    await harness.bot.onMessage({
+      topic: 'grp_80',
+      senderId: 'usr8',
+      text: '/clear',
+      content: '/clear',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'),
+      isGroup: true,
+      seq: 21,
+    });
+    releaseExecution();
+    await drain;
+
+    assert.equal(harness.bot.messageQueue.has('cc_group:grp_80'), false);
+    assert.deepEqual(harness.replies, ['历史已清空']);
+  });
+
+  test('clear keeps a stale turn from consuming new input or replying after reset', async () => {
+    const harness = createHarness();
+    let oldTurnStarted!: () => void;
+    let releaseOldTurn!: () => void;
+    const oldTurnStartedPromise = new Promise<void>(resolve => { oldTurnStarted = resolve; });
+    const oldTurnGate = new Promise<void>(resolve => { releaseOldTurn = resolve; });
+    let oldPendingInputProvider: (() => unknown) | undefined;
+    let handleCalls = 0;
+    harness.session.handleMessage = async (userMessage: unknown, options: any) => {
+      handleCalls++;
+      harness.handledTurns.push({ userMessage, options });
+      if (handleCalls === 1) {
+        oldPendingInputProvider = options.pendingUserInputProvider;
+        oldTurnStarted();
+        await oldTurnGate;
+        return { visibleToUser: true, text: 'stale reply after clear' };
+      }
+      return { visibleToUser: false, text: '' };
+    };
+
+    const oldTurn = harness.bot.onMessage({
+      topic: 'grp_80', senderId: 'usr8', text: '@usr43 old turn', content: '@usr43 old turn',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'), isGroup: true, seq: 20,
+    });
+    await oldTurnStartedPromise;
+    await harness.bot.onMessage({
+      topic: 'grp_80', senderId: 'usr8', text: '/clear', content: '/clear',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'), isGroup: true, seq: 21,
+    });
+    await harness.bot.onMessage({
+      topic: 'grp_80', senderId: 'usr8', text: '@usr43 new turn', content: '@usr43 new turn',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'), isGroup: true, seq: 22,
+    });
+
+    assert.equal(oldPendingInputProvider?.(), null);
+    assert.equal(harness.bot.messageQueue.get('cc_group:grp_80')?.length, 1);
+    releaseOldTurn();
+    await oldTurn;
+
+    assert.deepEqual(harness.replies, ['历史已清空']);
+    assert.equal(harness.handledTurns.length, 2);
+    assert.match(String(harness.handledTurns[1].userMessage), /new turn/);
+    assert.equal(harness.bot.messageQueue.has('cc_group:grp_80'), false);
+  });
+
+  test('clear prevents stale subagent feedback from being requeued after failure', async () => {
+    const harness = createHarness();
+    let feedbackStarted!: () => void;
+    let releaseFeedback!: () => void;
+    const feedbackStartedPromise = new Promise<void>(resolve => { feedbackStarted = resolve; });
+    const feedbackGate = new Promise<void>(resolve => { releaseFeedback = resolve; });
+    harness.session.handleRuntimeObservation = async () => {
+      feedbackStarted();
+      await feedbackGate;
+      throw new Error('stale subagent feedback failed after clear');
+    };
+
+    const feedback = harness.bot.handleSubAgentFeedback(
+      'cc_group:grp_80', 'grp_80', 'usr8', 'old feedback',
+      createExecutionScope(createCatsCoMessageEnvelope({ topic: 'grp_80', senderId: 'usr8', text: 'old feedback' })),
+    );
+    await feedbackStartedPromise;
+    await harness.bot.onMessage({
+      topic: 'grp_80', senderId: 'usr8', text: '/clear', content: '/clear',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'), isGroup: true, seq: 21,
+    });
+    releaseFeedback();
+    await feedback;
+
+    assert.equal(harness.bot.messageQueue.has('cc_group:grp_80'), false);
+    assert.deepEqual(harness.replies, ['历史已清空']);
+  });
+
+  test('clear rejects a subagent callback registered by the previous generation', async () => {
+    const harness = createHarness();
+    const sessionKey = 'cc_group:grp_80';
+    harness.bot.registerSubAgentPlatformCallbacks(
+      sessionKey,
+      'grp_80',
+      'usr8',
+      createExecutionScope(createCatsCoMessageEnvelope({ topic: 'grp_80', senderId: 'usr8', text: 'parent turn' })),
+    );
+    const callbacks = (SubAgentManager.getInstance() as any).platformCallbacks.get(sessionKey);
+    assert.ok(callbacks?.injectMessage);
+
+    await harness.bot.onMessage({
+      topic: 'grp_80', senderId: 'usr8', text: '/clear', content: '/clear',
+      metadata: nativeFeishuMetadata('usr8', 'grp_80'), isGroup: true, seq: 21,
+    });
+    await callbacks.injectMessage('late result from cleared subagent');
+
+    assert.equal(harness.bot.messageQueue.has(sessionKey), false);
+    assert.equal(harness.handledTurns.length, 0);
+    assert.deepEqual(harness.replies, ['历史已清空']);
   });
 
   test('clear invalidates an in-flight hydration and lets a newer trigger run', async () => {

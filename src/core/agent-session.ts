@@ -375,8 +375,8 @@ export class AgentSession {
         signal: compactionSignal,
         onStatus: this.createContextCompactionNotifier(options.callbacks),
       });
-      if (compactionSignal?.aborted || this.interruptRequested) {
-        Logger.info(`[会话 ${this.key}] 当前请求已取消，忽略恢复压缩在中断后的返回`);
+      if (compactionSignal?.aborted || this.interruptRequested || lifecycleGeneration !== this.lifecycleGeneration) {
+        Logger.info(`[会话 ${this.key}] 当前请求已取消或会话已重置，忽略恢复压缩的旧结果`);
         return;
       }
       this.messages = compactedMessages;
@@ -406,6 +406,10 @@ export class AgentSession {
     inputs: Array<string | { source: string; id: number; content: string }>,
     cursorUpdate?: { source: string; cursor: number },
   ): Promise<boolean> {
+    const lifecycleGeneration = this.lifecycleGeneration;
+    await this.init();
+    if (lifecycleGeneration !== this.lifecycleGeneration) return false;
+
     const knownRemoteIds = new Set(this.messages
       .filter(message => message.__remoteContextSource && Number(message.__remoteContextId) > 0)
       .map(message => `${message.__remoteContextSource}:${message.__remoteContextId}`));
@@ -426,10 +430,6 @@ export class AgentSession {
         ? this.lifecycleManager.saveRemoteContextCursor(cursorUpdate.source, cursorUpdate.cursor)
         : true;
     }
-    const lifecycleGeneration = this.lifecycleGeneration;
-
-    await this.init();
-    if (lifecycleGeneration !== this.lifecycleGeneration) return false;
     const messagesBeforeAppend = [...this.messages];
     this.messages.push(...durableEntries.map(entry => ({
       role: 'user' as const,

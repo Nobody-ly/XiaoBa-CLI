@@ -958,6 +958,27 @@ describe('AgentSession lifecycle', () => {
     assert.equal(cursorWrites, 1);
   });
 
+  test('cold-start durable append restores before deduplicating remote entries', async () => {
+    const { AgentSession, SessionStore } = loadSessionModules();
+    const sessionKey = 'cc_group:cold-start-remote-dedup';
+    const entry = { source: 'catscompany.agent_context', id: 101, content: '[发言人: Alice]\nalready persisted' };
+    SessionStore.getInstance().saveContext(sessionKey, [{
+      role: 'user',
+      content: entry.content,
+      __remoteContextSource: entry.source,
+      __remoteContextId: entry.id,
+    }]);
+
+    const session = new AgentSession(sessionKey, buildMockServices(), 'catscompany');
+    session.setSystemPromptProvider(() => 'system prompt');
+    assert.equal(session.restoreFromStore(), true);
+
+    assert.equal(await session.appendDurableContext([entry], { source: entry.source, cursor: 102 }), true);
+    assert.equal((session as any).messages.filter((message: any) => message.content === entry.content).length, 1);
+    assert.equal(SessionStore.getInstance().loadContext(sessionKey).filter(message => message.content === entry.content).length, 1);
+    assert.equal(session.getRemoteContextCursor(entry.source), 102);
+  });
+
   test('clear --all reports local deletion failure instead of claiming files were deleted', async () => {
     const { AgentSession } = loadSessionModules();
     const session = new AgentSession('cc_group:clear-all-failure', buildMockServices(), 'catscompany');
