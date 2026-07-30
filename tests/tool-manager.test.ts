@@ -152,6 +152,24 @@ describe('ToolManager', () => {
     assert.equal(result.retryable, true);
   });
 
+  test('AgentToolExecutor preserves structured HTTP 429 errors for retry', async () => {
+    const executor = new AgentToolExecutor([
+      fakeTool('remote_api', async () => {
+        throw Object.assign(new Error('request rejected'), { response: { status: 429 } });
+      }),
+    ], '/tmp/xiaoba-agent-tool-executor');
+
+    const result = await executor.executeTool({
+      id: 'call-agent-http-429',
+      type: 'function',
+      function: { name: 'remote_api', arguments: '{}' },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errorCode, 'HTTP_429');
+    assert.equal(result.retryable, true);
+  });
+
   test('registers all default tools when no enabled list is provided', () => {
     const manager = new ToolManager('/tmp/xiaoba-tool-manager');
 

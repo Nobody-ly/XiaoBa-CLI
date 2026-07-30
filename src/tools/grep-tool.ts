@@ -8,8 +8,18 @@ import { formatCatsCoVisiblePath, redactCatsCoVisiblePath } from './tool-gateway
 import { executeRouteIfRemote, resolveExecutionRoute, targetParameterDescription } from './execution-router';
 
 const VCS_DIRECTORIES_TO_EXCLUDE = ['.git', '.svn', '.hg', '.bzr'] as const;
+const SKIPPABLE_FILE_READ_ERROR_CODES = new Set(['EACCES', 'EPERM', 'EISDIR', 'ENOENT', 'ESTALE']);
 const DEFAULT_LIMIT = 250;
 const execFileAsync = promisify(execFile);
+
+class GrepSearchCancelledError extends Error {
+  readonly code = 'ABORT_ERR';
+
+  constructor() {
+    super('搜索已取消');
+    this.name = 'AbortError';
+  }
+}
 
 interface GrepResult {
   mode: 'content' | 'files' | 'count';
@@ -140,7 +150,7 @@ export class GrepTool implements Tool {
         lastError = null; // 重置错误，因为空结果是正常情况
         continue;
       } catch (error: any) {
-        if (context.abortSignal?.aborted || error?.message === '搜索已取消') {
+        if (this.isAborted(error, context)) {
           return { ok: false, errorCode: 'EXECUTION_ERROR', message: '搜索已取消' };
         }
         lastError = error;
@@ -182,7 +192,7 @@ export class GrepTool implements Tool {
       });
       return { content: this.processOutput(stdout, args, context, visibleSearchPath) };
     } catch (error: any) {
-      if (this.isAborted(error, context)) throw new Error('搜索已取消');
+      if (this.isAborted(error, context)) throw new GrepSearchCancelledError();
       if (error.code === 1) {
         return { content: this.formatNoMatch(pattern, visibleSearchPath ?? originalPath, globPattern, fileType) };
       }
@@ -221,7 +231,7 @@ export class GrepTool implements Tool {
 
       return { content: this.processOutput(processedOutput, args, context, visibleSearchPath) };
     } catch (error: any) {
-      if (this.isAborted(error, context)) throw new Error('搜索已取消');
+      if (this.isAborted(error, context)) throw new GrepSearchCancelledError();
       if (error.code === 1) {
         return { content: this.formatNoMatch(pattern, visibleSearchPath ?? originalPath, globPattern, fileType) };
       }
@@ -240,14 +250,17 @@ export class GrepTool implements Tool {
     const results: string[] = [];
 
     const ensureNotAborted = () => {
-      if (context.abortSignal?.aborted) throw new Error('搜索已取消');
+      if (context.abortSignal?.aborted) throw new GrepSearchCancelledError();
     };
 
     const searchFile = async (fullPath: string, fileName: string): Promise<void> => {
       ensureNotAborted();
       if (globRegex && !globRegex.test(fileName)) return;
       try {
-        const lines = (await fs.promises.readFile(fullPath, 'utf-8')).split('\n');
+        const lines = (await fs.promises.readFile(fullPath, {
+          encoding: 'utf-8',
+          signal: context.abortSignal,
+        })).split('\n');
         for (let i = 0; i < lines.length; i++) {
           if (!regex.test(lines[i])) continue;
           if (output_mode === 'files') { results.push(fullPath); break; }
@@ -255,8 +268,8 @@ export class GrepTool implements Tool {
           results.push(`${fullPath}:${i + 1}:${lines[i]}`);
         }
       } catch (error: any) {
-        if (context.abortSignal?.aborted) throw new Error('搜索已取消');
-        if (!['EACCES', 'EPERM', 'EISDIR'].includes(error?.code)) throw error;
+        if (this.isAborted(error, context)) throw new GrepSearchCancelledError();
+        if (!SKIPPABLE_FILE_READ_ERROR_CODES.has(error?.code)) throw error;
       }
     };
 
