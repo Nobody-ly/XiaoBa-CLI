@@ -15,7 +15,6 @@
 [一个真实任务](#一个任务多台电脑) · [快速开始](#快速开始) · [系统架构](#两座仓库一套产品) · [CatsCo Platform](https://github.com/buildsense-ai/cats-company)
 
 [![Release](https://img.shields.io/github/v/release/buildsense-ai/XiaoBa-CLI)](https://github.com/buildsense-ai/XiaoBa-CLI/releases)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/buildsense-ai/XiaoBa-CLI/releases)
 
 </div>
@@ -123,6 +122,8 @@ Branch 拥有独立消息、工具、日志和取消信号，不把搜索过程�
 
 这意味着 AI 员工不只是完成任务，也会把做对过的事情变成下一次更可靠的起点。能力演进遵循可追踪、可审查、可回滚的边界，而不是让 Agent 无限制地修改自己。
 
+---
+
 ## 两座仓库，一套产品
 
 CatsCo 当前由两个高度协作、开发边界清晰的开源仓库组成。
@@ -144,7 +145,7 @@ Platform 负责让系统知道：谁在发起任务、消息属于哪个会话�
 
 [buildsense-ai/XiaoBa-CLI](https://github.com/buildsense-ai/XiaoBa-CLI)
 
-本仓库提供 AI 员工的运行与执行环境：
+XiaoBa-CLI 提供 AI 员工的运行与执行环境：
 
 - Agent Runtime、模型适配和持久会话。
 - CLI、Dashboard 与 Electron 桌面端。
@@ -157,9 +158,9 @@ Runtime 负责理解任务、构建上下文、编排工具、连接授权设备
 
 ### Connector 是 Runtime 的一种运行模式
 
-Connector 目前不是第三个独立仓库或独立下载包。
+Connector 目前不是第三个独立仓库或独立下载包，而是 XiaoBa-CLI 的一种运行模式。
 
-设备安装本仓库、通过 Dashboard 完成登录与机器人绑定后，运行 `node dist/index.js connect` 建立 CatsCo WebSocket 连接。连接期间，该设备可以响应支持远程路由的工具请求。
+设备安装 XiaoBa-CLI、通过 Dashboard 完成登录与机器人绑定后，运行 `node dist/index.js connect` 建立 CatsCo WebSocket 连接。连接期间，该设备可以响应支持远程路由的工具请求。
 
 简单来说：Platform 负责身份、消息和实时设备信息；主 Runtime 负责思考与编排；目标设备上的 Connector 负责在本地执行被允许的工具。
 
@@ -194,9 +195,9 @@ node dist/index.js dashboard
 node dist/index.js connect
 ```
 
-每台需要参与远程工具执行的电脑，都要分别安装本仓库、完成登录与绑定，并保持 Connector 在线。
+每台需要参与远程工具执行的电脑，都要分别安装 XiaoBa-CLI、完成登录与绑定，并保持 Connector 在线。
 
-完整的 Platform 服务端、WebApp 与部署配置位于 [buildsense-ai/cats-company](https://github.com/buildsense-ai/cats-company)。当前尚未提供覆盖双仓部署、版本兼容和设备绑定的统一一键安装器。
+Platform 服务端、WebApp 与部署配置就在本仓库。当前尚未提供覆盖双仓部署、版本兼容和设备绑定的统一一键安装器。
 
 已发布的桌面版本可在 [Releases](https://github.com/buildsense-ai/XiaoBa-CLI/releases/latest) 查看。
 
@@ -237,7 +238,7 @@ CatsCo 正在快速演进。
 
 双仓统一安装、版本兼容说明、设备绑定文档和生产安全基线仍在继续完善。
 
-欢迎通过 [Issues](https://github.com/buildsense-ai/XiaoBa-CLI/issues) 提交缺陷、架构建议和真实使用场景。
+欢迎通过 [CatsCo Platform Issues](https://github.com/buildsense-ai/cats-company/issues) 或 [XiaoBa Runtime Issues](https://github.com/buildsense-ai/XiaoBa-CLI/issues) 提交缺陷、架构建议和真实使用场景。
 
 ---
 

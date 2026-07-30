@@ -1357,6 +1357,7 @@ export class ConversationRunner {
     return {
       role: 'system',
       content: `${TRANSIENT_RUNNER_HINT_PREFIX}\n${renderRequiredDefaultPromptFile('transient/runner-duplicate-outbound.md', { content })}`,
+      __cacheScope: 'dynamic',
     };
   }
 
@@ -1375,6 +1376,7 @@ export class ConversationRunner {
         TRANSIENT_RUNNER_HINT_PREFIX,
         renderRequiredDefaultPromptFile('transient/runner-empty-max-tokens.md', {}),
       ].join('\n'),
+      __cacheScope: 'dynamic',
     };
   }
 

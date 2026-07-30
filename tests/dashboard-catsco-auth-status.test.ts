@@ -136,6 +136,40 @@ describe('dashboard CatsCo account status', () => {
     assert.equal(data.topicId, '');
   });
 
+  test('GET /prompts remains available for a bound legacy bot without a Definition', async () => {
+    createCatsCoLocalConfigService({ runtimeRoot: testRoot }).save({
+      version: 1,
+      currentBot: {
+        uid: 'legacy-bound-bot',
+        name: 'Legacy Bot',
+        apiKey: 'legacy-agent-key',
+      },
+    });
+
+    const response = await fetch(`${dashboardBaseUrl}/api/prompts`);
+    const text = await response.text();
+    const data = JSON.parse(text) as any;
+
+    assert.equal(response.status, 200, text);
+    assert.equal(data.system_prompt.botId, 'legacy-bound-bot');
+    assert.equal(data.system_prompt.definitionReady, false);
+    assert.equal(data.system_prompt.selected, 'default');
+    assert.equal(
+      new FileBotDefinitionRepository({ runtimeRoot: testRoot }).readCache('legacy-bound-bot'),
+      undefined,
+    );
+
+    const writeResponse = await fetch(`${dashboardBaseUrl}/api/prompts/system`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected: 'custom' }),
+    });
+    const writeData = await writeResponse.json() as any;
+
+    assert.equal(writeResponse.status, 409);
+    assert.match(writeData.error, /机器人配置尚未初始化/);
+  });
+
   test('PUT /settings immediately restarts a running connector after a bound custom model update', async () => {
     if (dashboardServer) {
       await close(dashboardServer);
@@ -1246,7 +1280,7 @@ describe('dashboard CatsCo account status', () => {
     const data = JSON.parse(text) as any;
     const env = dotenv.parse(fs.readFileSync(path.join(testRoot, '.env'), 'utf-8'));
     const runtime = new FileBotCatalogModelRuntimeRepository({ runtimeRoot: testRoot }).read('188');
-    const definition = definitionRepository.readCanonical('188');
+    const definition = definitionRepository.readCache('188');
     const resolved = resolveActiveBotLLMConfig({ runtimeRoot: testRoot });
 
     assert.equal(response.status, 200, text);
@@ -1376,7 +1410,7 @@ describe('dashboard CatsCo account status', () => {
     const text = await response.text();
     const data = JSON.parse(text) as any;
     const runtime = new FileBotCatalogModelRuntimeRepository({ runtimeRoot: testRoot }).read('188');
-    const definition = definitionRepository.readCanonical('188');
+    const definition = definitionRepository.readCache('188');
     const resolved = resolveActiveBotLLMConfig({ runtimeRoot: testRoot });
 
     assert.equal(response.status, 200, text);
