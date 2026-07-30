@@ -223,10 +223,10 @@ Platform 服务端、WebApp 与部署配置就在本仓库。当前尚未提供�
 
 ## Architecture & docs
 
-- [Platform Quickstart](docs/QUICKSTART.md)
-- [Platform API](docs/API.md)
-- [Account Center & Auth](docs/ACCOUNT_CENTER_AUTH.md)
-- [XiaoBa Runtime architecture](https://github.com/buildsense-ai/XiaoBa-CLI/tree/main/docs)
+- [Branch Session Architecture](docs/branch-session-architecture.md)
+- [CatsCompany Thin Runtime Routing](docs/catscompany-thin-runtime-routing.md)
+- [Memory Branch Evaluation Notes](docs/memory-branch-evaluation-notes.md)
+- [Skills](skills/README.md)
 
 ---
 
@@ -241,6 +241,10 @@ CatsCo 正在快速演进。
 欢迎通过 [CatsCo Platform Issues](https://github.com/buildsense-ai/cats-company/issues) 或 [XiaoBa Runtime Issues](https://github.com/buildsense-ai/XiaoBa-CLI/issues) 提交缺陷、架构建议和真实使用场景。
 
 ---
+
+## License
+
+[Apache License 2.0](LICENSE)
 
 <div align="center">
 
