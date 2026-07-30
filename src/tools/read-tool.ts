@@ -1103,6 +1103,22 @@ export class ReadTool implements Tool {
     ].filter(Boolean).join('\n');
   }
 
+  private formatFallbackImageAnalysis(
+    absolutePath: string,
+    filePath: string,
+    visiblePath: string,
+    metadataType: string | undefined,
+    intro: string,
+    analysis: string,
+  ): string {
+    return [
+      this.formatImageMetadata(absolutePath, filePath, visiblePath, metadataType),
+      '',
+      intro,
+      analysis,
+    ].join('\n');
+  }
+
   private async readImage(
     absolutePath: string,
     filePath: string,
@@ -1137,22 +1153,28 @@ export class ReadTool implements Tool {
       filePath: absolutePath,
       prompt: imagePrompt,
       config,
+      signal: context.abortSignal,
     });
+    if (context.abortSignal?.aborted) {
+      throw new Error('读取已取消');
+    }
 
     if (visionFallbackResult.ok && visionFallbackResult.analysis) {
-      Logger.info(`[CatsCo] vision_fallback_provider_success model=${modelName} tool=read_file file=${formatPathForLog(absolutePath || filePath)}`);
-      return [
-        this.formatImageMetadata(absolutePath, filePath, visiblePath, options?.metadataType),
-        '',
+      Logger.info(`[CatsCo] vision_fallback_provider_success primary_model=${modelName} provider_model=${visionFallbackResult.providerModel || 'unknown'} tool=read_file file=${formatPathForLog(absolutePath || filePath)}`);
+      return this.formatFallbackImageAnalysis(
+        absolutePath,
+        filePath,
+        visiblePath,
+        options?.metadataType,
         options?.proxyIntro || (visionCapable
           ? '主模型图片块生成失败，已自动改用备用多模态 Provider 解析：'
           : '读图结果（由备用多模态 Provider 解析，已作为 read_file 结果返回给当前非多模态主模型）：'),
         visionFallbackResult.analysis,
-      ].join('\n');
+      );
     }
 
     if (visionFallbackResult.configured) {
-      Logger.warning(`[CatsCo] vision_fallback_provider_failed model=${modelName} tool=read_file file=${formatPathForLog(absolutePath || filePath)} status=${visionFallbackResult.status || 'unknown'} error=${visionFallbackResult.error || 'unknown'}`);
+      Logger.warning(`[CatsCo] vision_fallback_provider_failed primary_model=${modelName} provider_model=${visionFallbackResult.providerModel || 'unresolved'} tool=read_file file=${formatPathForLog(absolutePath || filePath)} status=${visionFallbackResult.status || 'unknown'} error=${visionFallbackResult.error || 'unknown'}`);
     }
 
     const proxyResult = await analyzeImageWithReaderProxy({
@@ -1162,14 +1184,16 @@ export class ReadTool implements Tool {
     });
 
     if (proxyResult.ok && proxyResult.analysis) {
-      return [
-        this.formatImageMetadata(absolutePath, filePath, visiblePath, options?.metadataType),
-        '',
+      return this.formatFallbackImageAnalysis(
+        absolutePath,
+        filePath,
+        visiblePath,
+        options?.metadataType,
         options?.proxyIntro || (visionCapable
           ? '主模型图片块生成失败，已自动改用 Cats reader proxy 解析：'
           : '读图结果（由 Cats reader proxy 解析，已作为 read_file 结果返回给当前非多模态主模型）：'),
         proxyResult.analysis,
-      ].join('\n');
+      );
     }
 
     const providerFailure = visionFallbackResult.configured
