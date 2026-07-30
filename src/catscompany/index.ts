@@ -15,7 +15,13 @@ import { extractCatsCoDeviceGrants } from './device-grants';
 import { extractCatsCoDeviceSelection } from './device-selection';
 import { extractCatsCoRuntimeContext } from './runtime-context';
 import { MessageSessionManager } from '../core/message-session-manager';
-import { AgentServices, BUSY_MESSAGE, RuntimeFeedbackInput, SessionCallbacks } from '../core/agent-session';
+import {
+  AgentServices,
+  BUSY_MESSAGE,
+  type DurableRemoteContextEntry,
+  RuntimeFeedbackInput,
+  SessionCallbacks,
+} from '../core/agent-session';
 import { Logger } from '../utils/logger';
 import { SubAgentManager } from '../core/sub-agent-manager';
 import { shouldSuppressSubAgentObservationReply } from '../core/sub-agent-observation';
@@ -1596,7 +1602,7 @@ export class CatsCompanyBot {
   private async hydrateNativeFeishuGroupContext(
     session: {
       appendDurableContext(
-        messages: Array<string | { source: string; id: number; content: string }>,
+        messages: Array<string | DurableRemoteContextEntry>,
         cursorUpdate?: { source: string; cursor: number },
       ): Promise<boolean>;
       getRemoteContextCursor(source: string): number;

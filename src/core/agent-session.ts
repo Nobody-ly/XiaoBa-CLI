@@ -52,8 +52,16 @@ import {
   reconcileCurrentBotPromptBeforeTurn,
   scheduleCurrentBotPromptReconcile,
 } from '../bot-definition/prompt-sync';
+import { collectRemoteContextWatermarks } from './remote-context-watermarks';
 
 export type { RuntimeFeedbackInput, RuntimeFeedbackOptions } from './runtime-feedback-inbox';
+
+export interface DurableRemoteContextEntry {
+  source: string;
+  id: number;
+  role?: 'user' | 'assistant';
+  content: string;
+}
 
 export const BUSY_MESSAGE = '正在处理上一条消息，请稍候...';
 export const ERROR_MESSAGE = '不好意思，刚才处理出了点问题，你再试一次？';
@@ -403,7 +411,7 @@ export class AgentSession {
    * 调用方只有在返回 true 后才能推进远端游标，避免崩溃或写盘失败造成永久漏历史。
    */
   async appendDurableContext(
-    inputs: Array<string | { source: string; id: number; content: string }>,
+    inputs: Array<string | DurableRemoteContextEntry>,
     cursorUpdate?: { source: string; cursor: number },
   ): Promise<boolean> {
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -413,6 +421,7 @@ export class AgentSession {
     const knownRemoteIds = new Set(this.messages
       .filter(message => message.__remoteContextSource && Number(message.__remoteContextId) > 0)
       .map(message => `${message.__remoteContextSource}:${message.__remoteContextId}`));
+    const remoteContextWatermarks = collectRemoteContextWatermarks(this.messages);
     const durableEntries = inputs
       .map(input => typeof input === 'string'
         ? { content: input }
@@ -421,7 +430,12 @@ export class AgentSession {
       .filter(entry => {
         if (!('source' in entry) || !('id' in entry) || !entry.source || entry.id <= 0) return true;
         const key = `${entry.source}:${entry.id}`;
-        if (knownRemoteIds.has(key)) return false;
+        if (
+          knownRemoteIds.has(key)
+          || entry.id <= (remoteContextWatermarks[entry.source] || 0)
+        ) {
+          return false;
+        }
         knownRemoteIds.add(key);
         return true;
       });
@@ -432,7 +446,7 @@ export class AgentSession {
     }
     const messagesBeforeAppend = [...this.messages];
     this.messages.push(...durableEntries.map(entry => ({
-      role: 'user' as const,
+      role: 'role' in entry && entry.role === 'assistant' ? 'assistant' as const : 'user' as const,
       content: entry.content,
       ...('source' in entry && 'id' in entry ? {
         __remoteContextSource: entry.source,

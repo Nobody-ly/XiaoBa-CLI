@@ -6,6 +6,7 @@ type UnknownRecord = Record<string, unknown>;
 export interface NativeFeishuGroupContextEntry {
   source: 'catscompany.agent_context';
   id: number;
+  role: 'user' | 'assistant';
   content: string;
 }
 
@@ -49,19 +50,37 @@ export function selectNativeFeishuGroupContextEntries(
       const seq = agentContextMessageSeq(message);
       return seq > effectiveAfterSeq && (currentTriggerSeq <= 0 || seq !== currentTriggerSeq);
     })
-    .filter(message => isEligibleParticipantMessage(message))
-    .map(message => ({
-      source: 'catscompany.agent_context' as const,
-      id: agentContextMessageSeq(message),
-      content: formatParticipantMessage(message),
-    }))
+    .map(message => {
+      const role = normalizedContextRole(message);
+      return {
+        source: 'catscompany.agent_context' as const,
+        id: agentContextMessageSeq(message),
+        role,
+        content: role === 'assistant'
+          ? extractMessageText(message)
+          : formatParticipantMessage(message),
+      };
+    })
+    .filter((entry): entry is NativeFeishuGroupContextEntry => Boolean(entry.role))
     .filter(entry => entry.id > 0 && Boolean(entry.content));
 }
 
-function isEligibleParticipantMessage(message: CatsAgentContextMessage): boolean {
-  if (message.context_eligible === true && message.context_role === 'user') return true;
-  return message.context_role === 'other_agent'
-    && message.context_reason === 'other_agent_message';
+function normalizedContextRole(
+  message: CatsAgentContextMessage,
+): 'user' | 'assistant' | undefined {
+  if (
+    message.context_role === 'other_agent'
+    && message.context_reason === 'other_agent_message'
+  ) {
+    return 'user';
+  }
+  if (
+    message.context_eligible === true
+    && (message.context_role === 'user' || message.context_role === 'assistant')
+  ) {
+    return message.context_role;
+  }
+  return undefined;
 }
 
 export function isNativeFeishuClearBoundary(message: CatsAgentContextMessage): boolean {

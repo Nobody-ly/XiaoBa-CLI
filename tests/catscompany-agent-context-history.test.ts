@@ -3,6 +3,7 @@ import * as assert from 'node:assert';
 import {
   isNativeFeishuGroupTrigger,
   selectNativeFeishuGroupContext,
+  selectNativeFeishuGroupContextEntries,
 } from '../src/catscompany/agent-context-history';
 import { CatsCompanyBot } from '../src/catscompany';
 
@@ -108,6 +109,33 @@ describe('CatsCompany native Feishu group context', () => {
       '[发言人: 陈大为]\n给我发一个 txt 文件',
       '[发言人: 林益]\n里面写一句诗',
     ]);
+  });
+
+  test('keeps a missed current-Agent message as assistant during incremental hydration', () => {
+    const context = selectNativeFeishuGroupContextEntries([
+      {
+        seq_id: 11,
+        content: '上一轮由当前 Agent 发出的回复',
+        context_eligible: true,
+        context_role: 'assistant',
+        context_reason: 'current_agent_message',
+      },
+      {
+        seq_id: 12,
+        content: '@当前Agent 继续',
+        context_eligible: true,
+        context_role: 'user',
+        context_reason: 'group_message_targets_agent',
+        metadata: { catsco_identity: nativeMetadata({ speaker: '陈大为' }).catsco_identity },
+      },
+    ], 10, 12);
+
+    assert.deepEqual(context, [{
+      source: 'catscompany.agent_context',
+      id: 11,
+      role: 'assistant',
+      content: '上一轮由当前 Agent 发出的回复',
+    }]);
   });
 
   test('excludes only the exact current trigger and keeps earlier targeted turns', () => {

@@ -43,6 +43,8 @@ export interface Message {
   /** 远端耐久上下文来源和消息序号，用于游标写盘失败后的幂等补拉。 */
   __remoteContextSource?: string;
   __remoteContextId?: number;
+  /** 压缩后仍被当前 transcript 表示的远端消息高水位；不发送给 provider。 */
+  __remoteContextWatermarks?: Record<string, number>;
   /** Provider 原始 assistant content blocks，仅用于下次请求回放，不展示给用户。 */
   providerContent?: ProviderContentBlock[];
 }
