@@ -295,11 +295,11 @@ function parseCloudBotDefinitionSnapshot(
   }
   const prompt = parseCloudPromptDefinition(raw.prompt);
   const hasSkills = Object.prototype.hasOwnProperty.call(raw, 'skills');
-  if (hasSkills && !Array.isArray(raw.skills)) {
+  if (hasSkills && raw.skills !== null && !Array.isArray(raw.skills)) {
     throw new Error('CatsCo cloud returned an invalid BotDefinition Skills field.');
   }
   const skills = hasSkills
-    ? canonicalizeBotSkillRefs(raw.skills as BotSkillRef[])
+    ? canonicalizeBotSkillRefs((raw.skills ?? []) as BotSkillRef[])
     : undefined;
   return {
     configured: true,

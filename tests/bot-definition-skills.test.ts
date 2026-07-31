@@ -128,12 +128,14 @@ describe('BotDefinition Skill slice', () => {
 
     const unsupported = await pull({});
     const explicitlyEmpty = await pull({ skills: [] });
+    const legacyNullEmpty = await pull({ skills: null });
 
     assert.equal(
       Object.prototype.hasOwnProperty.call(unsupported?.definition ?? {}, 'skills'),
       false,
     );
     assert.deepStrictEqual(explicitlyEmpty?.definition?.skills, []);
-    await assert.rejects(pull({ skills: null }), /invalid BotDefinition Skills field/);
+    assert.deepStrictEqual(legacyNullEmpty?.definition?.skills, []);
+    await assert.rejects(pull({ skills: {} }), /invalid BotDefinition Skills field/);
   });
 });
