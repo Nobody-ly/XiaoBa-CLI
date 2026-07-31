@@ -10,22 +10,6 @@ import { Metrics } from '../utils/metrics';
 import { ContextCompressor } from './context-compressor';
 import type { CheckpointCompactionCoordinator } from './checkpoint-compaction';
 import { estimateMessagesTokens, estimateToolsTokens } from './token-estimator';
-import { foldHistoricalReadFileMessages, resolveReadFileMessageFoldingOptions } from './read-file-message-folder';
-import { foldHistoricalExecuteShellMessages, resolveExecuteShellMessageFoldingOptions } from './execute-shell-message-folder';
-import {
-  formatToolResultContextReport,
-  resolveToolResultContextReportOptions,
-  summarizeToolResultContext,
-} from './tool-result-context-report';
-import {
-  resolveCurrentRunToolResultFoldingOptions,
-  selectProtectedCurrentRunToolResultIndexes,
-} from './current-run-tool-result-folding';
-import {
-  foldToolResultsTowardPromptBudget,
-  resolveAdaptiveToolResultFoldingOptions,
-} from './adaptive-tool-result-folder';
-import { resolveToolResultArtifactStoreOptions } from './tool-result-artifact-store';
 import {
   buildExplicitPlanRequestHintIfUseful,
   buildInitialDecisionHintIfUseful,
@@ -404,88 +388,6 @@ export class ConversationRunner {
         currentDirectory,
       });
       nextTurnTransientHints = [];
-      const toolResultContextReportOptions = resolveToolResultContextReportOptions();
-      const toolResultContextBeforeFolding = toolResultContextReportOptions.enabled
-        ? summarizeToolResultContext(requestMessages, toolResultContextReportOptions)
-        : null;
-      const currentRunToolResultFoldingOptions = resolveCurrentRunToolResultFoldingOptions();
-      const foldCurrentRunToolResults = !this.checkpointCompactionCoordinator
-        && currentRunToolResultFoldingOptions.enabled;
-      const protectedCurrentRunToolResultIndexes = selectProtectedCurrentRunToolResultIndexes(
-        requestMessages,
-        currentRunToolResultFoldingOptions,
-      );
-      const toolResultArtifactStoreOptions = this.resolveToolResultArtifactStoreOptions(turns);
-      const readFileFoldingOptions = {
-        ...resolveReadFileMessageFoldingOptions(),
-        foldCurrentRun: foldCurrentRunToolResults,
-        protectedCurrentRunToolResultIndexes,
-        artifactStore: toolResultArtifactStoreOptions,
-      };
-      const executeShellFoldingOptions = {
-        ...resolveExecuteShellMessageFoldingOptions(),
-        foldCurrentRun: foldCurrentRunToolResults,
-        protectedCurrentRunToolResultIndexes,
-        artifactStore: toolResultArtifactStoreOptions,
-      };
-      const readFileFolding = foldHistoricalReadFileMessages(
-        requestMessages,
-        readFileFoldingOptions,
-      );
-      requestMessages = readFileFolding.messages;
-      if (readFileFolding.stats.folded_count > 0) {
-        Logger.info(
-          `[${this.sessionLabel}Turn ${turns}] read_file truncation: `
-          + `truncated=${readFileFolding.stats.folded_count}, `
-          + `current=${readFileFolding.stats.folded_current_turn_count}, `
-          + `saved≈${readFileFolding.stats.saved_tokens_est} tokens`,
-        );
-      }
-      const executeShellFolding = foldHistoricalExecuteShellMessages(
-        requestMessages,
-        executeShellFoldingOptions,
-      );
-      requestMessages = executeShellFolding.messages;
-      if (executeShellFolding.stats.folded_count > 0) {
-        Logger.info(
-          `[${this.sessionLabel}Turn ${turns}] execute_shell truncation: `
-          + `truncated=${executeShellFolding.stats.folded_count}, `
-          + `current=${executeShellFolding.stats.folded_current_turn_count}, `
-          + `saved≈${executeShellFolding.stats.saved_tokens_est} tokens`,
-        );
-      }
-      const adaptiveFolding = foldToolResultsTowardPromptBudget(
-        requestMessages,
-        requestTools,
-        readFileFoldingOptions,
-        executeShellFoldingOptions,
-        this.resolveAdaptiveToolResultFoldingOptions(),
-      );
-      requestMessages = adaptiveFolding.messages;
-      if (adaptiveFolding.stats.folded_count > 0) {
-        Logger.info(
-          `[${this.sessionLabel}Turn ${turns}] adaptive tool_result truncation: `
-          + `passes=${adaptiveFolding.stats.passes}, `
-          + `truncated=${adaptiveFolding.stats.folded_count}, `
-          + `current=${adaptiveFolding.stats.folded_current_turn_count}, `
-          + `saved≈${adaptiveFolding.stats.saved_tokens_est} tokens, `
-          + `prompt≈${adaptiveFolding.stats.started_prompt_tokens_est}->${adaptiveFolding.stats.finished_prompt_tokens_est}, `
-          + `target=${adaptiveFolding.stats.target_prompt_tokens}, `
-          + `thresholds=${adaptiveFolding.stats.thresholds_tried.join('/')}`,
-        );
-      }
-      if (toolResultContextBeforeFolding && toolResultContextBeforeFolding.tool_result_count > 0) {
-        const toolResultContextAfterFolding = summarizeToolResultContext(
-          requestMessages,
-          toolResultContextReportOptions,
-        );
-        for (const line of formatToolResultContextReport(
-          toolResultContextBeforeFolding,
-          toolResultContextAfterFolding,
-        )) {
-          Logger.info(`[${this.sessionLabel}Turn ${turns}] ${line}`);
-        }
-      }
       const promptTrimmed = this.ensurePromptBudget(requestMessages, requestTools);
       if (promptTrimmed && callbacks?.onThinking) {
         await callbacks.onThinking(PROMPT_BUDGET_TRIM_MESSAGE);
@@ -1587,32 +1489,6 @@ export class ConversationRunner {
       `[上下文守门] 裁剪后: messages=${messageTokens}, tools=${toolTokens}, budget=${this.maxPromptTokens}`
     );
     return true;
-  }
-
-  private resolveAdaptiveToolResultFoldingOptions() {
-    const promptBudget = Math.max(1, this.maxPromptTokens);
-    const options = resolveAdaptiveToolResultFoldingOptions(process.env, {
-      targetPromptTokens: promptBudget,
-    });
-    return {
-      ...options,
-      targetPromptTokens: Math.min(options.targetPromptTokens, promptBudget),
-    };
-  }
-
-  private resolveToolResultArtifactStoreOptions(turn: number) {
-    const workspaceRoot = this.toolExecutionContext?.workspaceRoot
-      || this.toolExecutionContext?.workingDirectory;
-    const defaultRoot = workspaceRoot
-      ? path.join(workspaceRoot, '.xiaoba', 'tool-results')
-      : undefined;
-    return resolveToolResultArtifactStoreOptions(process.env, {
-      enabled: Boolean(defaultRoot),
-      rootDirectory: defaultRoot,
-      sessionId: this.toolExecutionContext?.sessionId
-        || this.toolExecutionContext?.executionScope?.sessionKey,
-      turn,
-    });
   }
 
   private fitToolsToPromptBudget(tools: ToolDefinition[]): ToolDefinition[] {
