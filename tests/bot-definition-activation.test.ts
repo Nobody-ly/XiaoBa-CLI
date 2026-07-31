@@ -369,6 +369,77 @@ describe('BotDefinition activation', () => {
     });
   });
 
+  test('switches a long-running bot to an uncached catalog model without an account login', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cloud-no-login-switch-runtime-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cloud-no-login-switch-canonical-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = {} as NodeJS.ProcessEnv;
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      currentBot: { uid: '43', apiKey: 'bot-api-key', boundByUserUid: '7', bindingSource: 'test' },
+    });
+    new FileBotDefinitionRepository({ runtimeRoot, simulatedCloudRoot }).writeCanonical({
+      schema: BOT_DEFINITION_SCHEMA,
+      botId: '43',
+      model: { kind: 'catalog', modelId: 'gpt-5.6-sol' },
+    });
+    new FileBotCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '43',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-existing-owner-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 1_000_000,
+      openaiApiMode: 'responses',
+    });
+    const requests: Array<{ path: string; body?: any }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      requests.push({
+        path: url.pathname,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      if (url.pathname === '/api/bot/model-config/ack') {
+        return Response.json({ status: 'applied' });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      cloudSelection: {
+        kind: 'catalog',
+        modelId: 'deepseek-v4-flash',
+        reasoningEffort: 'max',
+        revision: 12,
+      },
+    });
+    const runtime = new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('43');
+
+    assert.equal(prepared?.cloudApplyError, undefined);
+    assert.equal(prepared?.cloudRevision, 12);
+    assert.equal(runtime?.modelId, 'deepseek-v4-flash');
+    assert.equal(runtime?.provider, 'anthropic');
+    assert.equal(runtime?.apiBase, 'https://relay.example.test/anthropic');
+    assert.equal(runtime?.apiKey, 'sk-existing-owner-key');
+    assert.equal(runtime?.reasoningEffort, 'max');
+    assert.equal(requests.some(item => item.path === '/api/relay/config'), false);
+    assert.equal(requests.some(item => item.path === '/api/relay/key'), false);
+    assert.deepStrictEqual(
+      requests.find(item => item.path === '/api/bot/model-config/ack')?.body,
+      { revision: 12, model_id: 'deepseek-v4-flash', reasoning_effort: 'max' },
+    );
+  });
+
   test('prepares an exact runtime reload selection without polling or acknowledging early', async () => {
     const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cloud-runtime-reload-'));
     const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cloud-runtime-reload-canonical-'));

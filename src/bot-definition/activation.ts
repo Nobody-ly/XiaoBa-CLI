@@ -132,6 +132,7 @@ export async function prepareBoundBotDefinition(
               botId,
               modelId: definition.model.modelId,
               reasoningEffort: definition.model.reasoningEffort,
+              existingRuntime: runtime,
               auth,
               fetchImpl: options.fetchImpl,
             });
@@ -270,6 +271,7 @@ export async function prepareBoundBotDefinition(
             const materialized = await provisionCatsRelayCatalogRuntime({
               botId,
               modelId: localDefinition.model.modelId,
+              existingRuntime: runtime,
               auth,
               fetchImpl: options.fetchImpl,
             });
@@ -297,6 +299,7 @@ export async function prepareBoundBotDefinition(
             botId,
             modelId: cloudSelection.modelId,
             reasoningEffort: cloudSelection.reasoningEffort,
+            existingRuntime: runtime ?? definitionService.readCatalogRuntime(botId),
             auth,
             fetchImpl: options.fetchImpl,
           });
@@ -400,6 +403,7 @@ export async function prepareBoundBotDefinition(
       const materialized = await provisionCatsRelayCatalogRuntime({
         botId,
         modelId: definition.model.modelId,
+        existingRuntime: runtime,
         auth,
         fetchImpl: options.fetchImpl,
       });

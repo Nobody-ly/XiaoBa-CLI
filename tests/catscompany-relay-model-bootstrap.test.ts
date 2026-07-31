@@ -3,6 +3,7 @@ import * as assert from 'node:assert';
 import {
   provisionCatsRelayCatalogRuntime,
   refreshCatsRelayCatalogRuntimeCapabilities,
+  retargetCatsRelayCatalogRuntime,
 } from '../src/catscompany/relay-model-bootstrap';
 
 describe('CatsCo default relay model bootstrap', () => {
@@ -96,6 +97,70 @@ describe('CatsCo default relay model bootstrap', () => {
     assert.equal(runtime.capabilities?.vision, true);
     assert.equal(runtime.capabilitiesSource, 'relay-models');
     assert.ok(runtime.capabilitiesCheckedAt);
+  });
+
+  test('retargets an existing owner relay credential across provider protocols', () => {
+    const runtime = retargetCatsRelayCatalogRuntime({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: 'bot-1',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-existing-owner-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 1_000_000,
+      openaiApiMode: 'responses',
+    }, 'deepseek-v4-flash', 'max');
+
+    assert.equal(runtime.modelId, 'deepseek-v4-flash');
+    assert.equal(runtime.provider, 'anthropic');
+    assert.equal(runtime.apiBase, 'https://relay.example.test/anthropic');
+    assert.equal(runtime.apiKey, 'sk-existing-owner-key');
+    assert.equal(runtime.model, 'deepseek-v4-flash');
+    assert.equal(runtime.reasoningEffort, 'max');
+    assert.equal(runtime.openaiApiMode, 'chat_completions');
+    assert.deepStrictEqual(runtime.capabilities, {
+      toolCalling: true,
+      vision: false,
+      streaming: true,
+    });
+    assert.equal(runtime.capabilitiesSource, 'static');
+  });
+
+  test('uses an existing owner relay credential when a long-running bot has no account login', async () => {
+    let requested = false;
+    const runtime = await provisionCatsRelayCatalogRuntime({
+      botId: 'bot-1',
+      modelId: 'gpt-5.6-terra',
+      reasoningEffort: 'xhigh',
+      auth: {
+        httpBaseUrl: 'https://cats.example.test',
+        serverUrl: 'wss://cats.example.test/v0/channels',
+        botUid: 'bot-1',
+        apiKey: 'bot-api-key',
+      },
+      existingRuntime: {
+        schema: 'xiaoba.bot-catalog-model-runtime.v1',
+        botId: 'bot-1',
+        modelId: 'minimax-m3',
+        provider: 'anthropic',
+        apiBase: 'https://relay.example.test/anthropic',
+        apiKey: 'sk-existing-owner-key',
+        model: 'MiniMax-M3',
+        contextWindowTokens: 1_000_000,
+      },
+      fetchImpl: (async () => {
+        requested = true;
+        return new Response('unexpected', { status: 500 });
+      }) as typeof fetch,
+    });
+
+    assert.equal(requested, false);
+    assert.equal(runtime.modelId, 'gpt-5.6-terra');
+    assert.equal(runtime.apiBase, 'https://relay.example.test/v1');
+    assert.equal(runtime.apiKey, 'sk-existing-owner-key');
+    assert.equal(runtime.openaiApiMode, 'responses');
+    assert.equal(runtime.reasoningEffort, 'xhigh');
   });
 
   test('replaces legacy GPT vision=false from static catalog metadata when relay metadata is unavailable', async () => {

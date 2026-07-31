@@ -16,6 +16,7 @@ export interface CatsRelayBootstrapOptions {
   modelId: string;
   auth: CatsCoAuthSnapshot;
   reasoningEffort?: ReasoningEffort;
+  existingRuntime?: BotCatalogModelRuntime;
   fetchImpl?: typeof fetch;
 }
 
@@ -37,6 +38,16 @@ export async function provisionCatsRelayCatalogRuntime(
   if (!botId) throw new Error('Cannot initialize a catalog model without botId.');
   if (!profile) throw new Error(`Unknown CatsCo relay model: ${modelId}`);
   if (!token || !httpBaseUrl) {
+    if (
+      options.existingRuntime?.botId === botId
+      && String(options.existingRuntime.apiKey || '').trim()
+    ) {
+      return retargetCatsRelayCatalogRuntime(
+        options.existingRuntime,
+        profile.id,
+        options.reasoningEffort,
+      );
+    }
     throw new Error('CatsCo account login is required before the default model can be initialized.');
   }
 
@@ -80,6 +91,31 @@ export async function provisionCatsRelayCatalogRuntime(
     capabilities,
     capabilitiesSource,
     ...(capabilitiesSource !== 'static' ? { capabilitiesCheckedAt: new Date().toISOString() } : {}),
+  };
+}
+
+export function retargetCatsRelayCatalogRuntime(
+  existing: BotCatalogModelRuntime,
+  modelId: string,
+  reasoningEffort?: ReasoningEffort,
+): BotCatalogModelRuntime {
+  const profile = findRelayModelProfile(modelId);
+  if (!profile) throw new Error(`Unknown CatsCo relay model: ${modelId}`);
+  const apiKey = String(existing.apiKey || '').trim();
+  if (!apiKey) throw new Error('Existing CatsCo relay runtime does not contain a reusable credential.');
+  return {
+    schema: 'xiaoba.bot-catalog-model-runtime.v1',
+    botId: existing.botId,
+    modelId: profile.id,
+    provider: profile.preferredProvider,
+    apiBase: retargetRelayEndpoint(existing, profile.preferredProvider),
+    apiKey,
+    model: profile.model,
+    contextWindowTokens: profile.contextWindowTokens,
+    reasoningEffort: reasoningEffort ?? 'high',
+    openaiApiMode: profile.openaiApiMode ?? 'chat_completions',
+    capabilities: { ...profile.capabilities },
+    capabilitiesSource: 'static',
   };
 }
 
@@ -242,6 +278,29 @@ function relayEndpointForProvider(config: any, provider: RelayModelProvider): st
     ? relayModelProviderBaseUrl(provider)
     : provider === 'openai' ? `${baseUrl}/v1` : `${baseUrl}/anthropic`;
   return String(endpoint?.base_url || fallback).trim().replace(/\/+$/, '');
+}
+
+function retargetRelayEndpoint(
+  existing: BotCatalogModelRuntime,
+  provider: RelayModelProvider,
+): string {
+  try {
+    const parsed = new URL(existing.apiBase);
+    const path = parsed.pathname.replace(/\/+$/, '');
+    if (/\/anthropic$/i.test(path) || /\/v1$/i.test(path)) {
+      parsed.pathname = path.replace(
+        /\/(?:anthropic|v1)$/i,
+        provider === 'openai' ? '/v1' : '/anthropic',
+      );
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString().replace(/\/+$/, '');
+    }
+    if (existing.provider === provider) return existing.apiBase.replace(/\/+$/, '');
+  } catch {
+    // Invalid legacy endpoints fall back to the current CatsCo relay address.
+  }
+  return relayModelProviderBaseUrl(provider);
 }
 
 async function catsRequest(
