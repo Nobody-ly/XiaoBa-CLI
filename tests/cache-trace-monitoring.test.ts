@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as dotenv from 'dotenv';
+import express, { Router } from 'express';
+import type { Server } from 'http';
 import { ConversationRunner } from '../src/core/conversation-runner';
 import { CacheTraceObserver, isCacheTraceEnabledForSession } from '../src/observability/cache-trace';
 import { readCacheTraceStore } from '../src/observability/cache-trace-reader';
+import { registerCacheTraceRoutes } from '../src/dashboard/routes/cache-trace';
 import type { Message } from '../src/types';
 import type { ToolCall, ToolDefinition, ToolExecutor, ToolResult } from '../src/types/tool';
 
@@ -129,7 +133,76 @@ test('dashboard exposes a discoverable cache trace page', () => {
   assert.match(index, /href="cache-trace\.html"/);
   assert.match(page, /缓存命中监控/);
   assert.match(page, /catsco\.dashboardApiKey/);
+  assert.match(page, /采集 Cache Trace/);
+  assert.match(page, /\/api\/cache-trace\/config/);
   assert.match(page, /\/api\/cache-trace\/sessions/);
+});
+
+test('dashboard persists the cache trace switch and restarts a running connector', async () => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cache-config-'));
+  const env: NodeJS.ProcessEnv = {};
+  let restarts = 0;
+  const serviceManager = {
+    getService: () => ({ status: 'running' as const }),
+    restart: () => { restarts++; return { status: 'running' as const }; },
+  };
+  const app = express();
+  app.use(express.json());
+  const router = Router();
+  registerCacheTraceRoutes(router, { runtimeRoot, env, serviceManager: serviceManager as any });
+  app.use('/api', router);
+  const server = await listen(app);
+
+  try {
+    const before = await fetchJson(server, '/api/cache-trace/config');
+    assert.equal(before.enabled, false);
+    assert.equal(before.dashboardAvailable, true);
+
+    const response = await fetchJson(server, '/api/cache-trace/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(response.enabled, true);
+    assert.equal(response.connectorRestarted, true);
+    assert.equal(env.XIAOBA_CACHE_TRACE, 'true');
+    assert.equal(restarts, 1);
+    const savedEnv = dotenv.parse(fs.readFileSync(path.join(runtimeRoot, '.env'), 'utf8'));
+    assert.equal(savedEnv.XIAOBA_CACHE_TRACE, 'true');
+  } finally {
+    await close(server);
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('cache trace switch waits for the next Agent start when the connector is stopped', async () => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cache-config-stopped-'));
+  const app = express();
+  app.use(express.json());
+  const router = Router();
+  registerCacheTraceRoutes(router, {
+    runtimeRoot,
+    env: {},
+    serviceManager: {
+      getService: () => ({ status: 'stopped' } as any),
+      restart: () => { throw new Error('must not restart'); },
+    },
+  });
+  app.use('/api', router);
+  const server = await listen(app);
+
+  try {
+    const response = await fetchJson(server, '/api/cache-trace/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(response.connectorRestarted, false);
+    assert.equal(response.appliesOnNextStart, true);
+  } finally {
+    await close(server);
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  }
 });
 
 function listJsonFiles(root: string): string[] {
@@ -138,4 +211,22 @@ function listJsonFiles(root: string): string[] {
     const full = path.join(root, entry.name);
     return entry.isDirectory() ? listJsonFiles(full) : entry.isFile() && entry.name.endsWith('.json') ? [full] : [];
   });
+}
+
+function listen(app: express.Express): Promise<Server> {
+  return new Promise(resolve => {
+    const server = app.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise(resolve => server.close(() => resolve()));
+}
+
+async function fetchJson(server: Server, pathname: string, init?: RequestInit): Promise<any> {
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('test server did not bind');
+  const response = await fetch(`http://127.0.0.1:${address.port}${pathname}`, init);
+  assert.equal(response.status, 200);
+  return response.json();
 }

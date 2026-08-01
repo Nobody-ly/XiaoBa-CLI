@@ -2209,7 +2209,10 @@ export function createApiRouter(
   const modelsDevFetch = options.modelsDevFetch ?? fetch;
   registerSkillHubRoutes(router, { getCatsCoAuth: getCatsCoAuthForSkillHub });
   registerPetRoutes(router);
-  registerCacheTraceRoutes(router);
+  registerCacheTraceRoutes(router, {
+    runtimeRoot: runtimeDataRoot(),
+    serviceManager,
+  });
 
   // ==================== 总览 ====================
 
