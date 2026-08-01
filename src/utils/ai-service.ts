@@ -7,6 +7,12 @@ import { OpenAIProvider } from '../providers/openai-provider';
 import { Logger } from './logger';
 import { isPrimaryModelToolCallingCapable } from './model-capabilities';
 import { resolveModelContextWindow } from './model-context-window';
+import {
+  attachModelErrorDiagnostics,
+  attachRetrySummary,
+  captureModelErrorDiagnostics,
+  type RetryStopReason,
+} from './model-error-observability';
 
 /**
  * AI 服务 - 统一的 AI 调用入口
@@ -210,14 +216,32 @@ export class AIService {
 
     const status = this.extractStatus(error);
     const errorMessage = this.extractErrorMessage(error);
+    const diagnostics = captureModelErrorDiagnostics(error, {
+      provider,
+      model,
+      phase: 'model_request',
+    });
 
     const wrapped = status
       ? new Error(`API错误 (${status}): ${errorMessage}`)
       : new Error(`请求失败: ${errorMessage}`);
+    if (status) {
+      (wrapped as Error & { status?: number }).status = status;
+    }
     const code = this.extractErrorCode(error);
     if (code) {
       (wrapped as Error & { code?: string }).code = code;
     }
+    try {
+      Object.defineProperty(wrapped, 'cause', {
+        value: error,
+        configurable: true,
+        enumerable: false,
+      });
+    } catch {
+      // Older runtimes may expose a non-configurable cause property.
+    }
+    attachModelErrorDiagnostics(wrapped, diagnostics);
     return wrapped;
   }
 
@@ -342,8 +366,6 @@ export class AIService {
     signal?: AbortSignal,
     shouldRetry?: (error: any, attempt: number) => boolean,
   ): Promise<T> {
-    let lastError: any;
-    const policy = this.resolveRetryPolicy();
     const startedAt = Date.now();
 
     for (let attempt = 0; ; attempt++) {
@@ -351,25 +373,25 @@ export class AIService {
         this.throwIfAborted(signal);
         return await fn();
       } catch (error: any) {
-        lastError = error;
-
         if (this.isAbortError(error) || signal?.aborted) {
           throw this.createAbortError();
         }
 
         const policy = this.resolveRetryPolicy(error);
         const retryAttempt = attempt + 1;
-        if (
-          retryAttempt > policy.maxRetries
-          || !this.isRetryable(error)
-          || shouldRetry?.(error, retryAttempt) === false
-        ) {
-          throw error;
+        if (retryAttempt > policy.maxRetries) {
+          this.throwFinalRetryError(error, attempt, policy, startedAt, 'retry_limit_exhausted');
+        }
+        if (!this.isRetryable(error)) {
+          this.throwFinalRetryError(error, attempt, policy, startedAt, 'non_retryable');
+        }
+        if (shouldRetry?.(error, retryAttempt) === false) {
+          this.throwFinalRetryError(error, attempt, policy, startedAt, 'stream_output_started');
         }
 
         const elapsedMs = Date.now() - startedAt;
         if (elapsedMs >= policy.maxElapsedMs) {
-          throw error;
+          this.throwFinalRetryError(error, attempt, policy, startedAt, 'retry_window_exhausted');
         }
 
         // 计算等待时间：优先用 Retry-After，否则指数退避
@@ -395,8 +417,28 @@ export class AIService {
         await this.sleepWithAbort(delay, signal);
       }
     }
+  }
 
-    throw lastError;
+  private throwFinalRetryError(
+    error: any,
+    attemptIndex: number,
+    policy: RetryPolicy,
+    startedAt: number,
+    stopReason: RetryStopReason,
+  ): never {
+    try {
+      attachRetrySummary(error, {
+        attempt_count: attemptIndex + 1,
+        retry_count: attemptIndex,
+        max_retries: policy.maxRetries,
+        elapsed_ms: Date.now() - startedAt,
+        max_elapsed_ms: policy.maxElapsedMs,
+        stop_reason: stopReason,
+      });
+    } catch {
+      // Observability must never replace the provider failure.
+    }
+    throw error;
   }
 
   private resolveRetryPolicy(error?: any): RetryPolicy {
