@@ -40,6 +40,7 @@ import { MODEL_IMAGE_SAFETY_MESSAGE, isModelImageSafetyError } from '../utils/mo
 import { formatProviderErrorForLog } from '../utils/provider-error-log-sanitizer';
 import { renderRequiredDefaultPromptFile } from '../utils/prompt-template';
 import { PromptTraceLogger } from '../utils/prompt-trace-logger';
+import { CacheTraceObserver, type CacheTraceSink } from '../observability/cache-trace';
 import { PathResolver } from '../utils/path-resolver';
 import {
   restoreProviderReplayToolCalls,
@@ -198,6 +199,8 @@ export interface RunnerOptions {
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   /** Persists a successful continuation checkpoint before execution resumes. */
   onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
+  /** Best-effort observer. Its result never participates in reply control flow. */
+  cacheTraceSink?: CacheTraceSink;
 }
 
 /**
@@ -217,6 +220,7 @@ export class ConversationRunner {
   private sessionLabel: string;
   private pendingUserInputProvider?: PendingUserInputProvider;
   private promptTraceLogger: PromptTraceLogger;
+  private cacheTraceSink: CacheTraceSink;
   private syntheticObservationProvider?: SyntheticObservationProvider;
   private runtimeTransientProvider?: RuntimeTransientProvider;
   private episodeId?: string;
@@ -267,6 +271,19 @@ export class ConversationRunner {
       surface: this.toolExecutionContext?.surface,
       modelConfig: this.resolveModelConfig(),
     });
+    try {
+      this.cacheTraceSink = options?.cacheTraceSink ?? new CacheTraceObserver({
+        sessionId: this.toolExecutionContext?.sessionId,
+        surface: this.toolExecutionContext?.surface,
+        episodeId: this.episodeId,
+      });
+    } catch {
+      this.cacheTraceSink = { observe: () => undefined };
+    }
+  }
+
+  private runObservation(action: () => void): void {
+    try { action(); } catch { /* Observability must never affect a reply. */ }
   }
 
   /**
@@ -393,18 +410,15 @@ export class ConversationRunner {
         await callbacks.onThinking(PROMPT_BUDGET_TRIM_MESSAGE);
       }
       this.logProviderMessagesForDebug(requestMessages, requestTools, turns);
-      this.promptTraceLogger.recordRequest(turns, requestMessages, requestTools);
+      this.runObservation(() => this.promptTraceLogger.recordRequest(turns, requestMessages, requestTools));
       const aiStartTime = Date.now();
       Logger.info(`[${this.sessionLabel}Turn ${turns}] 调用AI推理 (可用工具: ${requestTools.length}个)`);
 
-      let response;
+      let response: ChatResponse;
       try {
         response = await this.requestModelResponse(requestMessages, requestTools, callbacks);
-        const aiDuration = Date.now() - aiStartTime;
-        this.promptTraceLogger.recordResponse(turns, response, aiDuration);
-        Logger.info(`[${this.sessionLabel}Turn ${turns}] AI推理完成，耗时: ${aiDuration}ms`);
       } catch (error: any) {
-        this.promptTraceLogger.recordError(turns, error);
+        this.runObservation(() => this.promptTraceLogger.recordError(turns, error));
         if (this.isMessageSurface() && isModelImageSafetyError(error)) {
           if (!this.suppressFinalResponse && this.toolExecutionContext?.channel && this.toolExecutionContext?.surface !== 'catscompany') {
             try {
@@ -441,6 +455,18 @@ export class ConversationRunner {
         }
         throw error;
       }
+
+      const aiDuration = Date.now() - aiStartTime;
+      this.runObservation(() => this.promptTraceLogger.recordResponse(turns, response, aiDuration));
+      this.runObservation(() => this.cacheTraceSink.observe({
+        episodeNumber: turns,
+        messages: requestMessages,
+        tools: requestTools,
+        response,
+        durationMs: aiDuration,
+        modelConfig: this.resolveModelConfig(),
+      }));
+      Logger.info(`[${this.sessionLabel}Turn ${turns}] AI推理完成，耗时: ${aiDuration}ms`);
 
       if (response.usage) {
         Metrics.recordAICall(this.stream ? 'stream' : 'chat', response.usage);
