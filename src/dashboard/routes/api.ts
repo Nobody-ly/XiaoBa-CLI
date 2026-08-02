@@ -76,6 +76,7 @@ import { consumeLocalFileGrant, validateLocalFileGrant } from '../local-file-gra
 import { registerSkillHubRoutes } from './skillhub';
 import { registerPetRoutes } from './pet';
 import { registerTurnErrorRoutes } from './turn-errors';
+import { registerCacheTraceRoutes } from './cache-trace';
 import type { DashboardAuthStatus } from '../auth';
 import { SkillHubService } from '../../skillhub/service';
 import {
@@ -2210,6 +2211,10 @@ export function createApiRouter(
   registerSkillHubRoutes(router, { getCatsCoAuth: getCatsCoAuthForSkillHub });
   registerPetRoutes(router);
   registerTurnErrorRoutes(router);
+  registerCacheTraceRoutes(router, {
+    runtimeRoot: runtimeDataRoot(),
+    serviceManager,
+  });
 
   // ==================== 总览 ====================
 
