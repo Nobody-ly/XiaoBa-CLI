@@ -38,6 +38,11 @@ describe('model error observability', () => {
       elapsed_ms: 3210,
       max_elapsed_ms: 15000,
       stop_reason: 'retry_limit_exhausted',
+    }, {
+      call_id: 'call-123',
+      attempt_id: 'call-123:3',
+      attempt_number: 3,
+      episode_id: 'episode-456',
     });
 
     const diagnostics = captureModelErrorDiagnostics(rawError, {
@@ -54,6 +59,12 @@ describe('model error observability', () => {
     assert.equal(diagnostics.retry?.attempt_count, 3);
     assert.equal(diagnostics.retry?.retry_count, 2);
     assert.equal(diagnostics.retry?.stop_reason, 'retry_limit_exhausted');
+    assert.deepStrictEqual(diagnostics.attempt, {
+      call_id: 'call-123',
+      attempt_id: 'call-123:3',
+      attempt_number: 3,
+      episode_id: 'episode-456',
+    });
     assert.match(diagnostics.error_summary, /sk-\[redacted\]/);
     assert.doesNotMatch(diagnostics.error_summary, /secret-value/);
     assert.match(diagnostics.fingerprint, /^[a-f0-9]{16}$/);

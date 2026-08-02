@@ -26,6 +26,13 @@ export interface ModelRetrySummary {
   stop_reason: RetryStopReason;
 }
 
+export interface ModelAttemptReference {
+  call_id?: string;
+  attempt_id?: string;
+  attempt_number?: number;
+  episode_id?: string;
+}
+
 export interface ModelErrorDiagnostics {
   provider?: string;
   model?: string;
@@ -41,6 +48,7 @@ export interface ModelErrorDiagnostics {
   error_summary: string;
   fingerprint: string;
   retry?: ModelRetrySummary;
+  attempt?: ModelAttemptReference;
 }
 
 const MODEL_ERROR_DIAGNOSTICS = Symbol.for('xiaoba.model-error-diagnostics');
@@ -180,14 +188,20 @@ function captureModelErrorDiagnosticsUnsafe(
       error_summary: errorSummary,
     }),
     retry: existing?.retry,
+    attempt: existing?.attempt,
   });
 }
 
-export function attachRetrySummary(error: unknown, retry: ModelRetrySummary): void {
+export function attachRetrySummary(
+  error: unknown,
+  retry: ModelRetrySummary,
+  attempt?: ModelAttemptReference,
+): void {
   const diagnostics = captureModelErrorDiagnostics(error);
   attachModelErrorDiagnostics(error, {
     ...diagnostics,
     retry: normalizeRetrySummary(retry),
+    ...(attempt && { attempt: normalizeAttemptReference(attempt) }),
   });
 }
 
@@ -241,6 +255,16 @@ function normalizeDiagnostics(input: ModelErrorDiagnostics): ModelErrorDiagnosti
       error_summary: input.error_summary || 'unknown error',
     }),
     ...(input.retry && { retry: normalizeRetrySummary(input.retry) }),
+    ...(input.attempt && { attempt: normalizeAttemptReference(input.attempt) }),
+  };
+}
+
+function normalizeAttemptReference(input: ModelAttemptReference): ModelAttemptReference {
+  return {
+    ...(safeText(input.call_id) && { call_id: safeText(input.call_id) }),
+    ...(safeText(input.attempt_id) && { attempt_id: safeText(input.attempt_id) }),
+    ...(Number.isFinite(input.attempt_number) && { attempt_number: Math.max(1, Math.floor(input.attempt_number!)) }),
+    ...(safeText(input.episode_id) && { episode_id: safeText(input.episode_id) }),
   };
 }
 

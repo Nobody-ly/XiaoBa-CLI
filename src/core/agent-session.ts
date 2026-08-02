@@ -784,6 +784,10 @@ export class AgentSession {
           retry_elapsed_ms: retry?.elapsed_ms ?? 0,
           turn_elapsed_ms: Date.now() - turnStartedAt,
           partial_progress_preserved: partialProgressPreserved,
+          episode_id: diagnostics.attempt?.episode_id,
+          model_call_id: diagnostics.attempt?.call_id,
+          model_attempt_id: diagnostics.attempt?.attempt_id,
+          model_attempt_number: diagnostics.attempt?.attempt_number,
         };
 
         // 只有真正退出本轮并返回 taskOutcome=failed 的路径才写 turn_error。

@@ -479,8 +479,12 @@ test('AIService preserves provider fields and non-retryable stop reason on wrapp
   };
 
   let wrapped: unknown;
+  const attemptEvents: any[] = [];
   try {
-    await service.chat([]);
+    await service.chat([], undefined, {
+      modelAttemptSink: { observe: event => { attemptEvents.push(event); } },
+      modelAttemptContext: { episodeId: 'episode-ai-service' },
+    });
   } catch (error) {
     wrapped = error;
   }
@@ -496,6 +500,10 @@ test('AIService preserves provider fields and non-retryable stop reason on wrapp
   assert.equal(diagnostics?.retry?.attempt_count, 1);
   assert.equal(diagnostics?.retry?.retry_count, 0);
   assert.equal(diagnostics?.retry?.stop_reason, 'non_retryable');
+  assert.equal(diagnostics?.attempt?.call_id, attemptEvents[1].callId);
+  assert.equal(diagnostics?.attempt?.attempt_id, attemptEvents[1].attemptId);
+  assert.equal(diagnostics?.attempt?.attempt_number, 1);
+  assert.equal(diagnostics?.attempt?.episode_id, 'episode-ai-service');
 });
 
 test('AIService records retry exhaustion on the final wrapped error', async () => {

@@ -884,6 +884,11 @@ describe('AgentSession lifecycle', () => {
       elapsed_ms: 3100,
       max_elapsed_ms: 15000,
       stop_reason: 'retry_limit_exhausted',
+    }, {
+      call_id: 'call-interrupted',
+      attempt_id: 'call-interrupted:3',
+      attempt_number: 3,
+      episode_id: 'episode-interrupted',
     });
     const session = new AgentSession('catscompany:lifecycle-turn-error-event', buildMockServices({
       aiService: {
@@ -917,6 +922,10 @@ describe('AgentSession lifecycle', () => {
     assert.equal(turnErrors[0].event.payload.retry_count, 2);
     assert.equal(turnErrors[0].event.payload.attempt_count, 3);
     assert.equal(turnErrors[0].event.payload.retry_stop_reason, 'retry_limit_exhausted');
+    assert.equal(turnErrors[0].event.payload.model_call_id, 'call-interrupted');
+    assert.equal(turnErrors[0].event.payload.model_attempt_id, 'call-interrupted:3');
+    assert.equal(turnErrors[0].event.payload.model_attempt_number, 3);
+    assert.equal(turnErrors[0].event.payload.episode_id, 'episode-interrupted');
     assert.match(turnErrors[0].event.payload.error_fingerprint, /^[a-f0-9]{16}$/);
     assert.equal(typeof turnErrors[0].event.payload.partial_progress_preserved, 'boolean');
   });

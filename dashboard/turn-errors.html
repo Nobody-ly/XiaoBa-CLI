@@ -12,6 +12,7 @@
     header { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; margin-bottom:24px; }
     h1 { margin:0 0 6px; font-size:28px; }
     p { margin:0; color:var(--muted); }
+    a { color:#9fc0ff; }
     .controls { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
     input,select,button { border:1px solid var(--line); border-radius:10px; background:#10172a; color:var(--text); padding:9px 11px; }
     button { cursor:pointer; background:#245dba; border-color:#3573d5; font-weight:700; }
@@ -48,7 +49,7 @@
   <header>
     <div>
       <h1>对话中断监控</h1>
-      <p>这里只统计最终让本轮返回 failed 的错误；中途重试后恢复的请求不会计入。</p>
+      <p>这里只统计最终让本轮返回 failed 的错误；中途重试后恢复的请求请到 <a href="cache-trace.html">Cache Trace</a> 查看。</p>
     </div>
     <div class="controls">
       <select id="days"><option value="1">最近 1 天</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option></select>
@@ -73,7 +74,7 @@
   </section>
   <section class="panel">
     <h2>最近中断记录</h2>
-    <div class="table-wrap"><table><thead><tr><th>时间</th><th>分类 / 置信度</th><th>模型</th><th>HTTP</th><th>来源 / 阶段</th><th>重试</th><th>恢复建议</th><th>错误 / 堆栈指纹</th><th>安全摘要 / 首帧</th><th>日志位置</th></tr></thead><tbody id="recent"></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>时间</th><th>分类 / 置信度</th><th>模型</th><th>关联 Attempt</th><th>HTTP</th><th>来源 / 阶段</th><th>重试</th><th>恢复建议</th><th>错误 / 堆栈指纹</th><th>安全摘要 / 首帧</th><th>日志位置</th></tr></thead><tbody id="recent"></tbody></table></div>
   </section>
 </main>
 <script>
@@ -116,6 +117,7 @@
         <td>${esc(new Date(row.timestamp).toLocaleString())}</td>
         <td><span class="pill ${row.classification_confidence === 'low' ? 'low' : ''}">${esc(row.category)}</span><br>${esc(row.classification_confidence)}</td>
         <td>${esc(row.provider || '–')}<br><code>${esc(row.model || '–')}</code></td>
+        <td><code>${esc(row.model_attempt_id || '–')}</code><br>${row.episode_id ? `<code>${esc(row.episode_id)}</code>` : ''}</td>
         <td>${esc(row.http_status ?? '–')}<br>${esc(row.provider_code || row.provider_type || '')}</td>
         <td>${esc(row.error_origin)}<br>${esc(row.phase)}</td>
         <td>${esc(row.retry_count)}/${esc(row.attempt_count)}<br>${esc(row.retry_stop_reason)}</td>
@@ -123,7 +125,7 @@
         <td><code>${esc(row.error_fingerprint || '–')}</code><br><code>${esc(row.stack_fingerprint || '')}</code></td>
         <td class="summary">${esc(row.error_summary)}<br><code>${esc(row.top_frame || '')}</code></td>
         <td><code>${esc(row.source_file)}:${esc(row.source_line)}</code></td>
-      </tr>`).join('') || '<tr><td colspan="10">所选时间范围内没有对话中断事件。</td></tr>';
+      </tr>`).join('') || '<tr><td colspan="11">所选时间范围内没有对话中断事件。</td></tr>';
       $('status').textContent = `生成于 ${new Date(report.generated_at).toLocaleString()} · 扫描 ${report.totals.files_scanned} 个日志文件 · 跳过 ${report.totals.malformed_lines} 条损坏记录`;
     } catch (error) {
       $('status').textContent = `读取失败：${error.message}`;

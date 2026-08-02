@@ -440,6 +440,11 @@ export class AIService {
             elapsed_ms: elapsedMs,
             max_elapsed_ms: policy.maxElapsedMs,
             stop_reason: stopReason,
+          }, {
+            call_id: attemptRun?.callId,
+            attempt_id: attemptRun ? `${attemptRun.callId}:${attemptNumber}` : undefined,
+            attempt_number: attemptRun ? attemptNumber : undefined,
+            episode_id: attemptRun?.context?.episodeId,
           });
           this.emitModelAttempt(attemptRun, attemptNumber, {
             outcome: 'failed',

@@ -39,6 +39,10 @@ describe('turn error reader', () => {
         retry_count: 2,
         retry_stop_reason: 'retry_limit_exhausted',
         partial_progress_preserved: true,
+        episode_id: 'episode-reader',
+        model_call_id: 'call-reader',
+        model_attempt_id: 'call-reader:3',
+        model_attempt_number: 3,
       }),
       runtimeEntry('2026-08-02T11:00:00.000Z', {
         category: 'provider_rejected',
@@ -71,7 +75,7 @@ describe('turn error reader', () => {
     const report = readTurnErrorReport({
       logsRoot: root,
       days: 7,
-      limit: 1,
+      limit: 2,
       now: new Date('2026-08-03T00:00:00.000Z'),
     });
 
@@ -90,8 +94,14 @@ describe('turn error reader', () => {
     assert.equal(report.by_fingerprint[0].count, 2);
     assert.equal(report.by_origin[0].key, 'provider');
     assert.equal(report.by_top_frame[0].key, 'src/providers/openai-provider.ts:123:4');
-    assert.equal(report.recent.length, 1);
+    assert.equal(report.recent.length, 2);
     assert.equal(report.recent[0].source_line, 2);
+    assert.equal(report.recent[0].model_attempt_id, '');
+    assert.equal(report.recent[0].model_attempt_number, 0);
+    assert.equal(report.recent[1].model_call_id, 'call-reader');
+    assert.equal(report.recent[1].model_attempt_id, 'call-reader:3');
+    assert.equal(report.recent[1].model_attempt_number, 3);
+    assert.equal(report.recent[1].episode_id, 'episode-reader');
   });
 
   test('returns an empty report when the log root does not exist', () => {

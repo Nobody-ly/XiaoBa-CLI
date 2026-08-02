@@ -30,6 +30,10 @@ export interface TurnErrorRecord {
   retry_elapsed_ms: number;
   turn_elapsed_ms: number;
   partial_progress_preserved: boolean;
+  episode_id: string;
+  model_call_id: string;
+  model_attempt_id: string;
+  model_attempt_number: number;
   source_file: string;
   source_line: number;
 }
@@ -170,6 +174,10 @@ function toTurnErrorRecord(entry: any, sourceFile: string, sourceLine: number): 
     retry_elapsed_ms: safeInteger(payload.retry_elapsed_ms, 0),
     turn_elapsed_ms: safeInteger(payload.turn_elapsed_ms, 0),
     partial_progress_preserved: payload.partial_progress_preserved === true,
+    episode_id: safeText(payload.episode_id),
+    model_call_id: safeText(payload.model_call_id),
+    model_attempt_id: safeText(payload.model_attempt_id),
+    model_attempt_number: safeInteger(payload.model_attempt_number, 0),
     source_file: sourceFile,
     source_line: sourceLine,
   };

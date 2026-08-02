@@ -90,6 +90,10 @@ export interface TurnErrorPayload {
   retry_elapsed_ms?: number;
   turn_elapsed_ms?: number;
   partial_progress_preserved?: boolean;
+  episode_id?: string;
+  model_call_id?: string;
+  model_attempt_id?: string;
+  model_attempt_number?: number;
   turn?: number;
 }
 

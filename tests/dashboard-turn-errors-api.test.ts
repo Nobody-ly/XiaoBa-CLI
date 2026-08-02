@@ -70,6 +70,8 @@ describe('turn error dashboard API', () => {
     assert.match(html, /对话中断监控/);
     assert.match(html, /错误来源/);
     assert.match(html, /本地首个堆栈位置/);
+    assert.match(html, /关联 Attempt/);
+    assert.match(html, /cache-trace\.html/);
     assert.match(html, /\/api\/observability\/turn-errors/);
   });
 });
