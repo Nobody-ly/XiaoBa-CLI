@@ -32,7 +32,7 @@ function countBreakpoints(value: unknown): number {
     + Object.values(record).reduce((sum, item) => sum + countBreakpoints(item), 0);
 }
 
-test('Responses explicit cache emits S, A, and advancing B boundaries without persisting markers', () => {
+test('Responses explicit cache emits one S, A, and latest B without persisting markers', () => {
   const messages: Message[] = [
     { role: 'system', content: 'stable system' },
     { role: 'system', content: '[transient_skills_list]\n- lookup', __cacheScope: 'stable' },
@@ -57,7 +57,7 @@ test('Responses explicit cache emits S, A, and advancing B boundaries without pe
   assert.match(body.instructions, /stable system/);
   assert.match(body.instructions, /transient_skills_list/);
   assert.doesNotMatch(body.instructions, /transient_plan_status/);
-  assert.equal(countBreakpoints(body.input), 4);
+  assert.equal(countBreakpoints(body.input), 3);
   assert.equal(body.input[0].role, 'system');
   assert.equal(body.input.at(-3).role, 'system');
   assert.match(String(body.input.at(-3).content), /transient_plan_status/);
@@ -146,6 +146,28 @@ test('Responses breakpoints never rewrite parallel function calls or outputs', (
   assert.equal(body.input[outputA].output, 'result-a');
   assert.equal(body.input[outputB].output, 'result-b');
   assert.equal(JSON.stringify(messages).includes('prompt_cache_breakpoint'), false);
+});
+
+test('Responses emits only the latest completed-turn breakpoint', () => {
+  const messages: Message[] = [
+    { role: 'system', content: 'stable system' },
+    { role: 'user', content: 'root task', __episodeId: 'episode-2', __episodeInputKind: 'root' },
+    { role: 'assistant', content: 'first turn', __episodeId: 'episode-2' },
+    { role: 'user', content: 'continue', __episodeId: 'episode-2' },
+    { role: 'assistant', content: 'second turn', __episodeId: 'episode-2' },
+    { role: 'user', content: 'latest event', __episodeId: 'episode-2' },
+  ];
+
+  const body = (provider() as any).buildResponsesRequestBody(messages, [], false, context);
+  const breakpointIndexes = body.input
+    .map((item: any, index: number) => countBreakpoints(item) > 0 ? index : -1)
+    .filter((index: number) => index >= 0);
+  const secondTurnIndex = body.input.findIndex((item: any) => item.content === 'second turn');
+  const latestEventIndex = body.input.findIndex((item: any) => item.content === 'latest event');
+
+  assert.equal(breakpointIndexes.length, 2);
+  assert.ok(secondTurnIndex < breakpointIndexes[1]);
+  assert.ok(breakpointIndexes[1] < latestEventIndex);
 });
 
 test('Responses explicit cache is not sent to older models', () => {

@@ -498,13 +498,12 @@ export class OpenAIProvider implements AIProvider {
       recordBreakpoint('A');
     }
 
-    const firstBreakpointGroup = Math.max(0, completedCurrentGroups.length - 2);
-    for (const [groupIndex, group] of completedCurrentGroups.entries()) {
+    for (const group of completedCurrentGroups) {
       input.push(...this.convertResponsesMessages(group));
-      if (explicitCaching && groupIndex >= firstBreakpointGroup) {
-        input.push(this.buildBreakpointCarrier());
-        recordBreakpoint('B');
-      }
+    }
+    if (explicitCaching && completedCurrentGroups.length > 0) {
+      input.push(this.buildBreakpointCarrier());
+      recordBreakpoint('B');
     }
 
     input.push(...this.convertResponsesMessages(transientMessages));
