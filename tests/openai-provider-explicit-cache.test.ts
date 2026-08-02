@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
 import test from 'node:test';
 import axios from 'axios';
 import { OpenAIProvider } from '../src/providers/openai-provider';
@@ -194,6 +195,56 @@ test('unsupported explicit fields retry once and pin the provider to compatibili
     assert.deepEqual(bodies[0].prompt_cache_options, { mode: 'explicit' });
     assert.equal(bodies[1].prompt_cache_options, undefined);
     assert.equal(countBreakpoints(bodies[1].input), 0);
+  } finally {
+    (axios as any).post = originalPost;
+  }
+});
+
+test('streamed unsupported explicit fields retry once in compatibility mode', async () => {
+  const originalPost = axios.post;
+  const bodies: any[] = [];
+  const callbackErrors: Error[] = [];
+  (axios as any).post = async (_url: string, body: any) => {
+    bodies.push(body);
+    if (bodies.length === 1) {
+      return {
+        data: Readable.from([
+          `data: ${JSON.stringify({
+            type: 'response.failed',
+            response: {
+              status: 'failed',
+              error: { message: 'prompt_cache_breakpoint is not supported on this model' },
+            },
+          })}\n\n`,
+        ]),
+      };
+    }
+    return {
+      data: Readable.from([
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+          },
+        })}\n\n`,
+      ]),
+    };
+  };
+  try {
+    const instance = provider();
+    const result = await instance.chatStream(
+      [{ role: 'user', content: 'hello', __episodeId: 'episode-2' }],
+      [],
+      { onError: error => callbackErrors.push(error) },
+      context,
+    );
+    assert.equal(result.content, 'OK');
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(bodies[0].prompt_cache_options, { mode: 'explicit' });
+    assert.equal(bodies[1].prompt_cache_options, undefined);
+    assert.equal(countBreakpoints(bodies[1].input), 0);
+    assert.deepEqual(callbackErrors, []);
   } finally {
     (axios as any).post = originalPost;
   }

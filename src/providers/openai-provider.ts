@@ -918,6 +918,19 @@ export class OpenAIProvider implements AIProvider {
 
       const finishError = (error: Error) => {
         if (settled) return;
+        if (
+          !streamedVisibleText
+          && !outputItems.some(Boolean)
+          && this.shouldRetryWithoutExplicitCaching(error, body)
+        ) {
+          settled = true;
+          options?.signal?.removeEventListener('abort', onAbort);
+          this.responsesExplicitCacheSupported = false;
+          Logger.warning('Responses stream rejected explicit prompt caching; retrying once in compatibility mode.');
+          stream.destroy();
+          void this.chatStreamResponses(messages, tools, callbacks, options).then(resolve, reject);
+          return;
+        }
         settled = true;
         callbacks?.onError?.(error);
         reject(error);
@@ -1019,12 +1032,14 @@ export class OpenAIProvider implements AIProvider {
   private shouldRetryWithoutExplicitCaching(error: unknown, body: any): boolean {
     if (!body?.prompt_cache_options) return false;
     const status = Number((error as any)?.response?.status ?? (error as any)?.status);
-    if (status !== 400) return false;
     const data = (error as any)?.response?.data;
     const detail = `${(error as any)?.message || ''} ${typeof data === 'string' ? data : JSON.stringify(data || {})}`.toLowerCase();
-    return detail.includes('prompt_cache_breakpoint')
-      || detail.includes('prompt_cache_options')
-      || (detail.includes('prompt cache') && /unsupported|unknown|invalid|extra/.test(detail));
+    if (detail.includes('prompt_cache_breakpoint') || detail.includes('prompt_cache_options')) {
+      return /unsupported|not supported|unknown|invalid|extra|unrecognized/.test(detail);
+    }
+    return (status === 400 || status === 422)
+      && detail.includes('prompt cache')
+      && /unsupported|not supported|unknown|invalid|extra|unrecognized/.test(detail);
   }
 }
 
