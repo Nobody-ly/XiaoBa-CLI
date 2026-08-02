@@ -250,6 +250,45 @@ test('streamed unsupported explicit fields retry once in compatibility mode', as
   }
 });
 
+test('strict explicit cache mode surfaces streamed rejection without fallback', async () => {
+  const originalPost = axios.post;
+  const originalStrict = process.env.XIAOBA_RESPONSES_EXPLICIT_CACHE_STRICT;
+  const bodies: any[] = [];
+  process.env.XIAOBA_RESPONSES_EXPLICIT_CACHE_STRICT = '1';
+  (axios as any).post = async (_url: string, body: any) => {
+    bodies.push(body);
+    return {
+      data: Readable.from([
+        `data: ${JSON.stringify({
+          type: 'response.failed',
+          response: {
+            status: 'failed',
+            error: { message: 'prompt_cache_breakpoint is not supported on this model' },
+          },
+        })}\n\n`,
+      ]),
+    };
+  };
+  try {
+    const instance = provider();
+    await assert.rejects(
+      instance.chatStream(
+        [{ role: 'user', content: 'hello', __episodeId: 'episode-2' }],
+        [],
+        undefined,
+        context,
+      ),
+      /prompt_cache_breakpoint is not supported/i,
+    );
+    assert.equal(bodies.length, 1);
+    assert.deepEqual(bodies[0].prompt_cache_options, { mode: 'explicit' });
+  } finally {
+    if (originalStrict === undefined) delete process.env.XIAOBA_RESPONSES_EXPLICIT_CACHE_STRICT;
+    else process.env.XIAOBA_RESPONSES_EXPLICIT_CACHE_STRICT = originalStrict;
+    (axios as any).post = originalPost;
+  }
+});
+
 test('Responses cache usage is recorded without prompt content', async () => {
   const originalPost = axios.post;
   const originalRuntimeEvent = Logger.runtimeEvent;

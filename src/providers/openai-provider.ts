@@ -1031,6 +1031,9 @@ export class OpenAIProvider implements AIProvider {
 
   private shouldRetryWithoutExplicitCaching(error: unknown, body: any): boolean {
     if (!body?.prompt_cache_options) return false;
+    if (/^(?:1|true|yes|on)$/i.test(String(process.env.XIAOBA_RESPONSES_EXPLICIT_CACHE_STRICT || '').trim())) {
+      return false;
+    }
     const status = Number((error as any)?.response?.status ?? (error as any)?.status);
     const data = (error as any)?.response?.data;
     const detail = `${(error as any)?.message || ''} ${typeof data === 'string' ? data : JSON.stringify(data || {})}`.toLowerCase();
