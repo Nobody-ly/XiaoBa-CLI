@@ -495,6 +495,7 @@ export class ConversationRunner {
               content: restored.visibleText || null,
               toolCalls: restoredToolCalls,
               providerContent: undefined,
+              providerState: undefined,
             };
           }
         }
@@ -595,6 +596,7 @@ export class ConversationRunner {
         content: stripAssistantTranscriptArtifacts(response.content || ''),
         tool_calls: response.toolCalls,
         providerContent: response.providerContent,
+        providerState: response.providerState,
       };
       const executionRecords: ToolExecutionRecord[] = [];
       let shouldPauseTurn = false;
@@ -938,7 +940,7 @@ export class ConversationRunner {
         ? { tool_calls: transcriptToolCalls }
         : {}),
       ...(providerContent?.length
-        ? { providerContent }
+        ? { providerContent, providerState: assistantMsg.providerState }
         : {}),
     };
 
@@ -1644,13 +1646,19 @@ export class ConversationRunner {
           ...message,
           tool_calls: toolCalls,
           providerContent,
+          providerState: providerContent ? message.providerState : undefined,
         });
         continue;
       }
 
       const content = contentToString(message.content).trim();
       if (content) {
-        repaired.push({ ...message, tool_calls: undefined, providerContent: undefined });
+        repaired.push({
+          ...message,
+          tool_calls: undefined,
+          providerContent: undefined,
+          providerState: undefined,
+        });
       }
     }
 
@@ -1670,6 +1678,7 @@ export class ConversationRunner {
       content: `${content.slice(0, maxChars)}\n...[已截断以适配模型上下文预算，原始 ${content.length} 字符]`,
       tool_calls: undefined,
       providerContent: undefined,
+      providerState: undefined,
     };
   }
 
@@ -1698,6 +1707,7 @@ export class ConversationRunner {
 
     if (content.length > maxChars || aggressive) {
       delete next.providerContent;
+      delete next.providerState;
     }
 
     return next;

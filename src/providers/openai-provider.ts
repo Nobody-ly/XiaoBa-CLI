@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { createHash } from 'crypto';
 import { StringDecoder } from 'string_decoder';
-import { Message, ChatConfig, ChatResponse, ContentBlock } from '../types';
+import { Message, ChatConfig, ChatResponse, ContentBlock, type ProviderApiType, type ProviderStateReference } from '../types';
 import { ToolDefinition } from '../types/tool';
 import { AIProvider, AIRequestOptions, StreamCallbacks } from './provider';
 import { ContextDebugLogger } from '../utils/context-debug-logger';
@@ -13,6 +13,7 @@ import {
   supportsReasoningSwitch,
 } from '../utils/reasoning-effort';
 import { openAIApiModeOrDefault } from '../utils/openai-api-mode';
+import { createProviderStateReference, isProviderStateCompatible } from './provider-state';
 
 /**
  * OpenAI Provider
@@ -112,6 +113,7 @@ export class OpenAIProvider implements AIProvider {
 
   private extractOpenAIReasoningContent(message: Message): string | undefined {
     if (!this.shouldReplayOpenAIReasoningContent()) return undefined;
+    if (!this.canReplayProviderContent(message, 'openai-chat-completions')) return undefined;
     if (!Array.isArray(message.providerContent) || !message.tool_calls?.length) return undefined;
     const block = message.providerContent.find(item =>
       item
@@ -130,6 +132,18 @@ export class OpenAIProvider implements AIProvider {
       apiUrl: this.apiUrl,
       model: this.model,
     });
+  }
+
+  private providerStateReference(apiType: ProviderApiType): ProviderStateReference {
+    return createProviderStateReference({
+      apiType,
+      endpoint: apiType === 'openai-responses' ? this.responsesUrl : this.chatCompletionsUrl,
+      model: this.model,
+    });
+  }
+
+  private canReplayProviderContent(message: Message, apiType: ProviderApiType): boolean {
+    return isProviderStateCompatible(message.providerState, this.providerStateReference(apiType));
   }
 
   private sanitizeContent(content: Message['content']): any {
@@ -337,14 +351,18 @@ export class OpenAIProvider implements AIProvider {
           ? Array.from(toolCallsMap.values())
           : undefined;
 
+        const providerContent = toolCalls && fullReasoningContent.trim()
+          ? buildOpenAIProviderContentFromToolCalls(toolCalls, fullReasoningContent.trim())
+          : undefined;
         const result: ChatResponse = {
           content: fullContent || null,
           toolCalls,
           usage: streamUsage,
           stopReason: finishReason,
-          ...(toolCalls && fullReasoningContent.trim()
-            ? { providerContent: buildOpenAIProviderContentFromToolCalls(toolCalls, fullReasoningContent.trim()) }
-            : {}),
+          ...(providerContent ? {
+            providerContent,
+            providerState: this.providerStateReference('openai-chat-completions'),
+          } : {}),
         };
 
         ContextDebugLogger.dumpSdkBoundary('after', undefined, {
@@ -416,7 +434,9 @@ export class OpenAIProvider implements AIProvider {
       }
 
       if (message.role === 'assistant' && message.tool_calls?.length) {
-        const replayItems = (message.providerContent || [])
+        const replayItems = (this.canReplayProviderContent(message, 'openai-responses')
+          ? message.providerContent || []
+          : [])
           .filter(item => this.isResponsesReplayItem(item))
           .map(item => JSON.parse(JSON.stringify(item)));
         if (replayItems.length > 0) {
@@ -626,6 +646,7 @@ export class OpenAIProvider implements AIProvider {
       usage: this.parseResponsesUsage(response?.usage),
       stopReason,
       ...(providerContent?.length ? { providerContent } : {}),
+      ...(providerContent?.length ? { providerState: this.providerStateReference('openai-responses') } : {}),
     };
   }
 
@@ -770,7 +791,7 @@ export class OpenAIProvider implements AIProvider {
     });
   }
 
-  private buildOpenAIProviderContent(message: any): Pick<ChatResponse, 'providerContent'> {
+  private buildOpenAIProviderContent(message: any): Pick<ChatResponse, 'providerContent' | 'providerState'> {
     const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
     const reasoningContent = typeof message?.reasoning_content === 'string'
       ? message.reasoning_content.trim()
@@ -778,6 +799,7 @@ export class OpenAIProvider implements AIProvider {
     if (!toolCalls.length || !reasoningContent) return {};
     return {
       providerContent: buildOpenAIProviderContentFromToolCalls(toolCalls, reasoningContent),
+      providerState: this.providerStateReference('openai-chat-completions'),
     };
   }
 }
