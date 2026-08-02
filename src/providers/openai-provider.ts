@@ -13,6 +13,22 @@ import {
   supportsReasoningSwitch,
 } from '../utils/reasoning-effort';
 import { openAIApiModeOrDefault } from '../utils/openai-api-mode';
+import { Logger } from '../utils/logger';
+import { estimateJsonTokens } from '../core/token-estimator';
+
+interface ResponsesBreakpointDiagnostic {
+  label: 'S' | 'A' | 'B';
+  prefixHash: string;
+  inputItems: number;
+  inputTokenEstimate: number;
+}
+
+interface ResponsesInputLayout {
+  input: any[];
+  breakpoints: Array<'S' | 'A' | 'B'>;
+  prefixHashes: Partial<Record<'S' | 'A' | 'B', string>>;
+  breakpointDiagnostics: ResponsesBreakpointDiagnostic[];
+}
 
 /**
  * OpenAI Provider
@@ -29,6 +45,7 @@ export class OpenAIProvider implements AIProvider {
   private maxTokens: number;
   private reasoningEffort: ChatConfig['reasoningEffort'];
   private openaiApiMode: ChatConfig['openaiApiMode'];
+  private responsesExplicitCacheSupported: boolean | undefined;
 
   constructor(config: ChatConfig) {
     this.apiUrl = config.apiUrl!;
@@ -363,27 +380,56 @@ export class OpenAIProvider implements AIProvider {
     });
   }
 
-  private buildResponsesRequestBody(messages: Message[], tools?: ToolDefinition[], stream = false): any {
+  private buildResponsesRequestBody(
+    messages: Message[],
+    tools?: ToolDefinition[],
+    stream = false,
+    options?: AIRequestOptions,
+    forceCompatibility = false,
+  ): any {
     const instructions = messages
       .filter(message => message.role === 'system' && !this.isDynamicCacheMessage(message))
+      .filter(message => !this.isLegacyCheckpointBoundary(message))
       .map(message => this.contentAsText(message.content))
       .filter(Boolean)
       .join('\n\n');
     const responseTools = this.buildCanonicalResponsesTools(tools ?? []);
+    const explicitCaching = !forceCompatibility
+      && this.responsesExplicitCacheSupported !== false
+      && options?.promptCacheContext?.explicitCaching === true
+      && this.supportsExplicitPromptCaching();
+    const layout = this.buildResponsesInput(
+      messages,
+      options?.promptCacheContext,
+      explicitCaching,
+    );
     const body: any = {
       model: this.model,
-      input: this.buildResponsesInput(messages),
+      input: layout.input,
       max_output_tokens: this.maxTokens,
       stream,
       store: false,
-      prompt_cache_key: this.buildPromptCacheKey(instructions, responseTools),
+      prompt_cache_key: this.buildPromptCacheKey(
+        instructions,
+        responseTools,
+        options?.promptCacheContext?.sessionKey,
+      ),
     };
 
     if (instructions) body.instructions = instructions;
     if (Number.isFinite(this.temperature)) body.temperature = this.temperature;
     if (responseTools.length > 0) body.tools = responseTools;
+    if (explicitCaching) body.prompt_cache_options = { mode: 'explicit' };
     body.include = ['reasoning.encrypted_content'];
     this.applyResponsesReasoningOptions(body);
+    this.logResponsesCacheLayout(
+      body.prompt_cache_key,
+      instructions,
+      responseTools,
+      layout,
+      explicitCaching,
+      options?.promptCacheContext,
+    );
     return body;
   }
 
@@ -395,16 +441,81 @@ export class OpenAIProvider implements AIProvider {
     }
   }
 
-  private buildResponsesInput(messages: Message[]): any[] {
+  private buildResponsesInput(
+    messages: Message[],
+    cacheContext?: AIRequestOptions['promptCacheContext'],
+    explicitCaching = false,
+  ): ResponsesInputLayout {
+    const requestMessages = messages.filter(message => (
+      !this.isLegacyCheckpointBoundary(message)
+      && !(message.role === 'system' && !this.isDynamicCacheMessage(message))
+    ));
+    const currentEpisodeId = cacheContext?.currentEpisodeId;
+    const transientMessages = requestMessages.filter(message => this.isTurnDeltaMessage(message));
+    const durableMessages = requestMessages.filter(message => !this.isTurnDeltaMessage(message));
+    const inferredGroups = currentEpisodeId
+      ? []
+      : this.groupResponsesExchanges(durableMessages);
+    const completedEpisodeMessages = currentEpisodeId
+      ? durableMessages.filter(message => message.__episodeId !== currentEpisodeId)
+      : inferredGroups.slice(0, -1).flat();
+    const currentEpisodeMessages = currentEpisodeId
+      ? durableMessages.filter(message => message.__episodeId === currentEpisodeId)
+      : [];
+    const currentGroups = this.groupResponsesExchanges(currentEpisodeMessages);
+    const latestGroup = currentEpisodeId
+      ? (currentGroups[currentGroups.length - 1] || [])
+      : (inferredGroups[inferredGroups.length - 1] || []);
+    const completedCurrentGroups = currentEpisodeId ? currentGroups.slice(0, -1) : [];
     const input: any[] = [];
-    const dynamicSystemMessages: Message[] = [];
+    const breakpoints: Array<'S' | 'A' | 'B'> = [];
+    const prefixHashes: Partial<Record<'S' | 'A' | 'B', string>> = {};
+    const breakpointDiagnostics: ResponsesBreakpointDiagnostic[] = [];
 
+    const recordBreakpoint = (label: 'S' | 'A' | 'B') => {
+      const prefixHash = this.hashWirePrefix(input);
+      breakpoints.push(label);
+      prefixHashes[label] = prefixHash;
+      breakpointDiagnostics.push({
+        label,
+        prefixHash,
+        inputItems: input.length,
+        inputTokenEstimate: estimateJsonTokens(input),
+      });
+    };
+
+    if (explicitCaching) {
+      input.push(this.buildBreakpointCarrier());
+      recordBreakpoint('S');
+    }
+
+    input.push(...this.convertResponsesMessages(completedEpisodeMessages));
+    if (explicitCaching && completedEpisodeMessages.length > 0) {
+      input.push(this.buildBreakpointCarrier());
+      recordBreakpoint('A');
+    }
+
+    const firstBreakpointGroup = Math.max(0, completedCurrentGroups.length - 2);
+    for (const [groupIndex, group] of completedCurrentGroups.entries()) {
+      input.push(...this.convertResponsesMessages(group));
+      if (explicitCaching && groupIndex >= firstBreakpointGroup) {
+        input.push(this.buildBreakpointCarrier());
+        recordBreakpoint('B');
+      }
+    }
+
+    input.push(...this.convertResponsesMessages(transientMessages));
+    input.push(...this.convertResponsesMessages(latestGroup));
+    return { input, breakpoints, prefixHashes, breakpointDiagnostics };
+  }
+
+  private convertResponsesMessages(messages: Message[]): any[] {
+    const input: any[] = [];
     for (const message of messages) {
       if (message.role === 'system') {
-        if (this.isDynamicCacheMessage(message)) dynamicSystemMessages.push(message);
+        input.push({ role: 'system', content: this.responsesMessageContent(message.content) });
         continue;
       }
-
       if (message.role === 'tool') {
         if (!message.tool_call_id) continue;
         input.push({
@@ -414,7 +525,6 @@ export class OpenAIProvider implements AIProvider {
         });
         continue;
       }
-
       if (message.role === 'assistant' && message.tool_calls?.length) {
         const replayItems = (message.providerContent || [])
           .filter(item => this.isResponsesReplayItem(item))
@@ -423,7 +533,6 @@ export class OpenAIProvider implements AIProvider {
           input.push(...replayItems);
           continue;
         }
-
         const text = this.contentAsText(message.content);
         if (text) input.push({ role: 'assistant', content: text });
         for (const toolCall of message.tool_calls) {
@@ -436,28 +545,66 @@ export class OpenAIProvider implements AIProvider {
         }
         continue;
       }
-
-      input.push({
-        role: message.role,
-        content: this.responsesMessageContent(message.content),
-      });
+      input.push({ role: message.role, content: this.responsesMessageContent(message.content) });
     }
-
-    for (const message of dynamicSystemMessages) {
-      input.push({
-        role: 'system',
-        content: this.responsesMessageContent(message.content),
-      });
-    }
-
     return input;
+  }
+
+  private groupResponsesExchanges(messages: Message[]): Message[][] {
+    const groups: Message[][] = [];
+    for (let index = 0; index < messages.length;) {
+      const message = messages[index];
+      if (message.role === 'assistant' && message.tool_calls?.length) {
+        const expected = new Set(message.tool_calls.map(call => call.id));
+        const group = [message];
+        index++;
+        while (index < messages.length && messages[index].role === 'tool') {
+          const tool = messages[index];
+          group.push(tool);
+          if (tool.tool_call_id) expected.delete(tool.tool_call_id);
+          index++;
+          if (expected.size === 0) break;
+        }
+        groups.push(group);
+        continue;
+      }
+      groups.push([message]);
+      index++;
+    }
+    return groups;
+  }
+
+  private isTurnDeltaMessage(message: Message): boolean {
+    return this.isDynamicCacheMessage(message)
+      || message.__injected === true
+      || message.__runtimeFeedback === true
+      || message.__syntheticObservation === true;
+  }
+
+  private buildBreakpointCarrier(): any {
+    return {
+      role: 'system',
+      content: [{
+        type: 'input_text',
+        text: '\n',
+        prompt_cache_breakpoint: { mode: 'explicit' },
+      }],
+    };
   }
 
   private isDynamicCacheMessage(message: Message): boolean {
     if (message.__cacheScope === 'dynamic') return true;
     if (message.__cacheScope === 'stable') return false;
     if (message.role !== 'system' || typeof message.content !== 'string') return false;
-    return /^\[(?:transient_[^\]]+|compact_boundary)\]/.test(message.content);
+    return /^\[(?:transient_[^\]]+|compact_boundary|checkpoint_compaction_boundary)\]/.test(message.content);
+  }
+
+  private isLegacyCheckpointBoundary(message: Message): boolean {
+    return message.__checkpointBoundary === true || (
+      message.role === 'system'
+      && typeof message.content === 'string'
+      && /^\[(?:checkpoint_compaction_boundary|compact_boundary)\]/.test(message.content)
+    );
   }
 
   private buildCanonicalResponsesTools(tools: ToolDefinition[]): any[] {
@@ -513,17 +660,74 @@ export class OpenAIProvider implements AIProvider {
     ].includes(String(item.type || '')));
   }
 
-  private buildPromptCacheKey(instructions: string, tools: any[]): string {
+  private buildPromptCacheKey(instructions: string, tools: any[], sessionKey?: string): string {
     const digest = createHash('sha256')
       .update(JSON.stringify({
-        identityVersion: 'responses-cache-v2',
+        identityVersion: 'responses-cache-v3',
         model: this.model,
+        session: createHash('sha256').update(sessionKey || 'unscoped').digest('hex').slice(0, 24),
         instructions,
         tools,
       }))
       .digest('hex')
       .slice(0, 48);
     return `catsco-${digest}`;
+  }
+
+  private supportsExplicitPromptCaching(): boolean {
+    const match = this.model.trim().toLowerCase().match(/^gpt-(\d+)(?:\.(\d+))?(?:[-_:]|$)/);
+    if (!match) return false;
+    const major = Number(match[1]);
+    const minor = Number(match[2] || 0);
+    return major > 5 || (major === 5 && minor >= 6);
+  }
+
+  private hashWirePrefix(value: unknown): string {
+    return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 16);
+  }
+
+  private logResponsesCacheLayout(
+    cacheKey: string,
+    instructions: string,
+    tools: any[],
+    layout: ResponsesInputLayout,
+    explicit: boolean,
+    cacheContext?: AIRequestOptions['promptCacheContext'],
+  ): void {
+    Logger.runtimeEvent('INFO', `responses_cache_layout mode=${explicit ? 'explicit' : 'compatibility'} breakpoints=${layout.breakpoints.join(',') || 'none'}`, {
+      type: 'responses_cache_layout',
+      payload: {
+        mode: explicit ? 'explicit' : 'compatibility',
+        phase: cacheContext?.phase || 'normal',
+        session_hash: this.hashWirePrefix(cacheContext?.sessionKey || 'unscoped'),
+        cache_key_hash: this.hashWirePrefix(cacheKey),
+        instructions_hash: this.hashWirePrefix(instructions),
+        tools_hash: this.hashWirePrefix(tools),
+        stable_core_token_estimate: estimateJsonTokens({ instructions, tools }),
+        breakpoint_sequence: layout.breakpoints,
+        prefix_hashes: layout.prefixHashes,
+        breakpoint_diagnostics: layout.breakpointDiagnostics,
+        input_items: layout.input.length,
+      },
+    });
+  }
+
+  private logResponsesCacheUsage(
+    cacheKey: string,
+    usage: ChatResponse['usage'],
+    explicit: boolean,
+  ): void {
+    if (!usage) return;
+    Logger.runtimeEvent('INFO', `responses_cache_usage mode=${explicit ? 'explicit' : 'compatibility'} cached=${usage.cachedReadTokens ?? 0} written=${usage.cachedWriteTokens ?? 0}`, {
+      type: 'responses_cache_usage',
+      payload: {
+        mode: explicit ? 'explicit' : 'compatibility',
+        cache_key_hash: this.hashWirePrefix(cacheKey),
+        input_tokens: usage.promptTokens,
+        cached_tokens: usage.cachedReadTokens ?? 0,
+        cache_write_tokens: usage.cachedWriteTokens ?? 0,
+      },
+    });
   }
 
   private applyResponsesReasoningOptions(body: any): void {
@@ -634,19 +838,33 @@ export class OpenAIProvider implements AIProvider {
     tools?: ToolDefinition[],
     options?: AIRequestOptions,
   ): Promise<ChatResponse> {
-    const body = this.buildResponsesRequestBody(messages, tools, false);
+    let body = this.buildResponsesRequestBody(messages, tools, false, options);
     ContextDebugLogger.dumpSdkBoundary('before', undefined, {
       apiUrl: this.responsesUrl,
       body,
     });
-    const response = await axios.post(this.responsesUrl, body, {
-      headers: this.headers,
-      signal: options?.signal,
-    });
+    let response;
+    try {
+      response = await axios.post(this.responsesUrl, body, {
+        headers: this.headers,
+        signal: options?.signal,
+      });
+    } catch (error) {
+      if (!this.shouldRetryWithoutExplicitCaching(error, body)) throw error;
+      this.responsesExplicitCacheSupported = false;
+      Logger.warning('Responses endpoint rejected explicit prompt caching; retrying once in compatibility mode.');
+      body = this.buildResponsesRequestBody(messages, tools, false, options, true);
+      response = await axios.post(this.responsesUrl, body, {
+        headers: this.headers,
+        signal: options?.signal,
+      });
+    }
     ContextDebugLogger.dumpSdkBoundary('after', undefined, { response: response.data });
     const failure = this.responsesFailureError(response.data);
     if (failure) throw failure;
-    return this.parseResponsesResponse(response.data);
+    const result = this.parseResponsesResponse(response.data);
+    this.logResponsesCacheUsage(body.prompt_cache_key, result.usage, Boolean(body.prompt_cache_options));
+    return result;
   }
 
   private async chatStreamResponses(
@@ -655,16 +873,29 @@ export class OpenAIProvider implements AIProvider {
     callbacks?: StreamCallbacks,
     options?: AIRequestOptions,
   ): Promise<ChatResponse> {
-    const body = this.buildResponsesRequestBody(messages, tools, true);
+    let body = this.buildResponsesRequestBody(messages, tools, true, options);
     ContextDebugLogger.dumpSdkBoundary('before', undefined, {
       apiUrl: this.responsesUrl,
       body,
     });
-    const response = await axios.post(this.responsesUrl, body, {
-      headers: this.headers,
-      responseType: 'stream',
-      signal: options?.signal,
-    });
+    let response;
+    try {
+      response = await axios.post(this.responsesUrl, body, {
+        headers: this.headers,
+        responseType: 'stream',
+        signal: options?.signal,
+      });
+    } catch (error) {
+      if (!this.shouldRetryWithoutExplicitCaching(error, body)) throw error;
+      this.responsesExplicitCacheSupported = false;
+      Logger.warning('Responses endpoint rejected explicit prompt caching; retrying stream once in compatibility mode.');
+      body = this.buildResponsesRequestBody(messages, tools, true, options, true);
+      response = await axios.post(this.responsesUrl, body, {
+        headers: this.headers,
+        responseType: 'stream',
+        signal: options?.signal,
+      });
+    }
 
     return new Promise<ChatResponse>((resolve, reject) => {
       const stream = response.data;
@@ -758,6 +989,7 @@ export class OpenAIProvider implements AIProvider {
           result.content = this.visibleMessageContent({ content: streamedVisibleText });
         }
         ContextDebugLogger.dumpSdkBoundary('after', undefined, { response: finalResponse });
+        this.logResponsesCacheUsage(body.prompt_cache_key, result.usage, Boolean(body.prompt_cache_options));
         settled = true;
         callbacks?.onComplete?.(result);
         resolve(result);
@@ -779,6 +1011,17 @@ export class OpenAIProvider implements AIProvider {
     return {
       providerContent: buildOpenAIProviderContentFromToolCalls(toolCalls, reasoningContent),
     };
+  }
+
+  private shouldRetryWithoutExplicitCaching(error: unknown, body: any): boolean {
+    if (!body?.prompt_cache_options) return false;
+    const status = Number((error as any)?.response?.status ?? (error as any)?.status);
+    if (status !== 400) return false;
+    const data = (error as any)?.response?.data;
+    const detail = `${(error as any)?.message || ''} ${typeof data === 'string' ? data : JSON.stringify(data || {})}`.toLowerCase();
+    return detail.includes('prompt_cache_breakpoint')
+      || detail.includes('prompt_cache_options')
+      || (detail.includes('prompt cache') && /unsupported|unknown|invalid|extra/.test(detail));
   }
 }
 
