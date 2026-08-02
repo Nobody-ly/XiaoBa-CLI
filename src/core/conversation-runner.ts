@@ -3,7 +3,7 @@ import type { ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalFileGrant } f
 import type { TargetRoutes } from '../types/tool';
 import { AIService } from '../utils/ai-service';
 import { ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResult, ToolTranscriptMode } from '../types/tool';
-import { StreamCallbacks, StreamRetryInfo } from '../providers/provider';
+import { AIRequestOptions, StreamCallbacks, StreamRetryInfo } from '../providers/provider';
 import { Logger } from '../utils/logger';
 import { isRateLimitErrorCode } from '../utils/rate-limit-error';
 import { Metrics } from '../utils/metrics';
@@ -220,7 +220,7 @@ export class ConversationRunner {
   private sessionLabel: string;
   private pendingUserInputProvider?: PendingUserInputProvider;
   private promptTraceLogger: PromptTraceLogger;
-  private cacheTraceSink: CacheTraceSink;
+  private cacheTraceSink?: CacheTraceSink;
   private syntheticObservationProvider?: SyntheticObservationProvider;
   private runtimeTransientProvider?: RuntimeTransientProvider;
   private episodeId?: string;
@@ -272,13 +272,18 @@ export class ConversationRunner {
       modelConfig: this.resolveModelConfig(),
     });
     try {
-      this.cacheTraceSink = options?.cacheTraceSink ?? new CacheTraceObserver({
-        sessionId: this.toolExecutionContext?.sessionId,
-        surface: this.toolExecutionContext?.surface,
-        episodeId: this.episodeId,
-      });
+      if (options?.cacheTraceSink) {
+        this.cacheTraceSink = options.cacheTraceSink;
+      } else {
+        const observer = new CacheTraceObserver({
+          sessionId: this.toolExecutionContext?.sessionId,
+          surface: this.toolExecutionContext?.surface,
+          episodeId: this.episodeId,
+        });
+        this.cacheTraceSink = observer.enabled ? observer : undefined;
+      }
     } catch {
-      this.cacheTraceSink = { observe: () => undefined };
+      this.cacheTraceSink = undefined;
     }
   }
 
@@ -416,7 +421,7 @@ export class ConversationRunner {
 
       let response: ChatResponse;
       try {
-        response = await this.requestModelResponse(requestMessages, requestTools, callbacks);
+        response = await this.requestModelResponse(requestMessages, requestTools, turns, callbacks);
       } catch (error: any) {
         this.runObservation(() => this.promptTraceLogger.recordError(turns, error));
         if (this.isMessageSurface() && isModelImageSafetyError(error)) {
@@ -458,14 +463,6 @@ export class ConversationRunner {
 
       const aiDuration = Date.now() - aiStartTime;
       this.runObservation(() => this.promptTraceLogger.recordResponse(turns, response, aiDuration));
-      this.runObservation(() => this.cacheTraceSink.observe({
-        episodeNumber: turns,
-        messages: requestMessages,
-        tools: requestTools,
-        response,
-        durationMs: aiDuration,
-        modelConfig: this.resolveModelConfig(),
-      }));
       Logger.info(`[${this.sessionLabel}Turn ${turns}] AI推理完成，耗时: ${aiDuration}ms`);
 
       if (response.usage) {
@@ -1448,10 +1445,20 @@ export class ConversationRunner {
   private async requestModelResponse(
     messages: Message[],
     activeTools: ToolDefinition[],
+    episodeNumber: number,
     callbacks?: RunnerCallbacks,
   ) {
-    const requestOptions = {
+    const requestOptions: AIRequestOptions = {
       signal: this.toolExecutionContext?.abortSignal,
+      ...(this.cacheTraceSink ? {
+        modelAttemptSink: this.cacheTraceSink,
+        modelAttemptContext: {
+          sessionId: this.toolExecutionContext?.sessionId,
+          surface: this.toolExecutionContext?.surface,
+          episodeId: this.episodeId,
+          episodeNumber,
+        },
+      } : {}),
     };
     try {
       if (this.stream) {

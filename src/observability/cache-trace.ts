@@ -1,16 +1,24 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createHash, randomBytes } from 'crypto';
-import type { ChatConfig, ChatResponse, ContentBlock, Message } from '../types';
+import { createHash } from 'crypto';
+import type { ContentBlock, Message } from '../types';
+import type {
+  ModelAttemptEvent,
+  ModelAttemptSink,
+} from '../providers/provider';
 import type { ToolDefinition, ToolSurface } from '../types/tool';
 import { estimateMessagesTokens, estimateToolsTokens } from '../core/token-estimator';
 import { PathResolver } from '../utils/path-resolver';
+import {
+  classifyProviderErrorForLog,
+  sanitizeProviderErrorMessageForLog,
+} from '../utils/provider-error-log-sanitizer';
 
-export const CACHE_TRACE_SCHEMA = 'xiaoba.cache_trace.v3';
+export const CACHE_TRACE_SCHEMA = 'xiaoba.cache_trace.v4';
 
 export type CacheTraceApiType = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses';
 
-export interface CacheTraceEntryV3 {
+export interface CacheTraceEntryV4 {
   schema: typeof CACHE_TRACE_SCHEMA;
   session: {
     session_id: string;
@@ -21,6 +29,20 @@ export interface CacheTraceEntryV3 {
     episode_number: number;
     run_id: string;
     episode_id?: string;
+  };
+  lifecycle: {
+    call_id: string;
+    attempt_id: string;
+    attempt_number: number;
+    outcome: ModelAttemptEvent['outcome'];
+    event_timestamp: string;
+    duration_ms?: number;
+    retry_number?: number;
+    max_retries?: number;
+    retry_delay_ms?: number;
+    retry_elapsed_ms?: number;
+    retry_max_elapsed_ms?: number;
+    retry_stop_reason?: string;
   };
   request: {
     timestamp: string;
@@ -44,17 +66,17 @@ export interface CacheTraceEntryV3 {
     tools_sha256: string;
     request_sha256: string;
     request_snapshot?: {
-      kind: 'runner-input';
+      kind: 'wire-input';
       messages: Array<Record<string, unknown>>;
       tools: Array<Record<string, unknown>>;
     };
   };
-  response: {
+  response?: {
     timestamp: string;
     duration_ms: number;
     stop_reason?: string;
   };
-  response_usage: {
+  response_usage?: {
     input_tokens: number;
     cache_read_tokens: number;
     cache_write_tokens: number;
@@ -63,20 +85,16 @@ export interface CacheTraceEntryV3 {
     cache_hit_ratio: number;
     cache_write_ratio: number;
   };
+  failure?: {
+    category: string;
+    summary: string;
+    http_status?: number;
+    code?: string;
+    type?: string;
+  };
 }
 
-export interface CacheTraceObservation {
-  episodeNumber: number;
-  messages: Message[];
-  tools: ToolDefinition[];
-  response: ChatResponse;
-  durationMs: number;
-  modelConfig: Pick<ChatConfig, 'provider' | 'model' | 'openaiApiMode'>;
-}
-
-export interface CacheTraceSink {
-  observe(observation: CacheTraceObservation): void;
-}
+export interface CacheTraceSink extends ModelAttemptSink {}
 
 export interface CacheTraceObserverOptions {
   sessionId?: string;
@@ -86,17 +104,15 @@ export interface CacheTraceObserverOptions {
   env?: NodeJS.ProcessEnv;
   traceDir?: string;
   onError?: (error: unknown) => void;
-  writeEntry?: (filePath: string, entry: CacheTraceEntryV3) => Promise<void>;
+  writeEntry?: (filePath: string, entry: CacheTraceEntryV4) => Promise<void>;
 }
 
 /**
- * Best-effort cache observability side channel.
+ * Best-effort dev sidecar for exact provider-attempt lifecycles.
  *
- * Contract:
- * - observe() never throws and never returns a promise to the reply path.
- * - no trace file is read while a conversation is running.
- * - diffing and legacy-schema compatibility belong to the dashboard reader.
- * - writes are serialized in the background and every rejection is consumed.
+ * Each attempt owns one JSONL file. The first line records started and the
+ * second records its terminal outcome. A process crash can therefore be seen
+ * as an incomplete started attempt instead of silently losing the request.
  */
 export class CacheTraceObserver implements CacheTraceSink {
   readonly enabled: boolean;
@@ -107,7 +123,8 @@ export class CacheTraceObserver implements CacheTraceSink {
   private readonly episodeId?: string;
   private readonly traceDir?: string;
   private readonly onError?: (error: unknown) => void;
-  private readonly writeEntry: (filePath: string, entry: CacheTraceEntryV3) => Promise<void>;
+  private readonly writeEntry: (filePath: string, entry: CacheTraceEntryV4) => Promise<void>;
+  private readonly fileByAttemptId = new Map<string, string>();
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(options: CacheTraceObserverOptions = {}) {
@@ -119,15 +136,17 @@ export class CacheTraceObserver implements CacheTraceSink {
     this.episodeId = options.episodeId;
     this.traceDir = options.traceDir;
     this.onError = options.onError;
-    this.writeEntry = options.writeEntry ?? writeEntryAtomically;
+    this.writeEntry = options.writeEntry ?? appendEntry;
   }
 
-  observe(observation: CacheTraceObservation): void {
+  observe(event: ModelAttemptEvent): void {
     if (!this.enabled) return;
 
     try {
-      const entry = this.buildEntry(observation);
-      const filePath = this.resolveFilePath(entry);
+      const entry = this.buildEntry(event);
+      const filePath = this.fileByAttemptId.get(event.attemptId) || this.resolveFilePath(entry);
+      if (event.outcome === 'started') this.fileByAttemptId.set(event.attemptId, filePath);
+      else this.fileByAttemptId.delete(event.attemptId);
       this.writeChain = this.writeChain
         .then(() => this.writeEntry(filePath, entry))
         .catch(error => {
@@ -147,100 +166,123 @@ export class CacheTraceObserver implements CacheTraceSink {
     }
   }
 
-  private buildEntry(observation: CacheTraceObservation): CacheTraceEntryV3 {
-    const now = new Date();
-    const provider = observation.modelConfig.provider || 'openai';
-    const apiType = resolveApiType(observation.modelConfig);
-    const system = summarizeSystemPrompt(observation.messages);
-    const messageSha256s = observation.messages.map(message => hashMessage(message));
-    const toolsCanonical = observation.tools.map(tool => ({
+  private buildEntry(event: ModelAttemptEvent): CacheTraceEntryV4 {
+    const system = summarizeSystemPrompt(event.request.messages as Message[]);
+    const messageSha256s = event.request.messages.map(message => hashMessage(message));
+    const toolsCanonical = event.request.tools.map(tool => ({
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
     }));
     const toolsSha256 = sha256(stableSerialize(toolsCanonical));
     const requestSha256 = sha256(stableSerialize({
-      provider,
-      model: observation.modelConfig.model || 'unknown',
-      apiType,
+      provider: event.provider,
+      model: event.model,
+      apiType: event.apiType,
       system,
       messageSha256s,
       toolsSha256,
     }));
-    const usage = observation.response.usage;
+    const usage = event.response?.usage;
     const inputTokens = finiteNonNegative(usage?.promptTokens);
     const cacheReadTokens = finiteNonNegative(usage?.cachedReadTokens);
     const cacheWriteTokens = finiteNonNegative(usage?.cachedWriteTokens);
     const outputTokens = finiteNonNegative(usage?.completionTokens);
     const freshInputTokens = Math.max(0, inputTokens - cacheReadTokens - cacheWriteTokens);
-    const includeContent = /^(1|true|yes|on)$/i.test(this.env.XIAOBA_CACHE_TRACE_CONTENT || '');
-    const runId = createCacheTraceRunId();
+    const includeContent = event.outcome === 'started'
+      && /^(1|true|yes|on)$/i.test(this.env.XIAOBA_CACHE_TRACE_CONTENT || '');
+    const retry = event.retry;
+    const context = event.context;
+    const episodeNumber = finiteInteger(context?.episodeNumber);
+    const failure = event.error === undefined ? undefined : summarizeFailure(event.error);
 
     return {
       schema: CACHE_TRACE_SCHEMA,
       session: {
-        session_id: this.sessionId,
-        session_type: this.sessionType,
-        surface: this.surface,
+        session_id: context?.sessionId || this.sessionId,
+        session_type: context?.sessionType || this.sessionType,
+        surface: context?.surface || this.surface,
       },
       episode: {
-        episode_number: observation.episodeNumber,
-        run_id: runId,
-        ...(this.episodeId ? { episode_id: this.episodeId } : {}),
+        episode_number: episodeNumber,
+        run_id: event.callId,
+        ...((context?.episodeId || this.episodeId) ? { episode_id: context?.episodeId || this.episodeId } : {}),
+      },
+      lifecycle: {
+        call_id: event.callId,
+        attempt_id: event.attemptId,
+        attempt_number: event.attemptNumber,
+        outcome: event.outcome,
+        event_timestamp: event.timestamp,
+        ...(event.durationMs === undefined ? {} : { duration_ms: finiteNonNegative(event.durationMs) }),
+        ...(retry ? {
+          retry_number: retry.retryNumber,
+          max_retries: retry.maxRetries,
+          ...(retry.delayMs === undefined ? {} : { retry_delay_ms: retry.delayMs }),
+          retry_elapsed_ms: retry.elapsedMs,
+          retry_max_elapsed_ms: retry.maxElapsedMs,
+          ...(retry.stopReason ? { retry_stop_reason: retry.stopReason } : {}),
+        } : {}),
       },
       request: {
-        timestamp: now.toISOString(),
-        provider,
-        model: observation.modelConfig.model || 'unknown',
-        api_type: apiType,
-        cache_strategy: resolveCacheStrategy(apiType),
+        timestamp: event.timestamp,
+        provider: event.provider,
+        model: event.model,
+        api_type: event.apiType,
+        cache_strategy: resolveCacheStrategy(event.apiType),
         system_prompt: system,
-        message_count: observation.messages.length,
+        message_count: event.request.messages.length,
         message_sha256s: messageSha256s,
-        message_roles: observation.messages.map(message => message.role),
-        estimated_tokens: estimateMessagesTokens(observation.messages) + estimateToolsTokens(observation.tools),
-        tools_count: observation.tools.length,
+        message_roles: event.request.messages.map(message => message.role),
+        estimated_tokens: estimateMessagesTokens(event.request.messages as Message[])
+          + estimateToolsTokens(event.request.tools as ToolDefinition[]),
+        tools_count: event.request.tools.length,
         tools_sha256: toolsSha256,
         request_sha256: requestSha256,
         ...(includeContent ? {
           request_snapshot: {
-            kind: 'runner-input' as const,
-            messages: observation.messages.map(snapshotMessage),
+            kind: 'wire-input' as const,
+            messages: event.request.messages.map(snapshotMessage),
             tools: toolsCanonical.map(tool => sanitizeForSnapshot(tool) as Record<string, unknown>),
           },
         } : {}),
       },
-      response: {
-        timestamp: now.toISOString(),
-        duration_ms: finiteNonNegative(observation.durationMs),
-        ...(observation.response.stopReason ? { stop_reason: observation.response.stopReason } : {}),
-      },
-      response_usage: {
-        input_tokens: inputTokens,
-        cache_read_tokens: cacheReadTokens,
-        cache_write_tokens: cacheWriteTokens,
-        fresh_input_tokens: freshInputTokens,
-        output_tokens: outputTokens,
-        cache_hit_ratio: ratio(cacheReadTokens, inputTokens),
-        cache_write_ratio: ratio(cacheWriteTokens, inputTokens),
-      },
+      ...(event.outcome === 'started' ? {} : {
+        response: {
+          timestamp: event.timestamp,
+          duration_ms: finiteNonNegative(event.durationMs),
+          ...(event.response?.stopReason ? { stop_reason: event.response.stopReason } : {}),
+        },
+        response_usage: {
+          input_tokens: inputTokens,
+          cache_read_tokens: cacheReadTokens,
+          cache_write_tokens: cacheWriteTokens,
+          fresh_input_tokens: freshInputTokens,
+          output_tokens: outputTokens,
+          cache_hit_ratio: ratio(cacheReadTokens, inputTokens),
+          cache_write_ratio: ratio(cacheWriteTokens, inputTokens),
+        },
+      }),
+      ...(failure ? { failure } : {}),
     };
   }
 
-  private resolveFilePath(entry: CacheTraceEntryV3): string {
+  private resolveFilePath(entry: CacheTraceEntryV4): string {
     const root = this.traceDir
       || String(this.env.XIAOBA_CACHE_TRACE_DIR || '').trim()
-      || PathResolver.getLogsPath('cache-trace');
-    const timestamp = new Date(entry.request.timestamp);
+      || path.join(PathResolver.getRuntimeDataRoot(this.env), 'logs', 'cache-trace');
+    const timestamp = new Date(entry.lifecycle.event_timestamp);
     const date = Number.isFinite(timestamp.getTime()) ? timestamp : new Date();
     const dateSegment = [
       date.getFullYear(),
       String(date.getMonth() + 1).padStart(2, '0'),
       String(date.getDate()).padStart(2, '0'),
     ].join('-');
-    const safeSession = sanitizeFileSegment(this.sessionId);
-    const turn = String(entry.episode.episode_number).padStart(3, '0');
-    return path.join(path.resolve(root), dateSegment, safeSession, `T${turn}_${entry.episode.run_id}.json`);
+    const safeSession = sanitizeFileSegment(entry.session.session_id);
+    const episode = String(entry.episode.episode_number).padStart(3, '0');
+    const attempt = String(entry.lifecycle.attempt_number).padStart(3, '0');
+    const call = sanitizeFileSegment(entry.lifecycle.call_id);
+    return path.join(path.resolve(root), dateSegment, safeSession, `E${episode}_${call}_A${attempt}.jsonl`);
   }
 
   private reportError(error: unknown): void {
@@ -270,10 +312,10 @@ export function isCacheTraceEnabledForSession(
 
 export function resolveCacheTraceDir(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = String(env.XIAOBA_CACHE_TRACE_DIR || '').trim();
-  return path.resolve(explicit || PathResolver.getLogsPath('cache-trace'));
+  return path.resolve(explicit || path.join(PathResolver.getRuntimeDataRoot(env), 'logs', 'cache-trace'));
 }
 
-function summarizeSystemPrompt(messages: Message[]): CacheTraceEntryV3['request']['system_prompt'] {
+function summarizeSystemPrompt(messages: readonly Message[]): CacheTraceEntryV4['request']['system_prompt'] {
   const stable: string[] = [];
   const dynamic: string[] = [];
 
@@ -303,12 +345,7 @@ function isDynamicSystemMessage(message: Message, text: string): boolean {
   return /^\[(?:transient_[^\]]+|compact_boundary)\]/.test(text);
 }
 
-function resolveApiType(config: CacheTraceObservation['modelConfig']): CacheTraceApiType {
-  if (config.provider === 'anthropic') return 'anthropic-messages';
-  return config.openaiApiMode === 'responses' ? 'openai-responses' : 'openai-chat-completions';
-}
-
-function resolveCacheStrategy(apiType: CacheTraceApiType): CacheTraceEntryV3['request']['cache_strategy'] {
+function resolveCacheStrategy(apiType: CacheTraceApiType): CacheTraceEntryV4['request']['cache_strategy'] {
   if (apiType === 'anthropic-messages') return 'anthropic-explicit-prefix';
   if (apiType === 'openai-responses') return 'openai-prompt-cache-key';
   return 'openai-automatic-prefix';
@@ -399,6 +436,25 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(visit(value));
 }
 
+function summarizeFailure(error: unknown): NonNullable<CacheTraceEntryV4['failure']> {
+  const raw = error as any;
+  const status = finiteInteger(raw?.response?.status ?? raw?.status ?? raw?.statusCode);
+  const code = text(raw?.response?.data?.error?.code ?? raw?.error?.code ?? raw?.code);
+  const type = text(raw?.response?.data?.error?.type ?? raw?.error?.type ?? raw?.type);
+  return {
+    category: classifyProviderErrorForLog(error),
+    summary: sanitizeProviderErrorMessageForLog(
+      raw?.response?.data?.error?.message
+      ?? raw?.response?.data?.message
+      ?? raw?.error?.message
+      ?? error,
+    ),
+    ...(status > 0 ? { http_status: status } : {}),
+    ...(code ? { code } : {}),
+    ...(type ? { type } : {}),
+  };
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -409,8 +465,17 @@ function ratio(numerator: number, denominator: number): number {
 }
 
 function finiteNonNegative(value: unknown): number {
-  const number = Number(value || 0);
+  const number = Number(value ?? 0);
   return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function finiteInteger(value: unknown): number {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+function text(value: unknown): string {
+  return value === undefined || value === null ? '' : String(value).trim().slice(0, 160);
 }
 
 function sanitizeFileSegment(value: string): string {
@@ -423,18 +488,7 @@ function inferSessionType(sessionId: string): string {
   return 'agent';
 }
 
-function createCacheTraceRunId(): string {
-  return `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
-}
-
-async function writeEntryAtomically(filePath: string, entry: CacheTraceEntryV3): Promise<void> {
-  const directory = path.dirname(filePath);
-  await fs.promises.mkdir(directory, { recursive: true });
-  const temporary = `${filePath}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
-  try {
-    await fs.promises.writeFile(temporary, `${JSON.stringify(entry)}\n`, { encoding: 'utf-8', mode: 0o600 });
-    await fs.promises.rename(temporary, filePath);
-  } finally {
-    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
-  }
+async function appendEntry(filePath: string, entry: CacheTraceEntryV4): Promise<void> {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.appendFile(filePath, `${JSON.stringify(entry)}\n`, { encoding: 'utf-8', mode: 0o600 });
 }
