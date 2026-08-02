@@ -453,14 +453,16 @@ export class OpenAIProvider implements AIProvider {
     const currentEpisodeId = cacheContext?.currentEpisodeId;
     const transientMessages = requestMessages.filter(message => this.isTurnDeltaMessage(message));
     const durableMessages = requestMessages.filter(message => !this.isTurnDeltaMessage(message));
+    const checkpointMessages = durableMessages.filter(message => message.__checkpointSummary === true);
+    const chronologicalMessages = durableMessages.filter(message => message.__checkpointSummary !== true);
     const inferredGroups = currentEpisodeId
       ? []
-      : this.groupResponsesExchanges(durableMessages);
+      : this.groupResponsesExchanges(chronologicalMessages);
     const completedEpisodeMessages = currentEpisodeId
-      ? durableMessages.filter(message => message.__episodeId !== currentEpisodeId)
+      ? chronologicalMessages.filter(message => message.__episodeId !== currentEpisodeId)
       : inferredGroups.slice(0, -1).flat();
     const currentEpisodeMessages = currentEpisodeId
-      ? durableMessages.filter(message => message.__episodeId === currentEpisodeId)
+      ? chronologicalMessages.filter(message => message.__episodeId === currentEpisodeId)
       : [];
     const currentGroups = this.groupResponsesExchanges(currentEpisodeMessages);
     const latestGroup = currentEpisodeId
@@ -489,6 +491,7 @@ export class OpenAIProvider implements AIProvider {
       recordBreakpoint('S');
     }
 
+    input.push(...this.convertResponsesMessages(checkpointMessages));
     input.push(...this.convertResponsesMessages(completedEpisodeMessages));
     if (explicitCaching && completedEpisodeMessages.length > 0) {
       input.push(this.buildBreakpointCarrier());

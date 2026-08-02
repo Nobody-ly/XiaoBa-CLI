@@ -65,6 +65,46 @@ test('Responses explicit cache emits S, A, and advancing B boundaries without pe
   assert.equal(messages.some(message => (message as any).prompt_cache_breakpoint), false);
 });
 
+test('Responses keeps a continuation checkpoint before its retained historical evidence', () => {
+  const messages: Message[] = [
+    { role: 'system', content: 'stable system' },
+    {
+      role: 'user',
+      content: 'CONTINUATION_CHECKPOINT',
+      __checkpointSummary: true,
+      __episodeId: 'episode-2',
+    },
+    { role: 'user', content: 'retained old evidence', __episodeId: 'episode-1' },
+    { role: 'assistant', content: 'retained old answer', __episodeId: 'episode-1' },
+    { role: 'user', content: 'current root task', __episodeId: 'episode-2', __episodeInputKind: 'root' },
+    {
+      role: 'assistant', content: null, __episodeId: 'episode-2',
+      tool_calls: [{ id: 'call-current', type: 'function', function: { name: 'lookup', arguments: '{}' } }],
+    },
+    { role: 'tool', content: 'latest result', tool_call_id: 'call-current', __episodeId: 'episode-2' },
+    { role: 'system', content: '[transient_plan_status]\ncurrent step', __cacheScope: 'dynamic' },
+  ];
+
+  const body = (provider() as any).buildResponsesRequestBody(messages, [], false, context);
+  const checkpointIndex = body.input.findIndex((item: any) => item.content === 'CONTINUATION_CHECKPOINT');
+  const oldEvidenceIndex = body.input.findIndex((item: any) => item.content === 'retained old evidence');
+  const rootIndex = body.input.findIndex((item: any) => item.content === 'current root task');
+  const planIndex = body.input.findIndex((item: any) => String(item.content).includes('transient_plan_status'));
+  const callIndex = body.input.findIndex((item: any) => item.type === 'function_call' && item.call_id === 'call-current');
+  const breakpointIndexes = body.input
+    .map((item: any, index: number) => countBreakpoints(item) > 0 ? index : -1)
+    .filter((index: number) => index >= 0);
+
+  assert.equal(breakpointIndexes.length, 3);
+  assert.ok(breakpointIndexes[0] < checkpointIndex);
+  assert.ok(checkpointIndex < oldEvidenceIndex);
+  assert.ok(oldEvidenceIndex < breakpointIndexes[1]);
+  assert.ok(breakpointIndexes[1] < rootIndex);
+  assert.ok(rootIndex < breakpointIndexes[2]);
+  assert.ok(breakpointIndexes[2] < planIndex);
+  assert.ok(planIndex < callIndex);
+});
+
 test('Responses cache key is isolated by session without exposing the session id', () => {
   const messages: Message[] = [{ role: 'system', content: 'stable' }, { role: 'user', content: 'hello' }];
   const first = (provider() as any).buildResponsesRequestBody(messages, [], false, context);
