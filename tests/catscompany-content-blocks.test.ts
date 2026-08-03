@@ -360,6 +360,52 @@ describe('CatsCo content blocks', () => {
     assert.strictEqual(taskStatuses[0].status.run_id, taskStatuses[1].status.run_id);
   });
 
+  test('finishes active task status before disconnecting during shutdown', async () => {
+    const { bot, taskStatuses } = createProcessHarness();
+    const order: string[] = [];
+    bot.shuttingDown = false;
+    bot.connectorReady = true;
+    bot.activeConversationTasks = new Map([
+      ['cc_user:usr1', {
+        runID: 'run-shutdown',
+        topic: 'p2p_1_2',
+        finished: false,
+      }],
+    ]);
+    bot.taskStatusTasks = new Map();
+    bot.sender.sendTaskStatus = async (topic: string, status: any) => {
+      order.push(`status:${status.state}`);
+      taskStatuses.push({ topic, status });
+    };
+    bot.sessionManager = {
+      destroy: async () => {
+        order.push('sessions-destroyed');
+      },
+    };
+    bot.bot = {
+      disconnect: () => {
+        order.push('socket-disconnected');
+      },
+    };
+
+    await bot.destroy();
+
+    assert.deepStrictEqual(order, [
+      'sessions-destroyed',
+      'status:stale',
+      'socket-disconnected',
+    ]);
+    assert.deepStrictEqual(
+      taskStatuses.map(({ topic, status }) => ({
+        topic,
+        runID: status.run_id,
+        state: status.state,
+      })),
+      [{ topic: 'p2p_1_2', runID: 'run-shutdown', state: 'stale' }],
+    );
+    assert.strictEqual(bot.activeConversationTasks.size, 0);
+  });
+
   test('marks the task as failed when the final CatsCo reply cannot be delivered', async () => {
     const { bot, session, taskStatuses } = createProcessHarness();
     session.handleMessage = async () => ({ visibleToUser: true, text: '处理完成' });

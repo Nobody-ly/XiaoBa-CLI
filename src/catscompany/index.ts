@@ -426,6 +426,7 @@ export class CatsCompanyBot {
   /** Bot 自身的 uid，用于过滤自己发出的消息 */
   private botUid: string | null = null;
   private connectorReady = false;
+  private shuttingDown = false;
   private runtime: AdapterRuntimeBundle;
   private runtimeProfile: AdapterRuntimeBundle['profile'];
   private localDeviceGrant?: ScopedLocalDeviceGrant;
@@ -520,6 +521,7 @@ export class CatsCompanyBot {
     });
 
     this.bot.on('message', async (ctx: MessageContext) => {
+      if (this.shuttingDown) return;
       await this.onMessage(ctx);
     });
 
@@ -1797,6 +1799,29 @@ export class CatsCompanyBot {
     return { state: 'completed', summary: '任务已完成' };
   }
 
+  private async finishActiveConversationTasksForShutdown(timeoutMs = 3_000): Promise<void> {
+    const activeTasks = Array.from(this.activeConversationTasks.entries());
+    for (const [sessionKey, task] of activeTasks) {
+      this.finishConversationTask(sessionKey, task, {
+        state: 'stale',
+        summary: 'Agent 正在重启，本次任务已自动中止，可重新发送',
+        error: 'connector shutdown before terminal task status',
+      });
+    }
+
+    const pending = Array.from(this.taskStatusTasks.values());
+    if (pending.length === 0) return;
+
+    let timeout: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>(resolve => {
+        timeout = setTimeout(resolve, Math.max(1, timeoutMs));
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+  }
+
   private releaseSessionExecution(sessionKey: string): void {
     this.sessionExecutionReservations?.delete(sessionKey);
   }
@@ -2950,10 +2975,13 @@ export class CatsCompanyBot {
    * 停止机器人
    */
   async destroy(): Promise<void> {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
     this.connectorReady = false;
     this.stopDeviceRegistrationRefresh();
-    this.bot.disconnect();
     await this.sessionManager.destroy();
+    await this.finishActiveConversationTasksForShutdown();
+    this.bot.disconnect();
     this.pendingAttachments.clear();
     this.messageQueue.clear();
     this.sessionExecutionReservations?.clear();
