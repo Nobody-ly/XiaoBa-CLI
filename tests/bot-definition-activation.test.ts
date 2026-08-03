@@ -271,6 +271,9 @@ describe('BotDefinition activation', () => {
       if (url.pathname === '/api/relay/key') {
         return Response.json({ key: { state: 'active', key: 'sk-cloud-model' } });
       }
+      if (url.pathname === '/v1/models') {
+        return Response.json({ data: [{ id: 'deepseek-v4-flash' }] });
+      }
       if (url.pathname === '/api/bot/model-config/ack') {
         return Response.json({ status: 'applied' });
       }
@@ -387,6 +390,7 @@ describe('BotDefinition activation', () => {
     new FileBotCatalogModelRuntimeRepository({ runtimeRoot }).write({
       schema: 'xiaoba.bot-catalog-model-runtime.v1',
       botId: '43',
+      ownerUid: '7',
       modelId: 'gpt-5.6-sol',
       provider: 'openai',
       apiBase: 'https://relay.example.test/v1',
@@ -402,6 +406,9 @@ describe('BotDefinition activation', () => {
         path: url.pathname,
         body: init?.body ? JSON.parse(String(init.body)) : undefined,
       });
+      if (url.pathname === '/v1/models') {
+        return Response.json({ data: [{ id: 'deepseek-v4-flash' }] });
+      }
       if (url.pathname === '/api/bot/model-config/ack') {
         return Response.json({ status: 'applied' });
       }
@@ -434,6 +441,7 @@ describe('BotDefinition activation', () => {
     assert.equal(runtime?.reasoningEffort, 'max');
     assert.equal(requests.some(item => item.path === '/api/relay/config'), false);
     assert.equal(requests.some(item => item.path === '/api/relay/key'), false);
+    assert.equal(requests.some(item => item.path === '/v1/models'), true);
     assert.deepStrictEqual(
       requests.find(item => item.path === '/api/bot/model-config/ack')?.body,
       { revision: 12, model_id: 'deepseek-v4-flash', reasoning_effort: 'max' },
@@ -539,6 +547,71 @@ describe('BotDefinition activation', () => {
     assert.equal(failureAck.revision, 4);
     assert.equal(failureAck.model_id, 'unknown-model');
     assert.match(failureAck.error, /Unknown CatsCo relay model/);
+  });
+
+  test('reports failure instead of success when a reused owner relay key is rejected', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cloud-rejected-relay-key-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cloud-rejected-relay-key-canonical-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = {} as NodeJS.ProcessEnv;
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      currentBot: { uid: '43', apiKey: 'bot-api-key', boundByUserUid: '7', bindingSource: 'test' },
+    });
+    new FileBotDefinitionRepository({ runtimeRoot, simulatedCloudRoot }).writeCanonical({
+      schema: BOT_DEFINITION_SCHEMA,
+      botId: '43',
+      model: { kind: 'catalog', modelId: 'gpt-5.6-sol' },
+    });
+    new FileBotCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '43',
+      ownerUid: '7',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-revoked-owner-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 1_000_000,
+      openaiApiMode: 'responses',
+    });
+    let failureAck: any;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v1/models') {
+        return new Response('unauthorized', { status: 401 });
+      }
+      if (url.pathname === '/api/bot/model-config/ack') {
+        failureAck = JSON.parse(String(init?.body));
+        return Response.json({ status: 'failed' });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      cloudSelection: {
+        kind: 'catalog',
+        modelId: 'deepseek-v4-flash',
+        reasoningEffort: 'high',
+        revision: 13,
+      },
+    });
+
+    assert.deepStrictEqual(prepared?.definition.model, { kind: 'catalog', modelId: 'gpt-5.6-sol' });
+    assert.match(prepared?.cloudApplyError || '', /relay credential was rejected/);
+    assert.equal(prepared?.cloudRevision, undefined);
+    assert.equal(new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('43'), undefined);
+    assert.equal(failureAck.revision, 13);
+    assert.equal(failureAck.model_id, 'deepseek-v4-flash');
+    assert.match(failureAck.error, /relay credential was rejected/);
   });
 
   test('redacts a cloud custom model API key from runtime errors', () => {

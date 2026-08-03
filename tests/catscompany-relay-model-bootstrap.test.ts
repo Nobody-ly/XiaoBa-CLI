@@ -134,6 +134,7 @@ describe('CatsCo default relay model bootstrap', () => {
       modelId: 'gpt-5.6-terra',
       reasoningEffort: 'xhigh',
       auth: {
+        ownerUid: 'owner-1',
         httpBaseUrl: 'https://cats.example.test',
         serverUrl: 'wss://cats.example.test/v0/channels',
         botUid: 'bot-1',
@@ -142,6 +143,7 @@ describe('CatsCo default relay model bootstrap', () => {
       existingRuntime: {
         schema: 'xiaoba.bot-catalog-model-runtime.v1',
         botId: 'bot-1',
+        ownerUid: 'owner-1',
         modelId: 'minimax-m3',
         provider: 'anthropic',
         apiBase: 'https://relay.example.test/anthropic',
@@ -149,13 +151,14 @@ describe('CatsCo default relay model bootstrap', () => {
         model: 'MiniMax-M3',
         contextWindowTokens: 1_000_000,
       },
-      fetchImpl: (async () => {
+      fetchImpl: (async (input: string | URL | Request) => {
         requested = true;
-        return new Response('unexpected', { status: 500 });
+        assert.equal(new URL(String(input)).pathname, '/v1/models');
+        return Response.json({ data: [{ id: 'gpt-5.6-terra' }] });
       }) as typeof fetch,
     });
 
-    assert.equal(requested, false);
+    assert.equal(requested, true);
     assert.equal(runtime.modelId, 'gpt-5.6-terra');
     assert.equal(runtime.apiBase, 'https://relay.example.test/v1');
     assert.equal(runtime.apiKey, 'sk-existing-owner-key');
@@ -217,4 +220,71 @@ describe('CatsCo default relay model bootstrap', () => {
     assert.equal(runtime.capabilitiesSource, 'models-dev');
     assert.ok(runtime.capabilitiesCheckedAt);
   });
+
+  test('rejects a cached relay credential owned by another account', async () => {
+    await assert.rejects(() => provisionCatsRelayCatalogRuntime({
+      botId: 'bot-1',
+      modelId: 'gpt-5.6-terra',
+      auth: {
+        ownerUid: 'owner-b',
+        httpBaseUrl: 'https://cats.example.test',
+        serverUrl: 'wss://cats.example.test/v0/channels',
+        botUid: 'bot-1',
+        apiKey: 'bot-api-key',
+      },
+      existingRuntime: {
+        schema: 'xiaoba.bot-catalog-model-runtime.v1',
+        botId: 'bot-1',
+        ownerUid: 'owner-a',
+        modelId: 'minimax-m3',
+        provider: 'anthropic',
+        apiBase: 'https://relay.example.test/anthropic',
+        apiKey: 'sk-owner-a',
+        model: 'MiniMax-M3',
+        contextWindowTokens: 1_000_000,
+      },
+      fetchImpl: (async () => Response.json({ data: [] })) as typeof fetch,
+    }), /unbound relay credential/);
+  });
+
+  test('rejects cross-protocol retargeting for a non-standard relay path', () => {
+    assert.throws(() => retargetCatsRelayCatalogRuntime({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: 'bot-1',
+      ownerUid: 'owner-1',
+      modelId: 'minimax-m3',
+      provider: 'anthropic',
+      apiBase: 'https://private-relay.example.test/proxy/models',
+      apiKey: 'sk-private-relay',
+      model: 'MiniMax-M3',
+      contextWindowTokens: 1_000_000,
+    }, 'gpt-5.6-terra'), /cannot be retargeted across protocols/);
+  });
+
+  test('rejects an invalid cached relay key before applying a retargeted model', async () => {
+    await assert.rejects(() => provisionCatsRelayCatalogRuntime({
+      botId: 'bot-1',
+      modelId: 'gpt-5.6-terra',
+      auth: {
+        ownerUid: 'owner-1',
+        httpBaseUrl: 'https://cats.example.test',
+        serverUrl: 'wss://cats.example.test/v0/channels',
+        botUid: 'bot-1',
+        apiKey: 'bot-api-key',
+      },
+      existingRuntime: {
+        schema: 'xiaoba.bot-catalog-model-runtime.v1',
+        botId: 'bot-1',
+        ownerUid: 'owner-1',
+        modelId: 'minimax-m3',
+        provider: 'anthropic',
+        apiBase: 'https://relay.example.test/anthropic',
+        apiKey: 'sk-revoked',
+        model: 'MiniMax-M3',
+        contextWindowTokens: 1_000_000,
+      },
+      fetchImpl: (async () => new Response('unauthorized', { status: 401 })) as typeof fetch,
+    }), /relay credential was rejected/);
+  });
+
 });

@@ -2,6 +2,7 @@ import { createCatsCoLocalConfigService, type CatsCoAuthSnapshot } from '../cats
 import {
   provisionCatsRelayCatalogRuntime,
   refreshCatsRelayCatalogRuntimeCapabilities,
+  validateCatsRelayCatalogRuntimeCredential,
 } from '../catscompany/relay-model-bootstrap';
 import { DEFAULT_CATSCO_RELAY_MODEL_ID } from '../utils/relay-model-profiles';
 import { Logger } from '../utils/logger';
@@ -53,7 +54,7 @@ export interface PreparedBoundBotDefinition {
 export async function prepareBoundBotDefinition(
   options: PrepareBoundBotDefinitionOptions,
 ): Promise<PreparedBoundBotDefinition | undefined> {
-  const localConfig = createCatsCoLocalConfigService({ runtimeRoot: options.runtimeRoot }).load();
+  const localConfig = createCatsCoLocalConfigService({ runtimeRoot: options.runtimeRoot, env: options.env }).load();
   const botId = String(options.botId || localConfig.currentBot?.uid || '').trim();
   if (!botId) return undefined;
 
@@ -65,7 +66,7 @@ export async function prepareBoundBotDefinition(
   let sync = definitionService.pullOrBootstrap(botId);
   let localDefinition = sync?.definition;
   let initializedDefaultFromEmpty = false;
-  const auth = options.auth ?? createCatsCoLocalConfigService({ runtimeRoot: options.runtimeRoot }).getAuthState();
+  const auth = options.auth ?? createCatsCoLocalConfigService({ runtimeRoot: options.runtimeRoot, env: options.env }).getAuthState();
   const cloudDefinitionSync = createBotDefinitionCloudSyncService({
     runtimeRoot: options.runtimeRoot,
     env: options.env,
@@ -305,14 +306,17 @@ export async function prepareBoundBotDefinition(
           });
           definitionService.storeCloudCatalogRuntime(materialized);
           materializedCatalogRuntime = true;
-        } else if (
-          cloudSelection.reasoningEffort
-          && runtime.reasoningEffort !== cloudSelection.reasoningEffort
-        ) {
-          definitionService.storeCloudCatalogRuntime({
-            ...runtime,
-            reasoningEffort: cloudSelection.reasoningEffort,
-          });
+        } else {
+          await validateCatsRelayCatalogRuntimeCredential(runtime, options.fetchImpl ?? fetch);
+          if (
+            cloudSelection.reasoningEffort
+            && runtime.reasoningEffort !== cloudSelection.reasoningEffort
+          ) {
+            definitionService.storeCloudCatalogRuntime({
+              ...runtime,
+              reasoningEffort: cloudSelection.reasoningEffort,
+            });
+          }
         }
         sync = definitionService.acceptCloud(botId, cloudModel);
         definition = sync.definition;
