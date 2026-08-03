@@ -141,3 +141,84 @@ test('interrupted exchanges and empty tool call arrays are repaired locally', ()
     'orphan_tool_result',
   ]);
 });
+
+test('preflight normalizes padded tool exchange IDs without dropping the pair', () => {
+  const messages: Message[] = [
+    { role: 'assistant', content: null, tool_calls: [toolCall(' call_1 ')] },
+    { role: 'tool', tool_call_id: ' call_1 ', content: 'ok' },
+  ];
+
+  const result = prepareProviderRequestMessages(messages);
+
+  assert.notEqual(result.messages, messages);
+  assert.equal(result.messages[0].tool_calls?.[0].id, 'call_1');
+  assert.equal(result.messages[1].tool_call_id, 'call_1');
+  assert.deepEqual(result.summary, {
+    repaired: true,
+    issueCodes: ['normalized_tool_exchange_id'],
+    droppedMessages: 0,
+    droppedToolCalls: 0,
+    droppedToolResults: 0,
+    providerReplayFallbacks: 0,
+  });
+});
+
+test('sanitized restored Responses history preserves all 16 canonical tool pairs', () => {
+  const messages: Message[] = [
+    { role: 'user', content: 'checkpoint one' },
+    { role: 'assistant', content: 'ack one' },
+    { role: 'user', content: 'checkpoint two' },
+    { role: 'assistant', content: 'ack two' },
+    { role: 'user', content: 'checkpoint three' },
+    { role: 'assistant', content: 'ack three' },
+    { role: 'user', content: 'checkpoint four' },
+    { role: 'user', content: 'checkpoint five' },
+  ];
+  let callNumber = 0;
+  for (let exchange = 0; exchange < 10; exchange++) {
+    const calls = Array.from({ length: exchange < 6 ? 2 : 1 }, () => {
+      callNumber++;
+      return toolCall(`call_${callNumber}`, 'lookup', JSON.stringify({ item: callNumber }));
+    });
+    messages.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: calls,
+      providerContent: [
+        { type: 'reasoning', id: `reasoning_${exchange + 1}`, encrypted_content: 'opaque' },
+      ],
+    });
+    for (const call of calls) {
+      messages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        name: call.function.name,
+        content: `result ${call.id}`,
+      });
+    }
+  }
+  assert.equal(messages.length, 34);
+  assert.equal(callNumber, 16);
+
+  const result = prepareProviderRequestMessages(messages);
+  const retainedCalls = result.messages.flatMap(message => message.tool_calls || []);
+  const retainedResults = result.messages.filter(message => message.role === 'tool');
+  const retainedCallIds = new Set(retainedCalls.map(call => call.id));
+
+  assert.equal(result.messages.length, 34);
+  assert.equal(retainedCalls.length, 16);
+  assert.equal(retainedResults.length, 16);
+  assert.equal(retainedCallIds.size, 16);
+  assert.ok(retainedResults.every(message => retainedCallIds.has(String(message.tool_call_id))));
+  assert.ok(result.messages
+    .filter(message => message.role === 'assistant' && message.tool_calls?.length)
+    .every(message => message.providerContent === undefined));
+  assert.deepEqual(result.summary, {
+    repaired: true,
+    issueCodes: ['provider_replay_mismatch'],
+    droppedMessages: 0,
+    droppedToolCalls: 0,
+    droppedToolResults: 0,
+    providerReplayFallbacks: 10,
+  });
+});

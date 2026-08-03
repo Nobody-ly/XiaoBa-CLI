@@ -9,6 +9,7 @@ export type ProviderRequestPreflightIssueCode =
   | 'missing_tool_result'
   | 'orphan_tool_result'
   | 'duplicate_tool_result'
+  | 'normalized_tool_exchange_id'
   | 'provider_replay_mismatch';
 
 export interface ProviderRequestPreflightSummary {
@@ -88,7 +89,8 @@ export function prepareProviderRequestMessages(
         continue;
       }
       candidateCallIds.add(id);
-      validCalls.push(toolCall);
+      if (id !== toolCall.id) recordIssue('normalized_tool_exchange_id');
+      validCalls.push(id === toolCall.id ? toolCall : { ...toolCall, id });
     }
 
     const validCallIds = new Set(validCalls.map(toolCall => toolCall.id));
@@ -108,7 +110,12 @@ export function prepareProviderRequestMessages(
         recordIssue('duplicate_tool_result');
       } else {
         resultIds.add(resultId);
-        retainedResults.push(toolResult);
+        if (resultId !== toolResult.tool_call_id) recordIssue('normalized_tool_exchange_id');
+        retainedResults.push(
+          resultId === toolResult.tool_call_id
+            ? toolResult
+            : { ...toolResult, tool_call_id: resultId },
+        );
       }
       nextIndex++;
     }
@@ -123,7 +130,8 @@ export function prepareProviderRequestMessages(
 
     let retainedAssistant: Message | undefined;
     if (retainedCalls.length > 0) {
-      const callsChanged = retainedCalls.length !== message.tool_calls.length;
+      const callsChanged = retainedCalls.length !== message.tool_calls.length
+        || retainedCalls.some((toolCall, callIndex) => toolCall !== message.tool_calls?.[callIndex]);
       const replayMismatch = Boolean(
         message.providerContent?.length
         && !providerReplayMatchesToolCalls(message.providerContent, retainedCalls),
