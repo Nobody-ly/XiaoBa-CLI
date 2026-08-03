@@ -90,6 +90,14 @@ export interface AIRequestOptions {
   /** Optional best-effort observer; it can never alter request control flow. */
   modelAttemptSink?: ModelAttemptSink;
   modelAttemptContext?: ModelAttemptContext;
+  promptCacheContext?: PromptCacheContext;
+}
+
+export interface PromptCacheContext {
+  sessionKey: string;
+  currentEpisodeId?: string;
+  phase: 'normal' | 'pre_turn' | 'mid_turn' | 'restore';
+  explicitCaching: boolean;
 }
 
 /**
