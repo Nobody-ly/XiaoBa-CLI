@@ -287,4 +287,26 @@ describe('CatsCo default relay model bootstrap', () => {
     }), /relay credential was rejected/);
   });
 
+  test('retarget preserves discovered capabilities instead of resetting them to static', () => {
+    const runtime = retargetCatsRelayCatalogRuntime({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: 'bot-1',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-existing-owner-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 1_000_000,
+      openaiApiMode: 'responses',
+      capabilities: { vision: true, toolCalling: true, streaming: false },
+      capabilitiesSource: 'relay-models',
+      capabilitiesCheckedAt: '2026-01-01T00:00:00.000Z',
+    }, 'deepseek-v4-flash', 'max');
+
+    assert.equal(runtime.modelId, 'deepseek-v4-flash');
+    assert.equal(runtime.capabilitiesSource, 'relay-models');
+    assert.deepStrictEqual(runtime.capabilities, { vision: true, toolCalling: true, streaming: false });
+    assert.equal(runtime.capabilitiesCheckedAt, '2026-01-01T00:00:00.000Z');
+  });
+
 });

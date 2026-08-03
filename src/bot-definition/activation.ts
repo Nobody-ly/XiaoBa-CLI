@@ -3,6 +3,8 @@ import {
   provisionCatsRelayCatalogRuntime,
   refreshCatsRelayCatalogRuntimeCapabilities,
   validateCatsRelayCatalogRuntimeCredential,
+  RelayCredentialRejectedError,
+  RelayCredentialUnreachableError,
 } from '../catscompany/relay-model-bootstrap';
 import { DEFAULT_CATSCO_RELAY_MODEL_ID } from '../utils/relay-model-profiles';
 import { Logger } from '../utils/logger';
@@ -307,13 +309,38 @@ export async function prepareBoundBotDefinition(
           definitionService.storeCloudCatalogRuntime(materialized);
           materializedCatalogRuntime = true;
         } else {
-          await validateCatsRelayCatalogRuntimeCredential(runtime, options.fetchImpl ?? fetch);
+          let effectiveRuntime = runtime;
+          try {
+            await validateCatsRelayCatalogRuntimeCredential(runtime, options.fetchImpl ?? fetch);
+          } catch (error) {
+            if (error instanceof RelayCredentialRejectedError) {
+              // 凭据确实被吊销：有登录态则重新物化，否则交由外层回滚
+              if (!auth?.token) throw error;
+              effectiveRuntime = await provisionCatsRelayCatalogRuntime({
+                botId,
+                modelId: cloudSelection.modelId,
+                reasoningEffort: cloudSelection.reasoningEffort,
+                existingRuntime: runtime,
+                auth,
+                fetchImpl: options.fetchImpl,
+              });
+              definitionService.storeCloudCatalogRuntime(effectiveRuntime);
+              materializedCatalogRuntime = true;
+            } else if (error instanceof RelayCredentialUnreachableError) {
+              // 暂时不可达（5xx/超时/网络）：不阻断，继续使用当前 runtime
+              Logger.warning(
+                `CatsCo relay 凭据暂时无法验证，继续使用当前模型: ${errorMessage(error)}`,
+              );
+            } else {
+              throw error;
+            }
+          }
           if (
             cloudSelection.reasoningEffort
-            && runtime.reasoningEffort !== cloudSelection.reasoningEffort
+            && effectiveRuntime.reasoningEffort !== cloudSelection.reasoningEffort
           ) {
             definitionService.storeCloudCatalogRuntime({
-              ...runtime,
+              ...effectiveRuntime,
               reasoningEffort: cloudSelection.reasoningEffort,
             });
           }

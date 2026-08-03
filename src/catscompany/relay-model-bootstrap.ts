@@ -126,8 +126,9 @@ export function retargetCatsRelayCatalogRuntime(
     contextWindowTokens: profile.contextWindowTokens,
     reasoningEffort: reasoningEffort ?? 'high',
     openaiApiMode: profile.openaiApiMode ?? 'chat_completions',
-    capabilities: { ...profile.capabilities },
-    capabilitiesSource: 'static',
+    capabilities: existing.capabilities ?? { ...profile.capabilities },
+    capabilitiesSource: existing.capabilitiesSource ?? 'static',
+    ...(existing.capabilitiesCheckedAt ? { capabilitiesCheckedAt: existing.capabilitiesCheckedAt } : {}),
   };
 }
 
@@ -236,10 +237,17 @@ async function fetchRelayModelCapabilities(
   }
 }
 
-class RelayCredentialRejectedError extends Error {
+export class RelayCredentialRejectedError extends Error {
   constructor() {
     super('The existing CatsCo relay credential was rejected.');
     this.name = 'RelayCredentialRejectedError';
+  }
+}
+
+export class RelayCredentialUnreachableError extends Error {
+  constructor(message?: string) {
+    super(message || 'The CatsCo relay credential could not be verified right now.');
+    this.name = 'RelayCredentialUnreachableError';
   }
 }
 
@@ -259,12 +267,14 @@ export async function validateCatsRelayCatalogRuntimeCredential(
       throw new RelayCredentialRejectedError();
     }
     if (!response.ok) {
-      throw new Error(`CatsCo relay credential could not be verified (HTTP ${response.status}).`);
+      throw new RelayCredentialUnreachableError(
+        `CatsCo relay credential could not be verified (HTTP ${response.status}).`,
+      );
     }
   } catch (error) {
     if (error instanceof RelayCredentialRejectedError) throw error;
-    if (error instanceof Error && error.message.startsWith('CatsCo relay credential could not be verified')) throw error;
-    throw new Error('CatsCo relay credential could not be verified before applying the model.');
+    if (error instanceof RelayCredentialUnreachableError) throw error;
+    throw new RelayCredentialUnreachableError();
   } finally {
     clearTimeout(timeout);
   }

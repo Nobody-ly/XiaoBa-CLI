@@ -1025,6 +1025,146 @@ describe('BotDefinition activation', () => {
     assert.equal(resolveActiveBotLLMConfig({ runtimeRoot, env })?.config.model, 'cloud-model');
     assert.equal(new FileBotCatalogModelRuntimeRepository({ runtimeRoot }).read('43'), undefined);
   });
+
+  test('keeps the matched cloud catalog runtime when relay credential validation is temporarily unreachable', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-steady-unreachable-runtime-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-steady-unreachable-canonical-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = {} as NodeJS.ProcessEnv;
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      account: { token: 'user-token', uid: '7' },
+      currentBot: { uid: '43', apiKey: 'bot-api-key', boundByUserUid: '7', bindingSource: 'test' },
+    });
+    new FileBotDefinitionRepository({ runtimeRoot, simulatedCloudRoot }).writeCanonical({
+      schema: BOT_DEFINITION_SCHEMA,
+      botId: '43',
+      model: { kind: 'catalog', modelId: 'minimax-m3' },
+    });
+    new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '43',
+      ownerUid: '7',
+      modelId: 'minimax-m3',
+      provider: 'anthropic',
+      apiBase: 'https://relay.example.test/anthropic',
+      apiKey: 'sk-existing-relay',
+      model: 'MiniMax-M3',
+      contextWindowTokens: 1_000_000,
+      reasoningEffort: 'high',
+      openaiApiMode: 'chat_completions',
+      capabilities: { vision: true, toolCalling: true, streaming: true },
+      capabilitiesSource: 'static',
+    });
+
+    let ackBody: any;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v1/models') {
+        return Response.json({ error: 'relay temporarily unavailable' }, { status: 503 });
+      }
+      if (url.pathname === '/api/bot/model-config/ack') {
+        ackBody = init?.body ? JSON.parse(String(init.body)) : {};
+        return Response.json({ status: 'applied' });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      cloudSelection: { kind: 'catalog', modelId: 'minimax-m3', reasoningEffort: 'high', revision: 5 },
+    });
+
+    // 稳态：relay 暂时不可达（5xx）时不应回滚、不应标记失败、不应 ack 失败
+    assert.equal(prepared?.cloudApplyError, undefined);
+    assert.equal(prepared?.materializedCatalogRuntime, false);
+    assert.ok(ackBody, 'expected a success ack to be sent');
+    assert.equal(ackBody?.error, undefined, 'success ack must not carry an apply error');
+    const runtime = new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('43');
+    assert.equal(runtime?.apiKey, 'sk-existing-relay');
+    assert.equal(resolveActiveBotLLMConfig({ runtimeRoot, env })?.config.model, 'MiniMax-M3');
+  });
+
+  test('re-materializes the cloud catalog runtime when the cached credential is rejected but a login token exists', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-steady-rejected-runtime-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-steady-rejected-canonical-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = {} as NodeJS.ProcessEnv;
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      account: { token: 'user-token', uid: '7' },
+      currentBot: { uid: '43', apiKey: 'bot-api-key', boundByUserUid: '7', bindingSource: 'test' },
+    });
+    new FileBotDefinitionRepository({ runtimeRoot, simulatedCloudRoot }).writeCanonical({
+      schema: BOT_DEFINITION_SCHEMA,
+      botId: '43',
+      model: { kind: 'catalog', modelId: 'minimax-m3' },
+    });
+    new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '43',
+      ownerUid: '7',
+      modelId: 'minimax-m3',
+      provider: 'anthropic',
+      apiBase: 'https://relay.example.test/anthropic',
+      apiKey: 'sk-revoked-relay',
+      model: 'MiniMax-M3',
+      contextWindowTokens: 1_000_000,
+      reasoningEffort: 'high',
+      openaiApiMode: 'chat_completions',
+      capabilities: { vision: true, toolCalling: true, streaming: true },
+      capabilitiesSource: 'static',
+    });
+
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/v1/models') {
+        return Response.json({ error: 'unauthorized' }, { status: 401 });
+      }
+      if (url.pathname === '/api/relay/config') {
+        return Response.json({
+          self_service_enabled: true,
+          base_url: 'https://relay.example.test',
+          endpoints: [{ protocol: 'Anthropic-compatible', base_url: 'https://relay.example.test/anthropic' }],
+        });
+      }
+      if (url.pathname === '/api/relay/key') {
+        return Response.json({ key: { state: 'active', key: 'sk-fresh-relay-key' } });
+      }
+      if (url.pathname === '/api/bot/model-config/ack') {
+        return Response.json({ status: 'applied' });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      cloudSelection: { kind: 'catalog', modelId: 'minimax-m3', reasoningEffort: 'high', revision: 6 },
+    });
+
+    // 稳态：缓存凭据被拒（401）且本地有登录 token 时，应重新物化而不是回滚
+    assert.equal(prepared?.cloudApplyError, undefined);
+    assert.equal(prepared?.materializedCatalogRuntime, true);
+    const runtime = new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('43');
+    assert.equal(runtime?.apiKey, 'sk-fresh-relay-key');
+    assert.equal(runtime?.modelId, 'minimax-m3');
+    assert.equal(resolveActiveBotLLMConfig({ runtimeRoot, env })?.config.model, 'MiniMax-M3');
+    assert.equal(resolveActiveBotLLMConfig({ runtimeRoot, env })?.config.apiKey, 'sk-fresh-relay-key');
+  });
 });
 
 const skillEndpointUnavailable = (async (input: string | URL | Request) => (
