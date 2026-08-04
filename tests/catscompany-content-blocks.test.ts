@@ -406,6 +406,65 @@ describe('CatsCo content blocks', () => {
     assert.strictEqual(bot.activeConversationTasks.size, 0);
   });
 
+  test('queued work must not start after the shutdown snapshot (delayed status send)', async () => {
+    const { bot, taskStatuses, handledTurns } = createProcessHarness();
+    const order: string[] = [];
+    const releaseStatuses: Array<() => void> = [];
+
+    bot.shuttingDown = false;
+    bot.connectorReady = true;
+    // 1 个 active task（会进入 shutdown snapshot，被标 stale）
+    bot.activeConversationTasks = new Map([
+      ['cc_user:usr1', { runID: 'run-active', topic: 'p2p_1_2', finished: false }],
+    ]);
+    bot.taskStatusTasks = new Map();
+    // 1 个排队用户消息（shutdown 开始后不得启动）
+    bot.messageQueue.set('cc_user:usr1', [{
+      userMessage: '关闭后不应启动的排队消息',
+      topic: 'p2p_1_2',
+      senderId: 'usr1',
+      seq: 11,
+      receivedAt: Date.now(),
+      source: 'user',
+      runtimeFeedback: [],
+    }]);
+
+    // 延迟 sendTaskStatus：阻塞 stale 投递让 destroy() 卡在 wait，
+    // 给在飞 turn 的 tail drain 留出执行窗口。
+    bot.sender.sendTaskStatus = async (topic: string, status: any) => {
+      order.push(`status:${status.state}`);
+      taskStatuses.push({ topic, status });
+      await new Promise<void>((resolve) => { releaseStatuses.push(resolve); });
+    };
+    bot.sessionManager = { destroy: async () => { order.push('sessions-destroyed'); } };
+    bot.bot = { disconnect: () => { order.push('socket-disconnected'); } };
+
+    const destroyPromise = bot.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // 模拟在飞 turn 返回后的 finally/tail drain：此时 shutdown 已开始
+    await (bot as any).drainMessageQueue('cc_user:usr1');
+    releaseStatuses.forEach((resolve) => resolve());
+    await destroyPromise;
+
+    // shutdown 开始后不得再出现 running / completed 状态
+    assert.deepStrictEqual(
+      taskStatuses.map(({ status }) => status.state),
+      ['stale'],
+    );
+    // 排队消息不得被实际处理
+    assert.strictEqual(handledTurns.length, 0);
+    // 排队工作被显式清除
+    assert.strictEqual(bot.messageQueue.has('cc_user:usr1'), false);
+    // activeConversationTasks 保持为空
+    assert.strictEqual(bot.activeConversationTasks.size, 0);
+    // destroy 顺序保持
+    assert.deepStrictEqual(order, [
+      'sessions-destroyed',
+      'status:stale',
+      'socket-disconnected',
+    ]);
+  });
+
   test('marks the task as failed when the final CatsCo reply cannot be delivered', async () => {
     const { bot, session, taskStatuses } = createProcessHarness();
     session.handleMessage = async () => ({ visibleToUser: true, text: '处理完成' });

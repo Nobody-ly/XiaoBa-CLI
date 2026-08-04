@@ -1720,7 +1720,10 @@ export class CatsCompanyBot {
     return true;
   }
 
-  private beginConversationTask(sessionKey: string, topic: string): ActiveConversationTask {
+  private beginConversationTask(sessionKey: string, topic: string): ActiveConversationTask | undefined {
+    // Shutdown barrier: shutdown 开始后禁止创建新任务（不发 running），
+    // 避免 shutdown snapshot 之后出现孤儿任务（排队消息在 drain 中被丢弃而非留下无终态任务）。
+    if (this.shuttingDown) return undefined;
     const tasks = this.activeConversationTasks ??= new Map<string, ActiveConversationTask>();
     const active = tasks.get(sessionKey);
     if (active && !active.finished) return active;
@@ -2671,6 +2674,8 @@ export class CatsCompanyBot {
    * 排空消息队列：将忙时积压的消息合并为一条，一次性处理
    */
   private async drainMessageQueue(sessionKey: string): Promise<void> {
+    // Shutdown barrier: destroy() 开始后禁止消费队列，排队用户工作不得再启动新任务。
+    if (this.shuttingDown) return;
     const queue = this.messageQueue.get(sessionKey);
     if (!queue || queue.length === 0) return;
 
@@ -2979,9 +2984,8 @@ export class CatsCompanyBot {
     this.shuttingDown = true;
     this.connectorReady = false;
     this.stopDeviceRegistrationRefresh();
-    await this.sessionManager.destroy();
-    await this.finishActiveConversationTasksForShutdown();
-    this.bot.disconnect();
+    // 原子停止：在第一个 await 之前显式取消排队用户工作、子任务批量定时器与云恢复，
+    // 保证 shutdown 开始后 drainMessageQueue / beginConversationTask 不再消费或新建任务。
     this.pendingAttachments.clear();
     this.messageQueue.clear();
     this.sessionExecutionReservations?.clear();
@@ -2993,6 +2997,17 @@ export class CatsCompanyBot {
       if (batch.timer) clearTimeout(batch.timer);
     }
     this.subAgentCompletionBatches.clear();
+    await this.sessionManager.destroy();
+    await this.finishActiveConversationTasksForShutdown();
+    this.bot.disconnect();
+    // 兜底重扫：在飞 handler quiesce 后再扫一次，捕获 snapshot 之后才注册的孤儿任务（幂等）。
+    for (const [sessionKey, task] of Array.from(this.activeConversationTasks.entries())) {
+      this.finishConversationTask(sessionKey, task, {
+        state: 'stale',
+        summary: 'Agent 正在重启，本次任务已自动中止，可重新发送',
+        error: 'connector shutdown before terminal task status',
+      });
+    }
     Logger.info('CatsCo agent 已停止');
   }
 
