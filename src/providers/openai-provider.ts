@@ -474,40 +474,45 @@ export class OpenAIProvider implements AIProvider {
     const prefixHashes: Partial<Record<'S' | 'A' | 'B', string>> = {};
     const breakpointDiagnostics: ResponsesBreakpointDiagnostic[] = [];
 
-    const recordBreakpoint = (label: 'S' | 'A' | 'B') => {
-      const prefixHash = this.hashWirePrefix(input);
+    const recordBreakpoint = (label: 'S' | 'A' | 'B', itemIndex: number) => {
+      if (itemIndex < 0) return;
+      const prefix = input.slice(0, itemIndex + 1);
+      const prefixHash = this.hashWirePrefix(prefix);
       breakpoints.push(label);
       prefixHashes[label] = prefixHash;
       breakpointDiagnostics.push({
         label,
         prefixHash,
-        inputItems: input.length,
-        inputTokenEstimate: estimateJsonTokens(input),
+        inputItems: prefix.length,
+        inputTokenEstimate: estimateJsonTokens(prefix),
       });
     };
 
-    if (explicitCaching) {
-      input.push(this.buildBreakpointCarrier());
-      recordBreakpoint('S');
-    }
-
     input.push(...this.convertResponsesMessages(checkpointMessages));
     input.push(...this.convertResponsesMessages(completedEpisodeMessages));
-    if (explicitCaching && completedEpisodeMessages.length > 0) {
-      input.push(this.buildBreakpointCarrier());
-      recordBreakpoint('A');
-    }
+    const historicalEnd = input.length - 1;
 
+    const completedCurrentStart = input.length;
     for (const group of completedCurrentGroups) {
       input.push(...this.convertResponsesMessages(group));
     }
-    if (explicitCaching && completedCurrentGroups.length > 0) {
-      input.push(this.buildBreakpointCarrier());
-      recordBreakpoint('B');
-    }
+    const completedCurrentEnd = input.length - 1;
 
     input.push(...this.convertResponsesMessages(transientMessages));
     input.push(...this.convertResponsesMessages(latestGroup));
+
+    if (explicitCaching) {
+      const sIndex = this.attachBreakpointToRealInputText(input, 0, input.length - 1, false);
+      const aIndex = completedEpisodeMessages.length > 0
+        ? this.attachBreakpointToRealInputText(input, 0, historicalEnd, true)
+        : -1;
+      const bIndex = completedCurrentGroups.length > 0
+        ? this.attachBreakpointToRealInputText(input, completedCurrentStart, completedCurrentEnd, true)
+        : -1;
+      recordBreakpoint('S', sIndex);
+      recordBreakpoint('A', aIndex);
+      recordBreakpoint('B', bIndex);
+    }
     return { input, breakpoints, prefixHashes, breakpointDiagnostics };
   }
 
@@ -583,15 +588,45 @@ export class OpenAIProvider implements AIProvider {
       || message.__syntheticObservation === true;
   }
 
-  private buildBreakpointCarrier(): any {
-    return {
-      role: 'system',
-      content: [{
-        type: 'input_text',
-        text: '\n',
-        prompt_cache_breakpoint: { mode: 'explicit' },
-      }],
-    };
+  private attachBreakpointToRealInputText(
+    input: any[],
+    startIndex: number,
+    endIndex: number,
+    reverse: boolean,
+  ): number {
+    if (startIndex > endIndex) return -1;
+    const step = reverse ? -1 : 1;
+    for (
+      let itemIndex = reverse ? endIndex : startIndex;
+      reverse ? itemIndex >= startIndex : itemIndex <= endIndex;
+      itemIndex += step
+    ) {
+      const item = input[itemIndex];
+      for (const field of ['content', 'output'] as const) {
+        const value = item?.[field];
+        if (typeof value === 'string' && value.length > 0) {
+          item[field] = [{
+            type: 'input_text',
+            text: value,
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          }];
+          return itemIndex;
+        }
+        if (!Array.isArray(value)) continue;
+        const blocks = reverse ? [...value].reverse() : value;
+        const block = blocks.find(candidate => (
+          candidate?.type === 'input_text'
+          && typeof candidate.text === 'string'
+          && candidate.text.length > 0
+          && !candidate.prompt_cache_breakpoint
+        ));
+        if (block) {
+          block.prompt_cache_breakpoint = { mode: 'explicit' };
+          return itemIndex;
+        }
+      }
+    }
+    return -1;
   }
 
   private isDynamicCacheMessage(message: Message): boolean {

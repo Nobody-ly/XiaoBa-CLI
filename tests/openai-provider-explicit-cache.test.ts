@@ -32,6 +32,34 @@ function countBreakpoints(value: unknown): number {
     + Object.values(record).reduce((sum, item) => sum + countBreakpoints(item), 0);
 }
 
+function breakpointTexts(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray(value)) return value.flatMap(item => breakpointTexts(item));
+  const record = value as Record<string, unknown>;
+  const current = record.prompt_cache_breakpoint && record.type === 'input_text'
+    ? [String(record.text ?? '')]
+    : [];
+  return current.concat(Object.values(record).flatMap(item => breakpointTexts(item)));
+}
+
+function countInputTextBlocks(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  if (Array.isArray(value)) return value.reduce((sum, item) => sum + countInputTextBlocks(item), 0);
+  const record = value as Record<string, unknown>;
+  return (record.type === 'input_text' ? 1 : 0)
+    + Object.values(record).reduce((sum, item) => sum + countInputTextBlocks(item), 0);
+}
+
+function itemText(item: any): string {
+  const value = item?.content ?? item?.output;
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value
+    .filter((block: any) => block?.type === 'input_text')
+    .map((block: any) => String(block.text ?? ''))
+    .join('');
+}
+
 test('Responses explicit cache emits one S, A, and latest B without persisting markers', () => {
   const messages: Message[] = [
     { role: 'system', content: 'stable system' },
@@ -52,15 +80,21 @@ test('Responses explicit cache emits one S, A, and latest B without persisting m
     { role: 'system', content: '[transient_plan_status]\nstep two', __cacheScope: 'dynamic' },
   ];
 
+  const bodyWithoutCache = (provider() as any).buildResponsesRequestBody(messages, [], false, {
+    promptCacheContext: { ...context.promptCacheContext, explicitCaching: false },
+  });
   const body = (provider() as any).buildResponsesRequestBody(messages, [], false, context);
   assert.deepEqual(body.prompt_cache_options, { mode: 'explicit' });
   assert.match(body.instructions, /stable system/);
   assert.match(body.instructions, /transient_skills_list/);
   assert.doesNotMatch(body.instructions, /transient_plan_status/);
   assert.equal(countBreakpoints(body.input), 3);
-  assert.equal(body.input[0].role, 'system');
+  assert.equal(body.input.length, bodyWithoutCache.input.length);
+  assert.equal(countInputTextBlocks(body.input), 3);
+  assert.deepEqual(breakpointTexts(body.input), ['old task', 'old answer', 'first result']);
+  assert.equal(body.input.some((item: any) => item.role === 'system' && countBreakpoints(item) > 0), false);
   assert.equal(body.input.at(-3).role, 'system');
-  assert.match(String(body.input.at(-3).content), /transient_plan_status/);
+  assert.match(itemText(body.input.at(-3)), /transient_plan_status/);
   assert.equal(body.input.at(-2).type, 'function_call');
   assert.equal(body.input.at(-1).type, 'function_call_output');
   assert.equal(messages.some(message => (message as any).prompt_cache_breakpoint), false);
@@ -87,21 +121,21 @@ test('Responses keeps a continuation checkpoint before its retained historical e
   ];
 
   const body = (provider() as any).buildResponsesRequestBody(messages, [], false, context);
-  const checkpointIndex = body.input.findIndex((item: any) => item.content === 'CONTINUATION_CHECKPOINT');
-  const oldEvidenceIndex = body.input.findIndex((item: any) => item.content === 'retained old evidence');
-  const rootIndex = body.input.findIndex((item: any) => item.content === 'current root task');
-  const planIndex = body.input.findIndex((item: any) => String(item.content).includes('transient_plan_status'));
+  const checkpointIndex = body.input.findIndex((item: any) => itemText(item) === 'CONTINUATION_CHECKPOINT');
+  const oldEvidenceIndex = body.input.findIndex((item: any) => itemText(item) === 'retained old evidence');
+  const rootIndex = body.input.findIndex((item: any) => itemText(item) === 'current root task');
+  const planIndex = body.input.findIndex((item: any) => itemText(item).includes('transient_plan_status'));
   const callIndex = body.input.findIndex((item: any) => item.type === 'function_call' && item.call_id === 'call-current');
   const breakpointIndexes = body.input
     .map((item: any, index: number) => countBreakpoints(item) > 0 ? index : -1)
     .filter((index: number) => index >= 0);
 
   assert.equal(breakpointIndexes.length, 3);
-  assert.ok(breakpointIndexes[0] < checkpointIndex);
+  assert.equal(breakpointIndexes[0], checkpointIndex);
   assert.ok(checkpointIndex < oldEvidenceIndex);
-  assert.ok(oldEvidenceIndex < breakpointIndexes[1]);
+  assert.equal(breakpointIndexes[1], body.input.findIndex((item: any) => itemText(item) === 'retained old answer'));
   assert.ok(breakpointIndexes[1] < rootIndex);
-  assert.ok(rootIndex < breakpointIndexes[2]);
+  assert.equal(breakpointIndexes[2], rootIndex);
   assert.ok(breakpointIndexes[2] < planIndex);
   assert.ok(planIndex < callIndex);
 });
@@ -137,14 +171,13 @@ test('Responses breakpoints never rewrite parallel function calls or outputs', (
   const callB = body.input.findIndex((item: any) => item.type === 'function_call' && item.call_id === 'call-b');
   const outputA = body.input.findIndex((item: any) => item.type === 'function_call_output' && item.call_id === 'call-a');
   const outputB = body.input.findIndex((item: any) => item.type === 'function_call_output' && item.call_id === 'call-b');
-  const boundaryAfterTools = body.input.findIndex((item: any, index: number) => (
-    index > outputB && countBreakpoints(item) > 0
-  ));
-
   assert.ok(callA < callB && callB < outputA && outputA < outputB);
-  assert.ok(outputB < boundaryAfterTools);
-  assert.equal(body.input[outputA].output, 'result-a');
-  assert.equal(body.input[outputB].output, 'result-b');
+  assert.equal(countBreakpoints(body.input[callA]), 0);
+  assert.equal(countBreakpoints(body.input[callB]), 0);
+  assert.equal(countBreakpoints(body.input[outputA]), 0);
+  assert.equal(countBreakpoints(body.input[outputB]), 1);
+  assert.equal(itemText(body.input[outputA]), 'result-a');
+  assert.equal(itemText(body.input[outputB]), 'result-b');
   assert.equal(JSON.stringify(messages).includes('prompt_cache_breakpoint'), false);
 });
 
@@ -162,11 +195,11 @@ test('Responses emits only the latest completed-turn breakpoint', () => {
   const breakpointIndexes = body.input
     .map((item: any, index: number) => countBreakpoints(item) > 0 ? index : -1)
     .filter((index: number) => index >= 0);
-  const secondTurnIndex = body.input.findIndex((item: any) => item.content === 'second turn');
-  const latestEventIndex = body.input.findIndex((item: any) => item.content === 'latest event');
+  const secondTurnIndex = body.input.findIndex((item: any) => itemText(item) === 'second turn');
+  const latestEventIndex = body.input.findIndex((item: any) => itemText(item) === 'latest event');
 
   assert.equal(breakpointIndexes.length, 2);
-  assert.ok(secondTurnIndex < breakpointIndexes[1]);
+  assert.equal(breakpointIndexes[1], secondTurnIndex);
   assert.ok(breakpointIndexes[1] < latestEventIndex);
 });
 
