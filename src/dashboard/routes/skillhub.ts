@@ -147,7 +147,7 @@ export function registerSkillHubRoutes(router: Router, options: SkillHubRouteOpt
 
   router.post('/skillhub/developer/share-local-skill', async (req, res) => {
     try {
-      res.status(201).json(await serviceFrom(req.body).shareLocalSkill(req.body || {}));
+      res.status(201).json(await shareLocalSkill(req.body || {}, options));
     } catch (error: any) {
       sendSkillHubError(res, error);
     }
@@ -155,7 +155,7 @@ export function registerSkillHubRoutes(router: Router, options: SkillHubRouteOpt
 
   router.post('/skillhub/share-local-skill', async (req, res) => {
     try {
-      res.status(201).json(await serviceFrom(req.body).shareLocalSkill(req.body || {}));
+      res.status(201).json(await shareLocalSkill(req.body || {}, options));
     } catch (error: any) {
       sendSkillHubError(res, error);
     }
@@ -192,6 +192,63 @@ export function registerSkillHubRoutes(router: Router, options: SkillHubRouteOpt
       sendSkillHubError(res, error);
     }
   });
+}
+
+async function shareLocalSkill(input: any, options: SkillHubRouteOptions): Promise<any> {
+  const expectedBotUid = String(input?.expectedBotUid || '').trim();
+  const expectedUserUid = String(input?.expectedUserUid || '').trim();
+  if (Boolean(expectedBotUid) !== Boolean(expectedUserUid)) {
+    throw skillHubConflict(
+      'expectedBotUid and expectedUserUid must be provided together.',
+      'skillhub.share_scope_incomplete',
+    );
+  }
+
+  // Preserve the existing Dashboard flow when no explicit WebApp scope is
+  // supplied. The WebApp bridge always sends both values and gets the stricter
+  // account/workspace checks below.
+  if (!expectedBotUid) return serviceFrom(input).shareLocalSkill(input);
+  if (!options.getCatsCoAuth) {
+    const error: any = new Error('CatsCo SkillHub login is not configured');
+    error.status = 501;
+    error.code = 'skillhub.catsco_exchange_unavailable';
+    throw error;
+  }
+
+  const cats = await options.getCatsCoAuth();
+  const actualUserUid = String(cats.user?.uid || '').trim();
+  if (actualUserUid !== expectedUserUid) {
+    throw skillHubConflict(
+      'The local CatsCo account changed before the Skill was shared.',
+      'skillhub.share_user_changed',
+    );
+  }
+
+  return withCurrentBotSkillWorkspaceWrite(async (context) => {
+    assertExpectedLocalSkillShareScope(expectedBotUid, context.botId, context.activeBotId);
+    const result = await serviceFrom(input).shareLocalSkill(input);
+    return { ...result, botUid: expectedBotUid };
+  });
+}
+
+export function assertExpectedLocalSkillShareScope(
+  expectedBotUid: string,
+  configuredBotUid?: string,
+  activeBotUid?: string,
+): void {
+  if (configuredBotUid !== expectedBotUid || activeBotUid !== expectedBotUid) {
+    throw skillHubConflict(
+      'The active Bot Skill workspace changed before the Skill was shared.',
+      'skillhub.share_bot_changed',
+    );
+  }
+}
+
+function skillHubConflict(message: string, code: string): Error {
+  const error: any = new Error(message);
+  error.status = 409;
+  error.code = code;
+  return error;
 }
 
 function serviceFrom(_input?: any): SkillHubService {

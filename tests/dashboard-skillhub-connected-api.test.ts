@@ -7,6 +7,7 @@ import * as path from 'path';
 import express from 'express';
 import type { Server } from 'http';
 import { createApiRouter } from '../src/dashboard/routes/api';
+import { assertExpectedLocalSkillShareScope } from '../src/dashboard/routes/skillhub';
 import { loadSkillHubConfig } from '../src/skillhub/config';
 import { CATSCO_SKILLHUB_ROOT_PUBLIC_KEYS, SkillHubTrustedRootKey } from '../src/skillhub/trusted-keys';
 
@@ -182,9 +183,39 @@ describe('dashboard connected SkillHub API', () => {
     assert.equal(fs.existsSync(path.join(testRoot, 'data/skillhub/session.json')), true);
   });
 
+  test('rejects a WebApp share when the local CatsCo account changed', async () => {
+    await startCatsCo();
+    process.env.CATSCO_HTTP_BASE_URL = serverBaseUrl(catsServer!);
+    process.env.CATSCO_USER_TOKEN = 'cats-token';
+    process.env.CATSCO_USER_UID = '116';
+    process.env.CATSCO_USER_NAME = 'lin';
+    process.env.CATSCO_USER_DISPLAY_NAME = 'Lin';
+    await startDashboard();
+
+    const share = await post('/api/skillhub/share-local-skill', {
+      skillName: 'quick-demo',
+      expectedBotUid: '218',
+      expectedUserUid: '999',
+    });
+    assert.equal(share.status, 409);
+    assert.equal(share.body.code, 'skillhub.share_user_changed');
+  });
+
   test('uses the official SkillHub cloud by default', () => {
     delete process.env.CATSCO_SKILLHUB_BASE_URL;
     assert.equal(loadSkillHubConfig().baseUrl, 'https://skillhub.catsco.fun:19990');
+  });
+
+  test('rejects a WebApp share when the configured or active Bot changed', () => {
+    assert.doesNotThrow(() => assertExpectedLocalSkillShareScope('218', '218', '218'));
+    assert.throws(
+      () => assertExpectedLocalSkillShareScope('218', '573', '573'),
+      (error: any) => error?.status === 409 && error?.code === 'skillhub.share_bot_changed',
+    );
+    assert.throws(
+      () => assertExpectedLocalSkillShareScope('218', '218', '573'),
+      (error: any) => error?.status === 409 && error?.code === 'skillhub.share_bot_changed',
+    );
   });
 
   test('ignores request-supplied SkillHub baseUrl overrides', async () => {
