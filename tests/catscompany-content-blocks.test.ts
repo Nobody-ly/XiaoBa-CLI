@@ -171,6 +171,41 @@ describe('CatsCo content blocks', () => {
     assert.equal(sentThinking[0].metadata.delay_ms, 8000);
   });
 
+  test('session callbacks do not emit progress after destroy', async () => {
+    // 回归：destroy() 已开始时，模型流式/进度回调（assistant text、thinking、
+    // tool start/end、retry）不得再向外部发送任何内容（review 2026-08-05）。
+    const { bot, replies, sentThinking, sentTexts, toolUses, toolResults } = createProcessHarness();
+    const callbacks = (bot as any).buildSessionCallbacks('p2p_shutdown');
+
+    // 正常路径先验证一次能发送（确认 callbacks 本身可用）。
+    await callbacks.onAssistantText('正常流式文本');
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].topic, 'p2p_shutdown');
+    assert.equal(replies[0].text, '正常流式文本');
+
+    // destroy 已开始：所有回调必须静默。
+    bot.shuttingDown = true;
+    await callbacks.onAssistantText('destroy 后不应出现的流式文本');
+    await callbacks.onThinking('destroy 后不应出现的思考');
+    await callbacks.onRetry(1, 2, {
+      attempt: 1,
+      maxRetries: 2,
+      delayMs: 1000,
+      elapsedMs: 1000,
+      maxElapsedMs: 60000,
+      status: 500,
+      message: 'upstream error',
+    });
+    await callbacks.onToolStart('execute_shell', 'tool-1', { command: 'echo hi' });
+    await callbacks.onToolEnd('execute_shell', 'tool-1', 'done');
+
+    assert.equal(replies.length, 1, 'destroy 后不得发送 assistant text');
+    assert.equal(sentThinking.length, 0, 'destroy 后不得发送 thinking');
+    assert.equal(sentTexts.length, 0);
+    assert.equal(toolUses.length, 0, 'destroy 后不得发送 tool use');
+    assert.equal(toolResults.length, 0, 'destroy 后不得发送 tool result');
+  });
+
   test('parses text and multiple attachments from one CatsCompany message', () => {
     const bot = Object.create(CatsCompanyBot.prototype);
 

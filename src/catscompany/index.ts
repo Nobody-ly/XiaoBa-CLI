@@ -1215,8 +1215,9 @@ export class CatsCompanyBot {
       ? opts.clearGeneration ?? this.getSessionClearGeneration(opts.sessionKey)
       : undefined;
     const isStaleCallback = (): boolean => Boolean(
-      opts?.sessionKey
-      && callbackGeneration !== this.getSessionClearGeneration(opts.sessionKey),
+      this.shuttingDown
+      || (opts?.sessionKey
+        && callbackGeneration !== this.getSessionClearGeneration(opts.sessionKey)),
     );
     return {
       onRetry: async (attempt, maxRetries, info) => {
@@ -2342,6 +2343,12 @@ export class CatsCompanyBot {
     } catch (err: any) {
       Logger.warning(`后台子任务批量回流失败: ${err.message}`);
       if (batch.clearGeneration !== this.getSessionClearGeneration(sessionKey)) return;
+      // Shutdown fence: destroy() 已开始时不发兜底通知、不重试入队，避免越过
+      // 销毁边界继续产生副作用。
+      if (this.shuttingDown) {
+        Logger.info(`[${sessionKey}] destroy 已开始，跳过批量回流失败兜底`);
+        return;
+      }
       const fallback = this.formatSubAgentCompletionNotice(items, activeSubAgents.length);
       let fallbackDelivered = false;
       if (fallback) {
@@ -2908,6 +2915,10 @@ export class CatsCompanyBot {
       const attempts = (msg.attempts ?? 0) + 1;
       if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
         Logger.info(`[${sessionKey}] clear 后不再重试已出队的旧消息`);
+      } else if (this.shuttingDown) {
+        // Shutdown fence: destroy() 已开始时不再重试或发送错误提示，避免越过
+        // 销毁边界继续产生副作用。
+        Logger.info(`[${sessionKey}] destroy 已开始，跳过队列消息失败重试`);
       } else if (attempts <= 2) {
         const pending = this.messageQueue.get(sessionKey) ?? [];
         pending.unshift({ ...msg, attempts });
