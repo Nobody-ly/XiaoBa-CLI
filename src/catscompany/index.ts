@@ -1499,6 +1499,11 @@ export class CatsCompanyBot {
       }
       : undefined;
 
+    // Shutdown barrier after pre-turn awaits (cloud restore / attachment
+    // download / hydration): if destroy() started meanwhile, drop this turn and
+    // never enter the model path (review 2026-08-05).
+    if (this.shuttingDown) return;
+
     if (!this.tryReserveSessionExecution(key, session)) {
       const queue = this.messageQueue.get(key) ?? [];
       queue.push({
@@ -1545,6 +1550,11 @@ export class CatsCompanyBot {
       }
       if (shouldProcess) {
         task = this.beginConversationTask(key, msg.topic);
+        if (!task) {
+          // Shutdown barrier at the call site: never start the model after
+          // destroy() even when a pre-turn await resumed afterwards.
+          return;
+        }
         const result = await session.handleMessage(userMessage, {
           channel,
           sessionRoute,
@@ -2770,8 +2780,11 @@ export class CatsCompanyBot {
         );
       }
       if (shouldProcess) {
+        // Shutdown barrier: destroy() may have started while queued work ran.
+        if (this.shuttingDown) return;
         if (msg.source === 'user') {
           task = this.beginConversationTask(sessionKey, msg.topic);
+          if (!task) return;
         }
         const result = msg.source === 'subagent_feedback'
           ? await session.handleRuntimeObservation(msg.userMessage as string, {
@@ -2997,6 +3010,10 @@ export class CatsCompanyBot {
       if (batch.timer) clearTimeout(batch.timer);
     }
     this.subAgentCompletionBatches.clear();
+    // Quiesce in-flight handlers so pre-turn awaits (attachment download /
+    // cloud restore / hydration) that resume after shutdown cannot start the
+    // model (review 2026-08-05).
+    await this.waitForActiveHandlersToQuiesce();
     await this.sessionManager.destroy();
     await this.finishActiveConversationTasksForShutdown();
     this.bot.disconnect();
@@ -3009,6 +3026,18 @@ export class CatsCompanyBot {
       });
     }
     Logger.info('CatsCo agent 已停止');
+  }
+
+  /**
+   * Waits (with a bounded timeout) for in-flight message handlers to finish so
+   * destroy() can take a final snapshot after pre-turn awaits have quiesced.
+   */
+  private async waitForActiveHandlersToQuiesce(timeoutMs = 3000): Promise<void> {
+    if (this.activeMessageHandlers <= 0) return;
+    const deadline = Date.now() + timeoutMs;
+    while (this.activeMessageHandlers > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   private enqueuePendingAttachment(sessionKey: string, attachment: PendingAttachment): number {

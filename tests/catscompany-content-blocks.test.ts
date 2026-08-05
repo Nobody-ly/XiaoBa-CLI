@@ -465,6 +465,53 @@ describe('CatsCo content blocks', () => {
     ]);
   });
 
+  test('in-flight pre-turn download does not start the model after destroy', async () => {
+    const { bot, session, taskStatuses, handledTurns } = createProcessHarness();
+    bot.shuttingDown = false;
+    bot.connectorReady = true;
+    bot.activeConversationTasks = new Map();
+    bot.taskStatusTasks = new Map();
+    bot.activeMessageHandlers = 1; // 模拟一个 in-flight handler
+
+    // 附件下载是 pre-turn await：handler 会暂停在 downloadFile 上
+    let releaseDownload: (() => void) | undefined;
+    const downloadGate = new Promise<void>((resolve) => { releaseDownload = resolve; });
+    bot.sender.downloadFile = async () => {
+      await downloadGate;
+      return 'C:\\tmp\\catsco-test\\a.png';
+    };
+    bot.sessionManager = { getOrCreate: () => session, get: () => session };
+
+    const turnPromise = (bot as any).processParsedMessage({
+      topic: 'p2p_1_2',
+      chatType: 'p2p',
+      senderId: 'usr1',
+      seq: 12,
+      text: '看看附件',
+      rawContent: '看看附件',
+      files: [{ url: '/uploads/images/a.png', fileName: 'a.png', type: 'image' }],
+    }, 'cc_user:usr1');
+    // handler 进入下载暂停
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // shutdown 在下载期间开始
+    bot.bot = { disconnect: () => {} };
+    bot.sessionManager.destroy = async () => {};
+    const destroyPromise = bot.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 释放下载 → 旧 handler 恢复，但不得进入模型路径
+    releaseDownload?.();
+    await turnPromise;
+    bot.activeMessageHandlers = 0; // handler 完成
+    await destroyPromise;
+
+    // 模型从未被调用，也没有任何 running/terminal 状态
+    assert.strictEqual(handledTurns.length, 0);
+    assert.deepStrictEqual(taskStatuses.map(({ status }) => status.state), []);
+    assert.strictEqual(bot.activeConversationTasks.size, 0);
+  });
+
   test('marks the task as failed when the final CatsCo reply cannot be delivered', async () => {
     const { bot, session, taskStatuses } = createProcessHarness();
     session.handleMessage = async () => ({ visibleToUser: true, text: '处理完成' });
