@@ -7,6 +7,7 @@ import { prepareBoundBotDefinition } from '../src/bot-definition/activation';
 import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
 import {
   FileBotCatalogModelRuntimeRepository,
+  FileBotCloudCatalogModelRuntimeRepository,
   FileBotDefinitionRepository,
 } from '../src/bot-definition/repository';
 import { resolveActiveBotLLMConfig } from '../src/bot-definition/llm-config-resolver';
@@ -333,5 +334,92 @@ describe('BotDefinition cloud configuration coverage', () => {
     assert.equal(cached?.model.reasoningEffort, 'xhigh');
     assert.equal(prepared?.definition.model.kind, 'catalog');
     assert.equal(prepared?.definition.model.contextWindowTokens, 256000);
+  });
+
+  test('reuses an ownerless legacy runtime when no user token is present and writes ownerUid', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cov-ownerless-runtime-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cov-ownerless-cloud-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = makeEnv(runtimeRoot);
+    // 绑定 bot：boundByUserUid=536（owner），但无 account token（worker 场景）
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      currentBot: {
+        uid: '537',
+        apiKey: 'bot-api-key',
+        boundByUserUid: '536',
+        bindingSource: 'production-recovery',
+      },
+    });
+
+    // 模拟旧版本物化的 runtime：无 ownerUid 字段（grep ownerUid=0）
+    new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '537',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-legacy-relay-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 256000,
+      reasoningEffort: 'xhigh',
+      openaiApiMode: 'responses',
+      capabilities: { vision: true, toolCalling: true, streaming: true },
+      capabilitiesSource: 'relay-models',
+    });
+
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      // 云端切到 deepseek-v4-flash（本地无缓存模型）
+      if (url.pathname === '/api/bot/definition') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      if (url.pathname === '/api/bot/model-config') {
+        return Response.json({
+          uid: 537,
+          configured: true,
+          desired: {
+            kind: 'catalog',
+            model_id: 'deepseek-v4-flash',
+            reasoning_effort: 'max',
+            context_window_tokens: 1000000,
+            revision: 15,
+          },
+        });
+      }
+      // 复用旧凭据的校验：relay /v1/models 应返回 200
+      if (url.pathname === '/v1/models' || url.pathname.endsWith('/models')) {
+        return Response.json({
+          data: [{ id: 'deepseek-v4-flash', capabilities: { vision: true, tool_calling: true, streaming: true } }],
+        });
+      }
+      if (url.pathname === '/api/bot/definition/ack') {
+        return Response.json({ status: 'applied' });
+      }
+      if (url.pathname === '/api/bot/model-config/ack') {
+        return Response.json({ status: 'applied' });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      prepareSkills: false,
+    });
+    assert.equal(prepared?.botId, '537');
+
+    // 复用成功：新模型 runtime 物化，且补写了 ownerUid=536
+    const runtime = new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('537');
+    assert.equal(runtime?.modelId, 'deepseek-v4-flash');
+    assert.equal(runtime?.apiKey, 'sk-legacy-relay-key');
+    assert.equal(runtime?.ownerUid, '536');
+    assert.equal(runtime?.contextWindowTokens, 1_000_000);
   });
 });
