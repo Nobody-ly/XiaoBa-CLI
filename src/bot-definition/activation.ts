@@ -144,14 +144,21 @@ export async function prepareBoundBotDefinition(
             definitionService.storeCatalogRuntime(materialized);
             materializedCatalogRuntime = true;
           } else if (
-            cloudContextWindowTokens !== undefined
-            && runtime.contextWindowTokens !== cloudContextWindowTokens
+            (cloudContextWindowTokens !== undefined
+              && runtime.contextWindowTokens !== cloudContextWindowTokens)
+            || (definition.model.reasoningEffort
+              && runtime.reasoningEffort !== definition.model.reasoningEffort)
           ) {
-            // 云端 contextWindowTokens 权威：已匹配的 runtime 只更新窗口，
+            // 云端配置权威：已匹配的 runtime 只更新窗口/推理强度，
             // 不重新物化凭据（对齐旧协议 cloudSelection 分支的行为）。
             definitionService.storeCatalogRuntime({
               ...runtime,
-              contextWindowTokens: cloudContextWindowTokens,
+              ...(cloudContextWindowTokens !== undefined
+                ? { contextWindowTokens: cloudContextWindowTokens }
+                : {}),
+              ...(definition.model.reasoningEffort
+                ? { reasoningEffort: definition.model.reasoningEffort }
+                : {}),
             });
           } else if (catalogCapabilitiesNeedRefresh(runtime)) {
             const refreshed = await refreshCatsRelayCatalogRuntimeCapabilities(runtime, options.fetchImpl ?? fetch);

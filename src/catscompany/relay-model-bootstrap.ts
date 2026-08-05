@@ -135,7 +135,10 @@ export function retargetCatsRelayCatalogRuntime(
     apiBase: retargetRelayEndpoint(existing, profile.preferredProvider),
     apiKey,
     model: profile.model,
-    contextWindowTokens: contextWindowTokens ?? existing.contextWindowTokens ?? profile.contextWindowTokens,
+    // 复用路径必然是跨模型（调用方仅在 catalogRuntimeMatchesModelId 不成立时
+    // 传入 existingRuntime），绝不能继承旧模型的窗口值，否则会把旧的漂移值
+    // 带进新模型。云端下发优先，否则使用新模型 profile 的标准窗口。
+    contextWindowTokens: contextWindowTokens ?? profile.contextWindowTokens,
     reasoningEffort: reasoningEffort ?? 'high',
     openaiApiMode: profile.openaiApiMode ?? 'chat_completions',
     capabilities: existing.capabilities ?? { ...profile.capabilities },

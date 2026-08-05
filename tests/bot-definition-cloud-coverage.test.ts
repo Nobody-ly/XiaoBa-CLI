@@ -422,4 +422,136 @@ describe('BotDefinition cloud configuration coverage', () => {
     assert.equal(runtime?.ownerUid, '536');
     assert.equal(runtime?.contextWindowTokens, 1_000_000);
   });
+
+  test('reused runtime does not inherit the old model context window when the cloud omits it', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cov-noctx-runtime-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cov-noctx-cloud-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = makeEnv(runtimeRoot);
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      currentBot: { uid: '537', apiKey: 'bot-api-key', boundByUserUid: '536', bindingSource: 'production-recovery' },
+    });
+
+    // 旧模型 gpt-5.6-sol 的 runtime 携带漂移窗口 100 万，且无 ownerUid。
+    new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '537',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-legacy-relay-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 1_000_000,
+      reasoningEffort: 'xhigh',
+      openaiApiMode: 'responses',
+      capabilities: { vision: true, toolCalling: true, streaming: true },
+      capabilitiesSource: 'relay-models',
+    });
+
+    // 云端切到 deepseek-v4-flash 但不下发 context_window_tokens（旧服务器行为）。
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/bot/definition') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      if (url.pathname === '/api/bot/model-config') {
+        return Response.json({
+          uid: 537,
+          configured: true,
+          desired: { kind: 'catalog', model_id: 'deepseek-v4-flash', reasoning_effort: 'max', revision: 15 },
+        });
+      }
+      if (url.pathname === '/v1/models' || url.pathname.endsWith('/models')) {
+        return Response.json({
+          data: [{ id: 'deepseek-v4-flash', capabilities: { vision: true, tool_calling: true, streaming: true } }],
+        });
+      }
+      if (url.pathname === '/api/bot/model-config/ack') {
+        return Response.json({ status: 'applied' });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      prepareSkills: false,
+    });
+    assert.equal(prepared?.botId, '537');
+
+    const runtime = new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('537');
+    assert.equal(runtime?.modelId, 'deepseek-v4-flash');
+    // deepseek 本地 profile 标准窗口是 100 万，但绝不能继承旧 gpt runtime 的漂移值。
+    assert.equal(runtime?.contextWindowTokens, 1_000_000);
+  });
+
+  test('rejects reuse when the runtime belongs to a different owner', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cov-otherowner-runtime-'));
+    const simulatedCloudRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-cov-otherowner-cloud-'));
+    roots.push(runtimeRoot, simulatedCloudRoot);
+    const env = makeEnv(runtimeRoot);
+    createCatsCoLocalConfigService({ runtimeRoot, env }).save({
+      version: 1,
+      endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+      currentBot: { uid: '537', apiKey: 'bot-api-key', boundByUserUid: '536', bindingSource: 'production-recovery' },
+    });
+
+    // runtime 明确归属另一个 owner（999），必须拒绝复用。
+    new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).write({
+      schema: 'xiaoba.bot-catalog-model-runtime.v1',
+      botId: '537',
+      ownerUid: '999',
+      modelId: 'gpt-5.6-sol',
+      provider: 'openai',
+      apiBase: 'https://relay.example.test/v1',
+      apiKey: 'sk-other-owner-key',
+      model: 'gpt-5.6-sol',
+      contextWindowTokens: 256000,
+      reasoningEffort: 'xhigh',
+      openaiApiMode: 'responses',
+      capabilities: { vision: true, toolCalling: true, streaming: true },
+      capabilitiesSource: 'relay-models',
+    });
+
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/bot/definition') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      if (url.pathname === '/api/bot/model-config') {
+        return Response.json({
+          uid: 537,
+          configured: true,
+          desired: { kind: 'catalog', model_id: 'deepseek-v4-flash', reasoning_effort: 'max', revision: 15 },
+        });
+      }
+      if (url.pathname === '/api/bot/definition/skills') {
+        return Response.json({ error: 'not deployed' }, { status: 404 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    }) as typeof fetch;
+
+    // 无 token、runtime 归属他人 → 复用被拒绝，报"需要登录"。
+    await assert.rejects(
+      () => prepareBoundBotDefinition({
+        runtimeRoot,
+        simulatedCloudRoot,
+        env,
+        fetchImpl,
+        prepareSkills: false,
+      }),
+      /account login is required before an unbound relay credential can be reused/,
+    );
+    // 保持不变（仍属 999 的旧模型），未复用为 deepseek
+    const runtime = new FileBotCloudCatalogModelRuntimeRepository({ runtimeRoot }).read('537');
+    assert.equal(runtime?.modelId, 'gpt-5.6-sol');
+    assert.equal(runtime?.ownerUid, '999');
+  });
 });
