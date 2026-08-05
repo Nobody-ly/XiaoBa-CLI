@@ -1,0 +1,390 @@
+import { afterEach, beforeEach, describe, test } from 'node:test';
+import * as assert from 'node:assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
+import {
+  SkillHubThinRpcError,
+  SkillHubThinRpcHandler,
+  SKILLHUB_THIN_RPC_TOOLS,
+  requestDashboardBotSwitch,
+} from '../src/catscompany/skillhub-rpc';
+import { BotSkillWorkspaceService } from '../src/bot-skills/workspace';
+import { shareLocalSkillForCatsCo } from '../src/skillhub/local-share';
+import { scanBotSkillWorkspace } from '../src/bot-skills/local-manifest';
+import { writeBotSkillLocalMarker } from '../src/bot-skills/local-manifest';
+import { applySkillHubLocalMetadata } from '../src/skillhub/local-skill-metadata';
+
+describe('CatsCompany SkillHub thin RPC', () => {
+  let runtimeRoot = '';
+  let scheduledBotUIDs: string[] = [];
+  let handler: SkillHubThinRpcHandler;
+
+  beforeEach(() => {
+    runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-skillhub-rpc-'));
+    const skillsRoot = path.join(runtimeRoot, 'skills');
+    fs.mkdirSync(path.join(skillsRoot, 'local-demo'), { recursive: true });
+    fs.writeFileSync(path.join(skillsRoot, 'local-demo', 'SKILL.md'), [
+      '---',
+      'name: local-demo',
+      'description: Local demo description',
+      '---',
+      '',
+      '# Local Demo',
+      '',
+    ].join('\n'));
+    new BotSkillWorkspaceService(runtimeRoot, skillsRoot).activate('42');
+    createCatsCoLocalConfigService({ runtimeRoot }).save({
+      version: 1,
+      account: { token: 'user-token', uid: '7', username: 'alice' },
+      currentBot: {
+        uid: '42',
+        apiKey: 'bot-key',
+        boundByUserUid: '7',
+      },
+      device: {
+        deviceId: 'alice-device',
+        bodyId: 'alice-device',
+        installationId: 'alice-device',
+      },
+    });
+    scheduledBotUIDs = [];
+    handler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      scheduleBotSwitch: (botUid) => scheduledBotUIDs.push(botUid),
+    });
+  });
+
+  afterEach(() => {
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  });
+
+  test('returns only bounded metadata for the active Bot workspace', async () => {
+    const result = await handler.execute(request({
+      request_id: 'workspace-1',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace,
+    }));
+    assert.equal(result.schema, 'xiaoba.skillhub.local_workspace.v1');
+    assert.equal(result.bot_uid, '42');
+    assert.equal(result.skills_path, path.join(runtimeRoot, 'skills'));
+    const skills = result.skills as Array<Record<string, unknown>>;
+    assert.equal(skills.length, 1);
+    assert.equal(skills[0].name, 'local-demo');
+    assert.equal(skills[0].relative_path, 'local-demo');
+    assert.equal(Object.prototype.hasOwnProperty.call(skills[0], 'path'), false);
+    assert.equal(JSON.stringify(result).includes('# Local Demo'), false);
+  });
+
+  test('rejects another owner, device, inactive Bot, and expired requests', async () => {
+    await assert.rejects(
+      handler.execute(request({ request_id: 'owner', target_owner_user_id: 'usr8' })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'OWNER_MISMATCH',
+    );
+    await assert.rejects(
+      handler.execute(request({ request_id: 'device', target_device_id: 'other-device' })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'DEVICE_MISMATCH',
+    );
+    await assert.rejects(
+      handler.execute(request({ request_id: 'bot', payload: { bot_uid: '44' } })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'BOT_NOT_ACTIVE',
+    );
+    await assert.rejects(
+      handler.execute(request({ request_id: 'expired', expires_at: Date.now() - 1 })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'REQUEST_EXPIRED',
+    );
+  });
+
+  test('schedules an explicit Bot switch once for a replayed request', async () => {
+    const switchRequest = request({
+      request_id: 'switch-1',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.switchBot,
+      payload: { bot_uid: '44' },
+    });
+    const first = await handler.execute(switchRequest);
+    const second = await handler.execute(switchRequest);
+    assert.equal(first.switching, true);
+    assert.deepEqual(second, first);
+    assert.deepEqual(scheduledBotUIDs, ['44']);
+  });
+
+  test('rejects reuse of one request ID for a different operation', async () => {
+    await handler.execute(request({ request_id: 'reused-request' }));
+    await assert.rejects(
+      handler.execute(request({
+        request_id: 'reused-request',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.switchBot,
+        payload: { bot_uid: '44' },
+      })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'REQUEST_ID_CONFLICT',
+    );
+  });
+
+  test('revalidates the current local owner before returning a cached RPC result', async () => {
+    const replayed = request({ request_id: 'owner-replay' });
+    await handler.execute(replayed);
+    const configService = createCatsCoLocalConfigService({ runtimeRoot });
+    const config = configService.load();
+    configService.save({
+      ...config,
+      account: { ...config.account, uid: '8' },
+      currentBot: { ...config.currentBot!, boundByUserUid: '8' },
+    });
+    await assert.rejects(
+      handler.execute(replayed),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'OWNER_MISMATCH',
+    );
+  });
+
+  test('marks a previously public Skill shareable again after local edits', async () => {
+    const entry = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const skillFile = path.join(entry.path, 'SKILL.md');
+    fs.writeFileSync(skillFile, applySkillHubLocalMetadata(fs.readFileSync(skillFile, 'utf8'), {
+      author: 'alice',
+      version: '1.0.0',
+      uploadedAt: '2026-08-06T00:00:00.000Z',
+    }));
+    const canonical = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    writeBotSkillLocalMarker(canonical.path, {
+      schema: 'xiaoba.bot-skill-local.v1',
+      localSkillId: canonical.localSkillId,
+      reference: {
+        source: 'skillhub',
+        skillId: 'alice/local-demo',
+        version: '1.0.0',
+        contentHash: canonical.contentHash,
+      },
+      origin: { skillId: 'alice/local-demo', version: '1.0.0' },
+    });
+    fs.appendFileSync(skillFile, '\nLocal edit\n');
+
+    const result = await handler.execute(request({ request_id: 'workspace-edited-public' }));
+    const skills = result.skills as Array<Record<string, unknown>>;
+    assert.equal(skills[0].can_share, true);
+  });
+
+  test('shares the exact local Skill selected by local_skill_id when names collide', async () => {
+    const secondRoot = path.join(runtimeRoot, 'skills', 'second-demo');
+    fs.mkdirSync(secondRoot, { recursive: true });
+    fs.writeFileSync(path.join(secondRoot, 'SKILL.md'), [
+      '---',
+      'name: local-demo',
+      'description: Second local demo',
+      '---',
+      '',
+      '# Second Local Demo',
+      '',
+    ].join('\n'));
+    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))
+      .find(entry => entry.installName === 'second-demo');
+    assert.ok(selected);
+    const originalFetch = global.fetch;
+    let uploadedSkill = '';
+    let shareResult: Record<string, unknown> | undefined;
+    global.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/auth/catsco-exchange') {
+        return Response.json({
+          user: { id: 'skillhub-user' },
+          roles: ['developer'],
+          permissions: [],
+          catsCo: { uid: '7', username: 'alice', displayName: 'Alice' },
+        });
+      }
+      if (url.pathname === '/api/auth/me') {
+        return Response.json({
+          user: { id: 'skillhub-user' },
+          roles: ['developer'],
+          permissions: [],
+        });
+      }
+      if (url.pathname === '/api/skills/share') {
+        const body = JSON.parse(String(init?.body || '{}'));
+        assert.equal(body.confirmVersionPublish, true);
+        const skillFile = body.source.files.find((file: any) => file.path === 'SKILL.md');
+        uploadedSkill = Buffer.from(skillFile.contentBase64, 'base64').toString('utf8');
+        return Response.json({
+          skillId: 'alice/local-demo',
+          packageVersion: {
+            skillId: 'alice/local-demo',
+            version: '2.0.0',
+            contentHash: 'a'.repeat(64),
+          },
+          skillHub: {
+            author: 'alice',
+            version: '2.0.0',
+            uploadedAt: '2026-08-06T00:00:00.000Z',
+          },
+        }, { status: 201 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    };
+    try {
+      shareResult = await handler.execute(request({
+        request_id: 'share-second-demo',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.share,
+        payload: {
+          bot_uid: '42',
+          local_skill_id: selected.localSkillId,
+          skill_name: selected.name,
+          confirm_publish: true,
+        },
+      }));
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.match(uploadedSkill, /# Second Local Demo/);
+    assert.doesNotMatch(uploadedSkill, /# Local Demo/);
+    assert.equal((shareResult?.skill as Record<string, unknown>)?.id, 'alice/local-demo');
+    assert.equal(shareResult?.latest_version, '2.0.0');
+    assert.equal(shareResult?.content_hash, 'a'.repeat(64));
+  });
+
+  test('rejects a Bot switch when the local Dashboard returns a non-success status', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    await assert.rejects(
+      requestDashboardBotSwitch('44', async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response('', { status: 503 });
+      }),
+      /HTTP 503/,
+    );
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /^http:\/\/127\.0\.0\.1:\d+\/api\/cats\/switch-bot$/);
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { botUid: '44' });
+  });
+
+  test('revalidates the local Skill identity while holding the upload lock', async () => {
+    await assert.rejects(
+      shareLocalSkillForCatsCo({
+        skillName: 'local-demo',
+        expectedLocalSkillId: 'replaced-local-skill',
+        expectedBotUid: '42',
+        expectedUserUid: '7',
+      }, {
+        writeLocalMetadata: false,
+        runtimeRoot,
+        getCatsCoAuth: () => ({
+          token: 'user-token',
+          baseUrl: 'https://app.catsco.cc',
+          user: { uid: '7', username: 'alice' },
+        }),
+      }),
+      (error: any) => error?.code === 'skillhub.share_local_skill_changed',
+    );
+  });
+
+  test('finalizes only when sync still belongs to the requested Bot', async () => {
+    const localEntry = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const reference = {
+      source: 'skillhub' as const,
+      skillId: 'alice/local-demo',
+      version: '1.0.0',
+      contentHash: 'd'.repeat(64),
+    };
+    const finalizeHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      finalizeCurrentBotSkill: async (botUid, input, options) => {
+        assert.equal(botUid, '42');
+        assert.equal(input.localSkillId, localEntry.localSkillId);
+        assert.equal(input.skillName, localEntry.name);
+        assert.deepEqual(input.reference, reference);
+        await options.validateScope?.();
+        return {
+          botId: '42',
+          direction: 'local_to_cloud',
+          skills: [reference],
+        };
+      },
+    });
+    const result = await finalizeHandler.execute(request({
+      request_id: 'finalize-ok',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.finalize,
+      payload: {
+        bot_uid: '42',
+        local_skill_id: localEntry.localSkillId,
+        skill_name: localEntry.name,
+        skill_id: reference.skillId,
+        version: reference.version,
+        content_hash: reference.contentHash,
+      },
+    }));
+    assert.equal(result.direction, 'local_to_cloud');
+
+    const switchedHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      finalizeCurrentBotSkill: async () => ({
+        botId: '43',
+        direction: 'none',
+        skills: [reference],
+      }),
+    });
+    await assert.rejects(
+      switchedHandler.execute(request({
+        request_id: 'finalize-switched',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.finalize,
+        payload: {
+          bot_uid: '42',
+          local_skill_id: localEntry.localSkillId,
+          skill_name: localEntry.name,
+          skill_id: reference.skillId,
+          version: reference.version,
+          content_hash: reference.contentHash,
+        },
+      })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'BOT_NOT_ACTIVE',
+    );
+  });
+
+  test('stops finalization when the device request expires during publication wait', async () => {
+    const localEntry = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const reference = {
+      source: 'skillhub' as const,
+      skillId: 'alice/local-demo',
+      version: '1.0.0',
+      contentHash: 'e'.repeat(64),
+    };
+    const expiringHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      finalizeCurrentBotSkill: async (_botUid, _input, options) => {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        await options.validateScope?.();
+        return {
+          botId: '42',
+          direction: 'local_to_cloud',
+          skills: [reference],
+        };
+      },
+    });
+    await assert.rejects(
+      expiringHandler.execute(request({
+        request_id: 'finalize-expired-during-wait',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.finalize,
+        expires_at: Date.now() + 5,
+        payload: {
+          bot_uid: '42',
+          local_skill_id: localEntry.localSkillId,
+          skill_name: localEntry.name,
+          skill_id: reference.skillId,
+          version: reference.version,
+          content_hash: reference.contentHash,
+        },
+      })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'REQUEST_EXPIRED',
+    );
+  });
+
+  function request(overrides: Record<string, any> = {}): any {
+    return {
+      type: 'request',
+      request_id: 'request-1',
+      target_owner_user_id: 'usr7',
+      target_device_id: 'alice-device',
+      device_id: 'alice-device',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace,
+      payload: { bot_uid: '42' },
+      expires_at: Date.now() + 30_000,
+      ...overrides,
+    };
+  }
+});

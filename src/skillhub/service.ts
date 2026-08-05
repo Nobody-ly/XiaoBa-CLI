@@ -231,7 +231,10 @@ export class SkillHubService {
     });
   }
 
-  async shareLocalSkill(input: any): Promise<any> {
+  async shareLocalSkill(
+    input: any,
+    options: { writeLocalMetadata?: boolean; localSkillPath?: string } = {},
+  ): Promise<any> {
     const skillName = String(input.skillName || input.skill || input.name || '').trim();
     if (!skillName) {
       const error: any = new Error('skillName required');
@@ -240,7 +243,9 @@ export class SkillHubService {
       throw error;
     }
 
-    const localSkill = findLocalShareableSkill(skillName);
+    const localSkill = options.localSkillPath
+      ? findLocalShareableSkillAtPath(options.localSkillPath, skillName)
+      : findLocalShareableSkill(skillName);
     if (!localSkill) {
       const available = listLocalSkillNames().join(', ');
       const error: any = new Error(`Local skill not found: ${skillName}${available ? `. Available skills: ${available}` : ''}`);
@@ -278,14 +283,19 @@ export class SkillHubService {
       },
     });
     const skillHubMetadata = skillHubMetadataFromShareResponse(submission);
-    if (skillHubMetadata) {
+    if (skillHubMetadata && options.writeLocalMetadata !== false) {
       writeSkillHubLocalMetadata(skill.filePath, skillHubMetadata);
     }
 
     return {
       ok: true,
       skill: {
-        id: submission?.skill?.skillId || submission?.upload?.skillId || submission?.submission?.normalizedManifest?.id || skill.metadata.name,
+        id: submission?.skillId
+          || submission?.skill?.skillId
+          || submission?.upload?.skillId
+          || submission?.packageVersion?.skillId
+          || submission?.submission?.normalizedManifest?.id
+          || skill.metadata.name,
         name: skill.metadata.name,
         description: skill.metadata.description,
         path: localPath,
@@ -293,8 +303,15 @@ export class SkillHubService {
       submission: submission?.submission || submission,
       existing: submission?.existing,
       requiresConfirmation: submission?.requiresConfirmation,
-      latestVersion: submission?.latestVersion,
-      contentHash: submission?.contentHash,
+      latestVersion: submission?.latestVersion
+        || submission?.skill?.latestVersion
+        || submission?.skill?.version
+        || submission?.upload?.version
+        || submission?.packageVersion?.latestVersion
+        || submission?.packageVersion?.version
+        || skillHubMetadata?.version,
+      contentHash: submission?.contentHash || submission?.packageVersion?.contentHash,
+      skillHub: skillHubMetadata,
     };
   }
 
@@ -349,6 +366,10 @@ function normalizeRegistryEntryVersion(entry: SkillHubRegistryEntry | undefined,
 const SOURCE_SKIP_DIRS = new Set([
   '.git',
   'node_modules',
+  '.ssh',
+  '.aws',
+  '.kube',
+  '.gnupg',
 ]);
 const SOURCE_SKIP_FILES = new Set([
   'skill.json',
@@ -356,26 +377,46 @@ const SOURCE_SKIP_FILES = new Set([
   'SBOM.json',
   '.xiaoba-bundled-skill.json',
   '.xiaoba-skillhub-install.json',
+  '.xiaoba-bot-skill.json',
 ]);
 const MAX_SOURCE_FILES = 200;
 const MAX_SOURCE_TOTAL_BYTES = 20 * 1024 * 1024;
 const MAX_SOURCE_SINGLE_FILE_BYTES = 2 * 1024 * 1024;
 
 function collectSkillSourceFiles(localPath: string): Array<{ path: string; contentBase64: string }> {
-  const root = path.resolve(String(localPath || '').trim());
-  if (!root || !fs.existsSync(root)) return [];
-  const stat = fs.statSync(root);
+  const inputPath = String(localPath || '').trim();
+  if (!inputPath) return [];
+  const root = path.resolve(inputPath);
+  if (!fs.existsSync(root)) return [];
+  const stat = fs.lstatSync(root);
+  if (stat.isSymbolicLink()) {
+    throw skillSourceLimitError(
+      'A symbolic link cannot be shared as a Skill package.',
+      'skillhub.local_skill_unsafe_link',
+      400,
+    );
+  }
   const baseDir = stat.isDirectory() ? root : path.dirname(root);
-  const files = stat.isDirectory() ? walk(baseDir) : [root];
+  const files = (stat.isDirectory() ? walk(baseDir) : [root]).sort();
   let total = 0;
   const result: Array<{ path: string; contentBase64: string }> = [];
 
   for (const filePath of files) {
-    if (result.length >= MAX_SOURCE_FILES) break;
-    const fileStat = fs.statSync(filePath);
-    if (!fileStat.isFile() || fileStat.size > MAX_SOURCE_SINGLE_FILE_BYTES) continue;
+    const fileStat = fs.lstatSync(filePath);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) continue;
+    if (fileStat.size > MAX_SOURCE_SINGLE_FILE_BYTES) {
+      throw skillSourceLimitError(
+        `Skill file exceeds the ${MAX_SOURCE_SINGLE_FILE_BYTES}-byte sharing limit.`,
+        'skillhub.local_skill_file_too_large',
+      );
+    }
     total += fileStat.size;
-    if (total > MAX_SOURCE_TOTAL_BYTES) break;
+    if (total > MAX_SOURCE_TOTAL_BYTES) {
+      throw skillSourceLimitError(
+        `Skill package exceeds the ${MAX_SOURCE_TOTAL_BYTES}-byte sharing limit.`,
+        'skillhub.local_skill_package_too_large',
+      );
+    }
     const relative = path.relative(baseDir, filePath).replace(/\\/g, '/');
     if (!isSafePackagePath(relative)) continue;
     result.push({
@@ -391,18 +432,30 @@ function walk(dir: string): string[] {
   const result: string[] = [];
   const visit = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (result.length >= MAX_SOURCE_FILES) return;
       if (entry.isSymbolicLink()) continue;
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         if (!SOURCE_SKIP_DIRS.has(entry.name)) visit(fullPath);
       } else if (entry.isFile() && !SOURCE_SKIP_FILES.has(entry.name)) {
         result.push(fullPath);
+        if (result.length > MAX_SOURCE_FILES) {
+          throw skillSourceLimitError(
+            `Skill package exceeds the ${MAX_SOURCE_FILES}-file sharing limit.`,
+            'skillhub.local_skill_too_many_files',
+          );
+        }
       }
     }
   };
   visit(dir);
   return result;
+}
+
+function skillSourceLimitError(message: string, code: string, status = 413): Error {
+  const error: any = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
 }
 
 function isSafePackagePath(packagePath: string): boolean {
@@ -470,18 +523,43 @@ function splitWords(text: string): string[] {
 }
 
 function findLocalShareableSkill(skillName: string): { skill: Skill } | undefined {
+  const matches: Skill[] = [];
   for (const skillFile of listLocalSkillFiles()) {
     try {
       const skill = SkillParser.parse(skillFile);
       const dirName = path.basename(path.dirname(skillFile));
       if (skill.metadata.name === skillName || dirName === skillName) {
-        return { skill };
+        matches.push(skill);
       }
     } catch {
       // Ignore broken local skills so one bad folder does not block sharing others.
     }
   }
-  return undefined;
+  if (matches.length > 1) {
+    const error: any = new Error(`Multiple local Skills match "${skillName}". Select one by its local Skill ID.`);
+    error.status = 409;
+    error.code = 'skillhub.local_skill_ambiguous';
+    throw error;
+  }
+  return matches[0] ? { skill: matches[0] } : undefined;
+}
+
+function findLocalShareableSkillAtPath(
+  localSkillPath: string,
+  skillName: string,
+): { skill: Skill } | undefined {
+  const root = path.resolve(String(localSkillPath || '').trim());
+  if (!root || !fs.existsSync(root)) return undefined;
+  const rootStat = fs.lstatSync(root);
+  const skillFile = path.join(root, 'SKILL.md');
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || !fs.existsSync(skillFile)) {
+    return undefined;
+  }
+  const skillStat = fs.lstatSync(skillFile);
+  if (skillStat.isSymbolicLink() || !skillStat.isFile()) return undefined;
+  const skill = SkillParser.parse(skillFile);
+  const dirName = path.basename(root);
+  return skill.metadata.name === skillName || dirName === skillName ? { skill } : undefined;
 }
 
 function listLocalSkillNames(): string[] {

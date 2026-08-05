@@ -32,6 +32,7 @@ export async function startDashboard(
   const app = express();
   const envPackaged = /^(1|true|yes)$/i.test(process.env.XIAOBA_IS_PACKAGED || '');
   const projectRoot = controllers.projectRoot || (envPackaged ? process.env.XIAOBA_APP_ROOT : undefined) || process.cwd();
+  process.env.XIAOBA_DASHBOARD_PORT = String(port);
   const serviceManager = new ServiceManager(projectRoot);
 
   app.use(express.json({ limit: '25mb' }));

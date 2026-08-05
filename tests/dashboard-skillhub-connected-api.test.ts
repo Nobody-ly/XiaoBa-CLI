@@ -138,6 +138,9 @@ describe('dashboard connected SkillHub API', () => {
     fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', 'SBOM.json'), '{}\n');
     fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.xiaoba-bundled-skill.json'), '{}\n');
     fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.xiaoba-skillhub-install.json'), '{}\n');
+    fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.xiaoba-bot-skill.json'), '{}\n');
+    fs.mkdirSync(path.join(testRoot, 'skills', 'quick-demo', '.ssh'), { recursive: true });
+    fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.ssh', 'id_test'), 'private\n');
 
     const fixture = createFixture();
     await startCloud(fixture);
@@ -150,6 +153,12 @@ describe('dashboard connected SkillHub API', () => {
     assert.equal(share.body.ok, true);
     assert.equal(share.body.skill.id, 'lin/quick-demo');
     assert.equal(share.body.skill.name, 'quick-demo');
+    assert.equal(share.body.latestVersion, '1.0.0');
+    assert.deepEqual(share.body.skillHub, {
+      author: 'lin',
+      version: '1.0.0',
+      uploadedAt: '2026-05-28T00:00:00.000Z',
+    });
     assert.equal(share.body.submission.request.quickShare, true);
     assert.equal(share.body.submission.request.manifest.id, 'quick-demo');
     assert.equal(share.body.submission.request.manifest.name, 'quick-demo');
@@ -162,6 +171,8 @@ describe('dashboard connected SkillHub API', () => {
     assert.equal(uploadedPaths.includes('SBOM.json'), false);
     assert.equal(uploadedPaths.includes('.xiaoba-bundled-skill.json'), false);
     assert.equal(uploadedPaths.includes('.xiaoba-skillhub-install.json'), false);
+    assert.equal(uploadedPaths.includes('.xiaoba-bot-skill.json'), false);
+    assert.equal(uploadedPaths.some((value: string) => value.startsWith('.ssh/')), false);
     const skillText = fs.readFileSync(path.join(testRoot, 'skills', 'quick-demo', 'SKILL.md'), 'utf8');
     assert.match(skillText, /skillhub_author:\s+["']?lin["']?/);
     assert.match(skillText, /skillhub_version:\s+["']?1\.0\.0["']?/);
