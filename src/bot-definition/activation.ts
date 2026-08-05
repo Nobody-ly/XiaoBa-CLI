@@ -302,6 +302,7 @@ export async function prepareBoundBotDefinition(
             botId,
             modelId: cloudSelection.modelId,
             reasoningEffort: cloudSelection.reasoningEffort,
+            contextWindowTokens: cloudSelection.contextWindowTokens,
             existingRuntime: runtime ?? definitionService.readCatalogRuntime(botId),
             auth,
             fetchImpl: options.fetchImpl,
@@ -320,6 +321,7 @@ export async function prepareBoundBotDefinition(
                 botId,
                 modelId: cloudSelection.modelId,
                 reasoningEffort: cloudSelection.reasoningEffort,
+                contextWindowTokens: cloudSelection.contextWindowTokens,
                 existingRuntime: runtime,
                 auth,
                 fetchImpl: options.fetchImpl,
@@ -336,12 +338,19 @@ export async function prepareBoundBotDefinition(
             }
           }
           if (
-            cloudSelection.reasoningEffort
-            && effectiveRuntime.reasoningEffort !== cloudSelection.reasoningEffort
+            (cloudSelection.reasoningEffort
+              && effectiveRuntime.reasoningEffort !== cloudSelection.reasoningEffort)
+            || (cloudSelection.contextWindowTokens !== undefined
+              && effectiveRuntime.contextWindowTokens !== cloudSelection.contextWindowTokens)
           ) {
             definitionService.storeCloudCatalogRuntime({
               ...effectiveRuntime,
-              reasoningEffort: cloudSelection.reasoningEffort,
+              ...(cloudSelection.reasoningEffort
+                ? { reasoningEffort: cloudSelection.reasoningEffort }
+                : {}),
+              ...(cloudSelection.contextWindowTokens !== undefined
+                ? { contextWindowTokens: cloudSelection.contextWindowTokens }
+                : {}),
             });
           }
         }

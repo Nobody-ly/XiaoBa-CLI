@@ -12,6 +12,12 @@ export interface CatalogBotModelDefinition {
   kind: 'catalog';
   modelId: string;
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Cloud-authoritative context window for the catalog model when the server
+   * ships it. When present it must win over any device-local profile value so
+   * the catalog cannot drift from what devices actually send upstream.
+   */
+  contextWindowTokens?: number;
 }
 
 /**
