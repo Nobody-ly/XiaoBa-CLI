@@ -215,9 +215,11 @@ async function shareLocalSkill(input: any, options: SkillHubRouteOptions): Promi
     throw error;
   }
 
-  const cats = await options.getCatsCoAuth();
-  const actualUserUid = String(cats.user?.uid || '').trim();
-  if (actualUserUid !== expectedUserUid) {
+  // Keep the existing fast-fail behavior for an already changed CatsCo
+  // account. This check is only a preflight; the identity is exchanged and
+  // checked again inside the workspace lock immediately before upload.
+  const preflightCats = await options.getCatsCoAuth();
+  if (String(preflightCats.user?.uid || '').trim() !== expectedUserUid) {
     throw skillHubConflict(
       'The local CatsCo account changed before the Skill was shared.',
       'skillhub.share_user_changed',
@@ -226,7 +228,26 @@ async function shareLocalSkill(input: any, options: SkillHubRouteOptions): Promi
 
   return withCurrentBotSkillWorkspaceWrite(async (context) => {
     assertExpectedLocalSkillShareScope(expectedBotUid, context.botId, context.activeBotId);
-    const result = await serviceFrom(input).shareLocalSkill(input);
+    // WebApp shares must not reuse the process-wide SkillHub cookie. Re-exchange
+    // the current CatsCo identity inside the workspace lock and keep the
+    // resulting SkillHub session in memory for this request only.
+    const cats = await options.getCatsCoAuth!();
+    const service = serviceFrom(input, { sessionScope: 'memory' });
+    const skillHubAuth = await service.loginWithCatsCo(cats);
+    const actualUserUid = String(skillHubAuth.catsCo?.uid || '').trim();
+    if (!actualUserUid) {
+      throw skillHubConflict(
+        'SkillHub did not return the CatsCo identity for the exchanged session.',
+        'skillhub.share_identity_unavailable',
+      );
+    }
+    if (actualUserUid !== expectedUserUid) {
+      throw skillHubConflict(
+        'The local CatsCo account changed before the Skill was shared.',
+        'skillhub.share_user_changed',
+      );
+    }
+    const result = await service.shareLocalSkill(input);
     return { ...result, botUid: expectedBotUid };
   });
 }
@@ -251,8 +272,8 @@ function skillHubConflict(message: string, code: string): Error {
   return error;
 }
 
-function serviceFrom(_input?: any): SkillHubService {
-  return new SkillHubService();
+function serviceFrom(_input?: any, options: { sessionScope?: 'persistent' | 'memory' } = {}): SkillHubService {
+  return new SkillHubService(options);
 }
 
 function sendSkillHubError(res: any, error: any): void {
