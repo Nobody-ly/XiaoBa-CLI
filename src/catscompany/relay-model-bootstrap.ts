@@ -16,6 +16,11 @@ export interface CatsRelayBootstrapOptions {
   modelId: string;
   auth: CatsCoAuthSnapshot;
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Cloud-authoritative context window for the catalog model. When provided it
+   * must win over the local profile so the device follows the catalog.
+   */
+  contextWindowTokens?: number;
   existingRuntime?: BotCatalogModelRuntime;
   fetchImpl?: typeof fetch;
 }
@@ -55,6 +60,7 @@ export async function provisionCatsRelayCatalogRuntime(
         options.existingRuntime,
         profile.id,
         options.reasoningEffort,
+        options.contextWindowTokens,
       );
       await validateCatsRelayCatalogRuntimeCredential(retargeted, fetchImpl);
       return retargeted;
@@ -96,7 +102,7 @@ export async function provisionCatsRelayCatalogRuntime(
     apiBase: relayEndpointForProvider(relayConfig, profile.preferredProvider),
     apiKey,
     model: profile.model,
-    contextWindowTokens: profile.contextWindowTokens,
+    contextWindowTokens: options.contextWindowTokens ?? profile.contextWindowTokens,
     reasoningEffort: options.reasoningEffort ?? 'high',
     openaiApiMode: profile.openaiApiMode ?? 'chat_completions',
     capabilities,
@@ -109,6 +115,7 @@ export function retargetCatsRelayCatalogRuntime(
   existing: BotCatalogModelRuntime,
   modelId: string,
   reasoningEffort?: ReasoningEffort,
+  contextWindowTokens?: number,
 ): BotCatalogModelRuntime {
   const profile = findRelayModelProfile(modelId);
   if (!profile) throw new Error(`Unknown CatsCo relay model: ${modelId}`);
@@ -123,7 +130,7 @@ export function retargetCatsRelayCatalogRuntime(
     apiBase: retargetRelayEndpoint(existing, profile.preferredProvider),
     apiKey,
     model: profile.model,
-    contextWindowTokens: profile.contextWindowTokens,
+    contextWindowTokens: contextWindowTokens ?? existing.contextWindowTokens ?? profile.contextWindowTokens,
     reasoningEffort: reasoningEffort ?? 'high',
     openaiApiMode: profile.openaiApiMode ?? 'chat_completions',
     capabilities: existing.capabilities ?? { ...profile.capabilities },
