@@ -1577,6 +1577,13 @@ export class CatsCompanyBot {
         });
 
         if (entryClearGeneration === this.getSessionClearGeneration(key)) {
+          // Shutdown fence: destroy() may have timed out its quiesce wait and
+          // returned while this model turn was still in flight. Never deliver a
+          // late user reply after the connector is gone.
+          if (this.shuttingDown) {
+            Logger.info(`[${key}] destroy 已开始，丢弃迟到的用户回合结果`);
+            return;
+          }
           // 最终文本回复
           let replyDelivered = true;
           if (result.visibleToUser && result.text) {
@@ -2128,6 +2135,11 @@ export class CatsCompanyBot {
       });
       if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
         Logger.info(`[${sessionKey}] clear 后忽略旧子智能体反馈结果`);
+      } else if (this.shuttingDown) {
+        // Shutdown fence: destroy() may have timed out its quiesce wait and
+        // returned while this sub-agent feedback model turn was still in
+        // flight. Do not deliver a reply, do not requeue, do not mark handled.
+        Logger.info(`[${sessionKey}] destroy 已开始，丢弃迟到的子智能体反馈结果`);
       } else if (result.text === BUSY_MESSAGE) {
         this.enqueueSubAgentFeedback(sessionKey, topic, senderId, text, executionScope, 0, clearGeneration);
         Logger.info(`[${sessionKey}] 主会话竞态忙碌，子智能体反馈已入队`);
@@ -2301,6 +2313,11 @@ export class CatsCompanyBot {
       });
       if (batch.clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
         Logger.info(`[${sessionKey}] clear 后忽略旧批量子任务回流结果`);
+      } else if (this.shuttingDown) {
+        // Shutdown fence: destroy() may have timed out its quiesce wait and
+        // returned while this completion-batch model turn was still in flight.
+        // Do not deliver a reply, do not requeue, do not mark handled.
+        Logger.info(`[${sessionKey}] destroy 已开始，丢弃迟到的批量回流结果`);
       } else if (result.text === BUSY_MESSAGE) {
         const pendingBatch = this.subAgentCompletionBatches.get(sessionKey);
         if (pendingBatch && pendingBatch !== batch) {
@@ -2853,6 +2870,11 @@ export class CatsCompanyBot {
           });
         if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
           Logger.info(`[${sessionKey}] clear 后忽略已出队旧消息的返回`);
+        } else if (this.shuttingDown) {
+          // Shutdown fence: destroy() may have timed out its quiesce wait and
+          // returned while this queued model turn was still in flight. Do not
+          // deliver a reply or requeue after the connector is gone.
+          Logger.info(`[${sessionKey}] destroy 已开始，丢弃迟到出队消息的结果`);
         } else if (result.text === BUSY_MESSAGE) {
           const pending = this.messageQueue.get(sessionKey) ?? [];
           pending.unshift(msg);
@@ -3038,6 +3060,12 @@ export class CatsCompanyBot {
       if (batch.timer) clearTimeout(batch.timer);
     }
     this.subAgentCompletionBatches.clear();
+    // Interrupt every busy session before quiescing. requestInterrupt() aborts
+    // the session's active model turn (AbortController), so an in-flight
+    // handleMessage / handleRuntimeObservation returns a cancellation instead of
+    // running past the 3s quiesce budget and delivering side effects after the
+    // connector is gone (review 2026-08-05).
+    (this.sessionManager as any)?.interruptAll?.('connector shutdown');
     // Quiesce in-flight handlers so pre-turn awaits (attachment download /
     // cloud restore / hydration) that resume after shutdown cannot start the
     // model (review 2026-08-05).

@@ -1763,6 +1763,72 @@ describe('CatsCo content blocks', () => {
       (manager as any).resultNotifyOnObservation.delete(subAgentId);
     }
   });
+
+  test('destroy drops a subagent feedback result that lands after the quiesce timeout', async () => {
+    // 回归：模型回合超过 quiesce 3s 预算时，destroy() 超时返回；随后模型结果
+    // 落地时必须被 shutdown fence 丢弃（不 reply、不入队、不 mark handled），
+    // 不能越过销毁边界继续产生副作用。
+    const { bot, runtimeObservations, replies, session } = createProcessHarness();
+    const manager = SubAgentManager.getInstance();
+    const sessionKey = 'session:v2:catscompany:p2p:p2p_38_110:agent:usr43';
+    const subAgentId = 'sub-dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const observation = `[子agent1 已完成]\nID：${subAgentId}\n结果摘要：审查完成`;
+    const order: string[] = [];
+    let releaseObservation: (() => void) | undefined;
+    const observationGate = new Promise<void>((resolve) => { releaseObservation = resolve; });
+    session.handleRuntimeObservation = async (text: string, options: any) => {
+      runtimeObservations.push({ text, options });
+      await observationGate;
+      return { visibleToUser: true, text: '不应在 destroy 返回后落地的回流结果' };
+    };
+    bot.shuttingDown = false;
+    bot.activeMessageHandlers = 0;
+    bot.sessionExecutionReservations = new Set();
+    bot.taskStatusTasks = new Map();
+    bot.activeConversationTasks = new Map();
+    bot.sessionManager = {
+      getOrCreate: () => session,
+      get: () => session,
+      interruptAll: () => { order.push('interrupt-all'); },
+      destroy: async () => { order.push('sessions-destroyed'); },
+    };
+    bot.bot = { disconnect: () => { order.push('socket-disconnected'); } };
+    // 模拟 quiesce 预算耗尽：destroy 不再等待 in-flight handler，直接收尾返回。
+    (bot as any).waitForActiveHandlersToQuiesce = async () => {};
+
+    (manager as any).parentMap.set(subAgentId, sessionKey);
+    (manager as any).resultNotifyOnObservation.add(subAgentId);
+    try {
+      // 子智能体回流在 destroy 之前进入模型回合并挂起。
+      const feedbackPromise = (bot as any).handleSubAgentFeedback(
+        sessionKey,
+        'p2p_38_110',
+        'usr38',
+        observation,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.strictEqual(bot.activeMessageHandlers, 1);
+
+      // destroy 超时返回（quiesce 被 mock 为立即结束），connector 已断开。
+      const destroyPromise = bot.destroy();
+      await destroyPromise;
+      assert.deepStrictEqual(order, ['interrupt-all', 'sessions-destroyed', 'socket-disconnected']);
+      assert.strictEqual(bot.activeMessageHandlers, 1, 'in-flight handler 仍在跑');
+
+      // 模型回合随后返回：结果必须被 shutdown fence 丢弃。
+      releaseObservation?.();
+      await feedbackPromise;
+
+      assert.strictEqual(runtimeObservations.length, 1);
+      assert.deepStrictEqual(replies, [], 'destroy 返回后不得发送回复');
+      assert.strictEqual(bot.activeMessageHandlers, 0);
+      // 未 mark handled：sub-agent 结果没有在 shutdown 后被标记为已消费。
+      assert.equal((manager as any).resultNotifyOnObservation.has(subAgentId), true);
+    } finally {
+      (manager as any).parentMap.delete(subAgentId);
+      (manager as any).resultNotifyOnObservation.delete(subAgentId);
+    }
+  });
 });
 
 function escapeRegExp(value: string): string {
