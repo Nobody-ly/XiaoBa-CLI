@@ -130,17 +130,36 @@ export async function prepareBoundBotDefinition(
         let materializedCatalogRuntime = false;
         if (definition.model.kind === 'catalog') {
           const runtime = definitionService.readCatalogRuntime(botId);
+          const cloudContextWindowTokens = definition.model.contextWindowTokens;
           if (!runtime || !catalogRuntimeMatchesModelId(runtime, definition.model.modelId)) {
             const materialized = await provisionCatsRelayCatalogRuntime({
               botId,
               modelId: definition.model.modelId,
               reasoningEffort: definition.model.reasoningEffort,
+              contextWindowTokens: cloudContextWindowTokens,
               existingRuntime: runtime,
               auth,
               fetchImpl: options.fetchImpl,
             });
             definitionService.storeCatalogRuntime(materialized);
             materializedCatalogRuntime = true;
+          } else if (
+            (cloudContextWindowTokens !== undefined
+              && runtime.contextWindowTokens !== cloudContextWindowTokens)
+            || (definition.model.reasoningEffort
+              && runtime.reasoningEffort !== definition.model.reasoningEffort)
+          ) {
+            // 云端配置权威：已匹配的 runtime 只更新窗口/推理强度，
+            // 不重新物化凭据（对齐旧协议 cloudSelection 分支的行为）。
+            definitionService.storeCatalogRuntime({
+              ...runtime,
+              ...(cloudContextWindowTokens !== undefined
+                ? { contextWindowTokens: cloudContextWindowTokens }
+                : {}),
+              ...(definition.model.reasoningEffort
+                ? { reasoningEffort: definition.model.reasoningEffort }
+                : {}),
+            });
           } else if (catalogCapabilitiesNeedRefresh(runtime)) {
             const refreshed = await refreshCatsRelayCatalogRuntimeCapabilities(runtime, options.fetchImpl ?? fetch);
             if (refreshed !== runtime) definitionService.storeCatalogRuntime(refreshed);

@@ -51,9 +51,12 @@ export async function provisionCatsRelayCatalogRuntime(
     if (!ownerUid) {
       throw new Error('CatsCo account login is required because the bound bot owner is unknown.');
     }
+    // 复用已有凭据：runtime 的 ownerUid 必须匹配当前 owner，或者由旧版本
+    // 物化（当时未写入 ownerUid）。后一种情况凭据本身仍属于该 bot，但
+    // 缺少归属标记导致无法复用，这里兼容旧数据并补写 ownerUid。
     if (
       options.existingRuntime?.botId === botId
-      && options.existingRuntime.ownerUid === ownerUid
+      && (!options.existingRuntime.ownerUid || options.existingRuntime.ownerUid === ownerUid)
       && String(options.existingRuntime.apiKey || '').trim()
     ) {
       const retargeted = retargetCatsRelayCatalogRuntime(
@@ -61,6 +64,7 @@ export async function provisionCatsRelayCatalogRuntime(
         profile.id,
         options.reasoningEffort,
         options.contextWindowTokens,
+        ownerUid,
       );
       await validateCatsRelayCatalogRuntimeCredential(retargeted, fetchImpl);
       return retargeted;
@@ -116,6 +120,7 @@ export function retargetCatsRelayCatalogRuntime(
   modelId: string,
   reasoningEffort?: ReasoningEffort,
   contextWindowTokens?: number,
+  ownerUid?: string,
 ): BotCatalogModelRuntime {
   const profile = findRelayModelProfile(modelId);
   if (!profile) throw new Error(`Unknown CatsCo relay model: ${modelId}`);
@@ -124,13 +129,16 @@ export function retargetCatsRelayCatalogRuntime(
   return {
     schema: 'xiaoba.bot-catalog-model-runtime.v1',
     botId: existing.botId,
-    ...(existing.ownerUid ? { ownerUid: existing.ownerUid } : {}),
+    ...(existing.ownerUid || ownerUid ? { ownerUid: existing.ownerUid || ownerUid } : {}),
     modelId: profile.id,
     provider: profile.preferredProvider,
     apiBase: retargetRelayEndpoint(existing, profile.preferredProvider),
     apiKey,
     model: profile.model,
-    contextWindowTokens: contextWindowTokens ?? existing.contextWindowTokens ?? profile.contextWindowTokens,
+    // 复用路径必然是跨模型（调用方仅在 catalogRuntimeMatchesModelId 不成立时
+    // 传入 existingRuntime），绝不能继承旧模型的窗口值，否则会把旧的漂移值
+    // 带进新模型。云端下发优先，否则使用新模型 profile 的标准窗口。
+    contextWindowTokens: contextWindowTokens ?? profile.contextWindowTokens,
     reasoningEffort: reasoningEffort ?? 'high',
     openaiApiMode: profile.openaiApiMode ?? 'chat_completions',
     capabilities: existing.capabilities ?? { ...profile.capabilities },
