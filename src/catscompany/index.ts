@@ -2162,8 +2162,14 @@ export class CatsCompanyBot {
       }
     } catch (err: any) {
       if (clearGeneration === this.getSessionClearGeneration(sessionKey)) {
-        this.enqueueSubAgentFeedback(sessionKey, topic, senderId, text, executionScope, 1, clearGeneration);
-        Logger.warning(`[${sessionKey}] 子智能体反馈执行异常，已入队重试: ${err?.message || err}`);
+        // Shutdown fence: destroy() 已开始时不再入队重试，避免在已清空/销毁的
+        // 队列中留下不可消费的内存条目（与 batch/queue 的 catch 对齐）。
+        if (this.shuttingDown) {
+          Logger.info(`[${sessionKey}] destroy 已开始，跳过子智能体反馈失败重试`);
+        } else {
+          this.enqueueSubAgentFeedback(sessionKey, topic, senderId, text, executionScope, 1, clearGeneration);
+          Logger.warning(`[${sessionKey}] 子智能体反馈执行异常，已入队重试: ${err?.message || err}`);
+        }
       }
 
     } finally {
