@@ -1638,7 +1638,12 @@ describe('CatsCo content blocks', () => {
 
   test('subagent completion feedback does not start the model after destroy', async () => {
     const { bot, runtimeObservations, session } = createProcessHarness();
+    const manager = SubAgentManager.getInstance();
     const sessionKey = 'session:v2:catscompany:p2p:p2p_38_110:agent:usr43';
+    const subAgentId = 'sub-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    // notify 场景：observation 带 ID 且 resultNotifyOnObservation 命中，必然走
+    // handleRuntimeObservation 模型分支。若 fence 失效，本测试必然失败。
+    const observation = `[子agent1 已完成]\nID：${subAgentId}\n结果摘要：审查完成`;
     session.handleRuntimeObservation = async (text: string, options: any) => {
       runtimeObservations.push({ text, options });
       return { visibleToUser: true, text: '不应出现在 destroy 之后' };
@@ -1648,15 +1653,22 @@ describe('CatsCo content blocks', () => {
     bot.sessionExecutionReservations = new Set();
     bot.taskStatusTasks = new Map();
 
-    await (bot as any).handleSubAgentFeedback(
-      sessionKey,
-      'p2p_38_110',
-      'usr38',
-      '[子agent1 已完成]\n任务：审查\n结果摘要：审查完成',
-    );
+    (manager as any).parentMap.set(subAgentId, sessionKey);
+    (manager as any).resultNotifyOnObservation.add(subAgentId);
+    try {
+      await (bot as any).handleSubAgentFeedback(
+        sessionKey,
+        'p2p_38_110',
+        'usr38',
+        observation,
+      );
 
-    assert.deepStrictEqual(runtimeObservations, []);
-    assert.strictEqual(bot.activeMessageHandlers, 0);
+      assert.deepStrictEqual(runtimeObservations, []);
+      assert.strictEqual(bot.activeMessageHandlers, 0);
+    } finally {
+      (manager as any).parentMap.delete(subAgentId);
+      (manager as any).resultNotifyOnObservation.delete(subAgentId);
+    }
   });
 
   test('subagent completion batch flush does not start the model after destroy', async () => {
@@ -1734,9 +1746,12 @@ describe('CatsCo content blocks', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       assert.strictEqual(bot.activeMessageHandlers, 1);
 
-      // destroy 开始：必须等待 in-flight 回流完成后再 disconnect
+      // destroy 开始：必须等待 in-flight 回流完成后再 disconnect。
       const destroyPromise = bot.destroy();
       await new Promise((resolve) => setTimeout(resolve, 0));
+      // 在释放回流之前，destroy 必须仍在 quiesce 等待，不得提前 disconnect /
+      // 销毁 session（否则等待语义不成立）。
+      assert.deepStrictEqual(order, [], `destroy finalized before in-flight subagent feedback: ${order.join(',')}`);
       releaseObservation?.();
       await Promise.all([feedbackPromise, destroyPromise]);
 

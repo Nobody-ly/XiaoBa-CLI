@@ -3042,6 +3042,11 @@ export class CatsCompanyBot {
     // cloud restore / hydration) that resume after shutdown cannot start the
     // model (review 2026-08-05).
     await this.waitForActiveHandlersToQuiesce();
+    // Stop any still-running sub-agents up front. Their own model turns do not
+    // pass through runTrackedConversationWork (they run inside the agent
+    // session), so an active sub-agent could otherwise keep calling the model
+    // during the destroy window until sessionManager.destroy() cascades a stop.
+    SubAgentManager.getInstance().shutdown('connector shutdown');
     await this.sessionManager.destroy();
     await this.finishActiveConversationTasksForShutdown();
     this.bot.disconnect();
