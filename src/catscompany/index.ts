@@ -2044,9 +2044,25 @@ export class CatsCompanyBot {
   }
 
   /**
-   * 处理子智能体反馈注入
+   * 处理子智能体反馈注入。
+   *
+   * 入口统一收口到 shutdown fence + in-flight 计数：子智能体完成回调可能在
+   * destroy() 开始后才触发，这里必须保证它既不能启动新的模型回合，也要被
+   * destroy() 的 quiesce 等待（见 runTrackedConversationWork）。
    */
   private async handleSubAgentFeedback(
+    sessionKey: string,
+    topic: string,
+    senderId: string,
+    text: string,
+    executionScope?: ParsedCatsMessage['executionScope'],
+    clearGeneration = this.getSessionClearGeneration(sessionKey),
+  ): Promise<void> {
+    await this.runTrackedConversationWork(() =>
+      this.handleSubAgentFeedbackInner(sessionKey, topic, senderId, text, executionScope, clearGeneration));
+  }
+
+  private async handleSubAgentFeedbackInner(
     sessionKey: string,
     topic: string,
     senderId: string,
@@ -2214,7 +2230,17 @@ export class CatsCompanyBot {
     this.subAgentCompletionBatches.set(sessionKey, batch);
   }
 
+  /**
+   * 批量回流子智能体完成结果。同样经统一 shutdown fence + in-flight 计数收口：
+   * completion-batch timer 可能在 destroy() 开始后才触发，这里必须保证既不能
+   * 启动新的模型回合，也要被 destroy() 的 quiesce 等待。
+   */
   private async flushSubAgentCompletionBatch(sessionKey: string, force = false): Promise<void> {
+    await this.runTrackedConversationWork(() =>
+      this.flushSubAgentCompletionBatchInner(sessionKey, force));
+  }
+
+  private async flushSubAgentCompletionBatchInner(sessionKey: string, force = false): Promise<void> {
     const batch = this.subAgentCompletionBatches.get(sessionKey);
     if (!batch || batch.items.size === 0) return;
     if (batch.clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
@@ -2527,6 +2553,8 @@ export class CatsCompanyBot {
     channelSource?: string,
     sessionKey?: string,
   ): Promise<void> {
+    // Shutdown fence: destroy() 开始后不再向外部发送子智能体运行时事件。
+    if (this.shuttingDown) return;
     const subAgentId = String(event?.subAgentId || info?.id || '');
     if (!subAgentId) return;
 
@@ -3037,6 +3065,24 @@ export class CatsCompanyBot {
     const deadline = Date.now() + timeoutMs;
     while (this.activeMessageHandlers > 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /**
+   * Runs a unit of conversation work under the shutdown fence and the shared
+   * in-flight handler count, so destroy() both fences new work and quiesces
+   * work that already started. Every path that can start a model turn (user
+   * turns, queued drains, sub-agent completion feedback and completion-batch
+   * flushes) must enter through here; destroy() waits for this counter.
+   */
+  private async runTrackedConversationWork<T>(work: () => Promise<T>): Promise<T | undefined> {
+    // Shutdown fence: no new model work may start after destroy() begins.
+    if (this.shuttingDown) return undefined;
+    this.activeMessageHandlers += 1;
+    try {
+      return await work();
+    } finally {
+      this.activeMessageHandlers = Math.max(0, this.activeMessageHandlers - 1);
     }
   }
 

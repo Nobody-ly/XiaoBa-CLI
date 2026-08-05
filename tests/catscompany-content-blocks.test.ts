@@ -1635,6 +1635,119 @@ describe('CatsCo content blocks', () => {
     assert.strictEqual(replies.length, 1);
     assert.match(replies[0].text, /子 agent 结果处理失败/);
   });
+
+  test('subagent completion feedback does not start the model after destroy', async () => {
+    const { bot, runtimeObservations, session } = createProcessHarness();
+    const sessionKey = 'session:v2:catscompany:p2p:p2p_38_110:agent:usr43';
+    session.handleRuntimeObservation = async (text: string, options: any) => {
+      runtimeObservations.push({ text, options });
+      return { visibleToUser: true, text: '不应出现在 destroy 之后' };
+    };
+    bot.shuttingDown = true;
+    bot.activeMessageHandlers = 0;
+    bot.sessionExecutionReservations = new Set();
+    bot.taskStatusTasks = new Map();
+
+    await (bot as any).handleSubAgentFeedback(
+      sessionKey,
+      'p2p_38_110',
+      'usr38',
+      '[子agent1 已完成]\n任务：审查\n结果摘要：审查完成',
+    );
+
+    assert.deepStrictEqual(runtimeObservations, []);
+    assert.strictEqual(bot.activeMessageHandlers, 0);
+  });
+
+  test('subagent completion batch flush does not start the model after destroy', async () => {
+    const { bot, runtimeObservations, session } = createProcessHarness();
+    const sessionKey = 'session:v2:catscompany:p2p:p2p_38_110:agent:usr43';
+    session.handleRuntimeObservation = async (text: string, options: any) => {
+      runtimeObservations.push({ text, options });
+      return { visibleToUser: true, text: '不应出现在 destroy 之后' };
+    };
+    bot.shuttingDown = true;
+    bot.activeMessageHandlers = 0;
+    bot.sessionExecutionReservations = new Set();
+    bot.taskStatusTasks = new Map();
+    // 预置一个 completion batch（模拟 destroy 开始前已积累的批量回流）
+    bot.subAgentCompletionBatches.set(sessionKey, {
+      topic: 'p2p_38_110',
+      senderId: 'usr38',
+      channelSource: undefined,
+      executionScope: undefined,
+      firstAt: Date.now(),
+      clearGeneration: 0,
+      items: new Map([['item-1', {
+        id: 'item-1',
+        displayName: '子agent1',
+        task: '审查',
+        observation: '[子agent1 已完成]\n结果摘要：审查完成',
+        status: 'completed',
+      }]]),
+    });
+
+    await (bot as any).flushSubAgentCompletionBatch(sessionKey, true);
+
+    assert.deepStrictEqual(runtimeObservations, []);
+    assert.strictEqual(bot.activeMessageHandlers, 0);
+    // destroy 开始后 batch 未被消费，仍留在 map 中由 destroy 统一清理
+    assert.ok(bot.subAgentCompletionBatches.has(sessionKey));
+  });
+
+  test('destroy waits for in-flight subagent completion feedback before finalizing', async () => {
+    const { bot, runtimeObservations, session } = createProcessHarness();
+    const manager = SubAgentManager.getInstance();
+    const sessionKey = 'session:v2:catscompany:p2p:p2p_38_110:agent:usr43';
+    const subAgentId = 'sub-cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const observation = `[子agent1 已完成]\nID：${subAgentId}\n结果摘要：审查完成`;
+    const order: string[] = [];
+    let releaseObservation: (() => void) | undefined;
+    const observationGate = new Promise<void>((resolve) => { releaseObservation = resolve; });
+    session.handleRuntimeObservation = async (text: string, options: any) => {
+      runtimeObservations.push({ text, options });
+      await observationGate;
+      return { visibleToUser: true, text: '回流完成' };
+    };
+    bot.shuttingDown = false;
+    bot.activeMessageHandlers = 0;
+    bot.sessionExecutionReservations = new Set();
+    bot.taskStatusTasks = new Map();
+    bot.activeConversationTasks = new Map();
+    bot.sessionManager = {
+      getOrCreate: () => session,
+      get: () => session,
+      destroy: async () => { order.push('sessions-destroyed'); },
+    };
+    bot.bot = { disconnect: () => { order.push('socket-disconnected'); } };
+
+    (manager as any).parentMap.set(subAgentId, sessionKey);
+    (manager as any).resultNotifyOnObservation.add(subAgentId);
+    try {
+      // 子智能体回流在 destroy 之前已进入（暂停在 handleRuntimeObservation）
+      const feedbackPromise = (bot as any).handleSubAgentFeedback(
+        sessionKey,
+        'p2p_38_110',
+        'usr38',
+        observation,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.strictEqual(bot.activeMessageHandlers, 1);
+
+      // destroy 开始：必须等待 in-flight 回流完成后再 disconnect
+      const destroyPromise = bot.destroy();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      releaseObservation?.();
+      await Promise.all([feedbackPromise, destroyPromise]);
+
+      assert.strictEqual(runtimeObservations.length, 1);
+      assert.deepStrictEqual(order, ['sessions-destroyed', 'socket-disconnected']);
+      assert.strictEqual(bot.activeMessageHandlers, 0);
+    } finally {
+      (manager as any).parentMap.delete(subAgentId);
+      (manager as any).resultNotifyOnObservation.delete(subAgentId);
+    }
+  });
 });
 
 function escapeRegExp(value: string): string {
