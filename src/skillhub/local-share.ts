@@ -1,8 +1,10 @@
+import * as path from 'path';
 import {
   withCurrentBotSkillWorkspaceWrite,
   type CurrentBotSkillWorkspaceWriteContext,
 } from '../bot-skills/runtime';
 import { scanBotSkillWorkspace } from '../bot-skills/local-manifest';
+import { writeSkillHubLocalMetadata } from './local-skill-metadata';
 import { SkillHubService } from './service';
 
 export interface SkillHubCatsCoAuthPayload {
@@ -92,7 +94,7 @@ export async function shareLocalSkillForCatsCo(
       );
     }
     const result = await service.shareLocalSkill(input, {
-      writeLocalMetadata: options.writeLocalMetadata,
+      writeLocalMetadata: false,
       ...(selectedSkill ? { localSkillPath: selectedSkill.path } : {}),
     });
     if (selectedSkill) {
@@ -108,6 +110,10 @@ export async function shareLocalSkillForCatsCo(
       }
     }
     await options.validateScope?.(context);
+    if (result?.skillHub && options.writeLocalMetadata !== false) {
+      const localSkillPath = selectedSkill?.path || String(result?.skill?.path || '').trim();
+      writeSkillHubLocalMetadata(path.join(localSkillPath, 'SKILL.md'), result.skillHub);
+    }
     return { ...result, botUid: expectedBotUid };
   }, { runtimeRoot: options.runtimeRoot });
 }

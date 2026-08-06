@@ -14,7 +14,10 @@ import { BotSkillWorkspaceService } from '../src/bot-skills/workspace';
 import { shareLocalSkillForCatsCo } from '../src/skillhub/local-share';
 import { scanBotSkillWorkspace } from '../src/bot-skills/local-manifest';
 import { writeBotSkillLocalMarker } from '../src/bot-skills/local-manifest';
-import { applySkillHubLocalMetadata } from '../src/skillhub/local-skill-metadata';
+import {
+  applySkillHubLocalMetadata,
+  readSkillHubLocalMetadata,
+} from '../src/skillhub/local-skill-metadata';
 
 describe('CatsCompany SkillHub thin RPC', () => {
   let runtimeRoot = '';
@@ -238,6 +241,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal((shareResult?.skill as Record<string, unknown>)?.id, 'alice/local-demo');
     assert.equal(shareResult?.latest_version, '2.0.0');
     assert.equal(shareResult?.content_hash, 'a'.repeat(64));
+    assert.equal(readSkillHubLocalMetadata(path.join(selected.path, 'SKILL.md')), null);
   });
 
   test('rejects a Bot switch when the local Dashboard returns a non-success status', async () => {
@@ -272,6 +276,75 @@ describe('CatsCompany SkillHub thin RPC', () => {
       }),
       (error: any) => error?.code === 'skillhub.share_local_skill_changed',
     );
+  });
+
+  test('writes share metadata only after revalidating the selected local Skill and scope', async () => {
+    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const skillFile = path.join(selected.path, 'SKILL.md');
+    const metadata = {
+      author: 'alice',
+      version: '1.0.0',
+      uploadedAt: '2026-08-06T00:00:00.000Z',
+    };
+    const originalFetch = global.fetch;
+    let scopeValidations = 0;
+    global.fetch = async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/auth/catsco-exchange') {
+        return Response.json({
+          user: { id: 'skillhub-user' },
+          roles: ['developer'],
+          permissions: [],
+          catsCo: { uid: '7', username: 'alice', displayName: 'Alice' },
+        });
+      }
+      if (url.pathname === '/api/auth/me') {
+        return Response.json({
+          user: { id: 'skillhub-user' },
+          roles: ['developer'],
+          permissions: [],
+        });
+      }
+      if (url.pathname === '/api/skills/share') {
+        return Response.json({
+          skillId: 'alice/local-demo',
+          packageVersion: {
+            skillId: 'alice/local-demo',
+            version: metadata.version,
+            contentHash: 'b'.repeat(64),
+          },
+          skillHub: metadata,
+        }, { status: 201 });
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    };
+    let result: Record<string, any>;
+    try {
+      result = await shareLocalSkillForCatsCo({
+        skillName: selected.name,
+        expectedLocalSkillId: selected.localSkillId,
+        expectedBotUid: '42',
+        expectedUserUid: '7',
+      }, {
+        runtimeRoot,
+        getCatsCoAuth: () => ({
+          token: 'user-token',
+          baseUrl: 'https://app.catsco.cc',
+          user: { uid: '7', username: 'alice' },
+        }),
+        validateScope: () => {
+          scopeValidations += 1;
+          assert.equal(readSkillHubLocalMetadata(skillFile), null);
+        },
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    assert.equal(scopeValidations, 2);
+    assert.equal(result.botUid, '42');
+    assert.deepEqual(result.skillHub, metadata);
+    assert.deepEqual(readSkillHubLocalMetadata(skillFile), metadata);
   });
 
   test('finalizes only when sync still belongs to the requested Bot', async () => {
