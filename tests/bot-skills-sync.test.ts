@@ -1263,6 +1263,77 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     );
   });
 
+  test('allows runtime credential expressions without weakening literal secret detection', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-runtime-credential-skill-'));
+    roots.push(root);
+    writeSkill(root, 'safe', 'safe', 'local only');
+    fs.writeFileSync(path.join(root, 'safe', 'runtime.mjs'), [
+      'const token = argv[index];',
+      'const accessToken = process.env.CATSCO_TOKEN;',
+      'const clientSecret = loadClientSecret();',
+      'if (token === "--help") args.help = true;',
+      'const smokeEnv = { IMAGE_GEN_API_KEY: "smoke-key" };',
+      'const gatewayEnv = { CATSCO_USER_TOKEN: "catsco-user-token" };',
+      'const referenceEnv = { IMAGE_GEN_API_KEY: "reference-smoke-secret" };',
+      'const smokeSecretEnv = { IMAGE_GEN_API_KEY: "smoke-secret" };',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(root, 'safe', 'runtime.py'), [
+      'token = part.strip()',
+      'if not token:',
+      '    continue',
+      'headers = {"X-API-Key": value}',
+      'api_key = os.environ.get(args.api_key_env, "") if args.api_key_env else ""',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(root, 'safe', 'provider-smoke-test.mjs'), [
+      'const auth = {',
+      '  CATSCO_USER_TOKEN: "catsco-user-login",',
+      '  CATSCO_API_KEY: "catsco-stale-bot-key",',
+      '};',
+      '',
+    ].join('\n'));
+
+    assert.doesNotThrow(() => scanLocalBotSkill(path.join(root, 'safe')));
+
+    const unsafeAssignments = [
+      'const token = "a-real-secret-value-that-must-not-leave-device";',
+      'private apiKey = "a-real-secret-value-that-must-not-leave-device";',
+      'private final String apiKey = "a-real-secret-value-that-must-not-leave-device";',
+      'export const API_KEY = "a-real-secret-value-that-must-not-leave-device";',
+      'doWork(); const token = "a-real-secret-value-that-must-not-leave-device";',
+      'set API_TOKEN=live-production-secret-value-12345',
+      'set "API_TOKEN=live-production-secret-value-12345"',
+      'setx API_TOKEN "live-production-secret-value-12345"',
+      'setx /M API_TOKEN "live-production-secret-value-12345"',
+      'ENV API_TOKEN=live-production-secret-value-12345',
+      'ENV API_TOKEN live-production-secret-value-12345',
+      'prepare && export API_TOKEN=live-production-secret-value-12345',
+      '$env:API_TOKEN = "live-production-secret-value-12345"',
+      '$apiToken = "live-production-secret-value-12345"',
+    ];
+    for (const unsafeAssignment of unsafeAssignments) {
+      fs.writeFileSync(path.join(root, 'safe', 'runtime.mjs'), `${unsafeAssignment}\n`);
+      assert.throws(
+        () => scanLocalBotSkill(path.join(root, 'safe')),
+        /sensitive material/i,
+        unsafeAssignment,
+      );
+    }
+
+    fs.rmSync(path.join(root, 'safe', 'runtime.mjs'));
+    fs.writeFileSync(path.join(root, 'safe', 'config.yaml'), 'password: password\n');
+    assert.throws(() => scanLocalBotSkill(path.join(root, 'safe')), /sensitive material/i);
+    fs.writeFileSync(path.join(root, 'safe', 'config.yaml'), '- password: smoke-secret\n');
+    assert.throws(() => scanLocalBotSkill(path.join(root, 'safe')), /sensitive material/i);
+    fs.rmSync(path.join(root, 'safe', 'config.yaml'));
+    fs.writeFileSync(
+      path.join(root, 'safe', 'auth.test.ts'),
+      'const password = "summer-2026-admin";\n',
+    );
+    assert.throws(() => scanLocalBotSkill(path.join(root, 'safe')), /sensitive material/i);
+  });
+
   test('restores a missing nested workspace from Cloud instead of uploading an empty list', async () => {
     const fixture = createFixture(roots);
     writeSkill(fixture.skillsRoot, 'group/nested', 'nested', 'nested local');

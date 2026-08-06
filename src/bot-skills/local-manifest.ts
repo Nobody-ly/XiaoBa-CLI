@@ -65,8 +65,33 @@ const ARCHIVE_FILE_EXTENSIONS = [
   '.zip',
   '.zst',
 ] as const;
+const EXPLICIT_SAFE_CREDENTIAL_VALUES = new Set([
+  'catsco-bot-key',
+  'catsco-fallback-user',
+  'catsco-stale-bot-key',
+  'catsco-user-login',
+  'catsco-user-token',
+  'reference-smoke-secret',
+  'smoke-key',
+  'smoke-secret',
+]);
 
-export function scanBotSkillWorkspace(skillsRoot: string): LocalBotSkillManifestEntry[] {
+export interface BotSkillWorkspaceValidationFailure {
+  localSkillId: string;
+  name: string;
+  installName: string;
+  path: string;
+  error: BotSkillPackageValidationError;
+}
+
+export interface ScanBotSkillWorkspaceOptions {
+  onValidationFailure?: (failure: BotSkillWorkspaceValidationFailure) => void;
+}
+
+export function scanBotSkillWorkspace(
+  skillsRoot: string,
+  options: ScanBotSkillWorkspaceOptions = {},
+): LocalBotSkillManifestEntry[] {
   const root = path.resolve(skillsRoot);
   if (!fs.existsSync(root)) {
     throw new Error(`Bot Skill workspace does not exist: ${root}`);
@@ -85,7 +110,31 @@ export function scanBotSkillWorkspace(skillsRoot: string): LocalBotSkillManifest
       const skillDir = path.join(current, entry.name);
       assertRealPathContained(realRoot, skillDir);
       if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
-        const manifestEntry = scanLocalBotSkill(skillDir, root);
+        let manifestEntry: LocalBotSkillManifestEntry;
+        try {
+          manifestEntry = scanLocalBotSkill(skillDir, root);
+        } catch (error) {
+          if (!(error instanceof BotSkillPackageValidationError) || !options.onValidationFailure) {
+            throw error;
+          }
+          const marker = readBotSkillLocalMarker(skillDir);
+          if (!marker) throw error;
+          const parsed = matter(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'));
+          const name = String(parsed.data?.name || path.basename(skillDir)).trim() || path.basename(skillDir);
+          if (localSkillIds.has(marker.localSkillId)) {
+            throw new Error(`Bot Skill workspace contains a duplicate localSkillId: ${marker.localSkillId}`);
+          }
+          localSkillIds.add(marker.localSkillId);
+          options.onValidationFailure({
+            localSkillId: marker.localSkillId,
+            name,
+            installName: path.relative(root, skillDir).replace(/\\/g, '/'),
+            path: skillDir,
+            error,
+          });
+          if (!SKIP_DIRECTORIES.has(entry.name)) visit(skillDir);
+          continue;
+        }
         if (localSkillIds.has(manifestEntry.localSkillId)) {
           throw new Error(`Bot Skill workspace contains a duplicate localSkillId: ${manifestEntry.localSkillId}`);
         }
@@ -265,7 +314,7 @@ function rejectSensitiveMaterial(filePath: string, bytes: Buffer): void {
     || ['.npmrc', '.pypirc', 'credentials', 'credentials.json', 'kubeconfig', 'id_rsa', 'id_ed25519'].includes(name)
     || /\.(?:pem|key|p12|pfx)$/i.test(name)
     || /\.(?:exe|dll|so|dylib|msi|apk|appimage)$/i.test(name)
-    || containsHighConfidenceSecret(bytes)
+    || containsHighConfidenceSecret(filePath, bytes)
   ) {
     throw new BotSkillPackageValidationError(
       `Skill contains sensitive material and cannot be uploaded: ${filePath}`,
@@ -298,7 +347,7 @@ function hasMagic(bytes: Buffer, magic: readonly number[]): boolean {
   return bytes.length >= magic.length && magic.every((value, index) => bytes[index] === value);
 }
 
-function containsHighConfidenceSecret(bytes: Buffer): boolean {
+function containsHighConfidenceSecret(filePath: string, bytes: Buffer): boolean {
   if (bytes.includes(0)) return false;
   const text = bytes.toString('utf8');
   if (/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(text)) return true;
@@ -306,32 +355,77 @@ function containsHighConfidenceSecret(bytes: Buffer): boolean {
   if (/\bgh[pousr]_[A-Za-z0-9]{20,}\b/.test(text)) return true;
   if (/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/.test(text)) return true;
   if (/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/.test(text)) return true;
-  const assignments = text.matchAll(
-    /(?=(?:^|[^A-Za-z0-9_-])["']?(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})["']?\]?\s*(?:[?+]?=|:)\s*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;]+)))/gm,
+  const sourceExtension = path.posix.extname(filePath).toLowerCase();
+  const isSourceCode = ['.cjs', '.js', '.jsx', '.mjs', '.py', '.ts', '.tsx'].includes(sourceExtension);
+  const equalsAssignments = text.matchAll(
+    /(?=(?:^|[^A-Za-z0-9_.'"`-])[ \t]*(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>\]?[ \t]*(?:[?+]?=(?![=>]))[ \t]*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+)))/gim,
   );
+  if (hasSensitiveCredentialAssignment(equalsAssignments, isSourceCode)) return true;
+  const colonAssignments = text.matchAll(
+    /(?=(?:^|[\[,{])[ \t]*(?:-[ \t]+)?(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>[ \t]*:[ \t]*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+)))/gim,
+  );
+  if (hasSensitiveCredentialAssignment(colonAssignments, isSourceCode)) return true;
+  const commandAssignments = text.matchAll(
+    /^(?:[ \t]*[Ss][Ee][Tt][Xx](?:[ \t]+\/[A-Za-z]+)*[ \t]+(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>[ \t]+|[ \t]*ENV[ \t]+(?<quote2>["']?)(?<key2>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote2>[ \t]+)(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+))/gm,
+  );
+  if (hasSensitiveCredentialAssignment(commandAssignments, isSourceCode)) return true;
+  const quotedSetAssignments = text.matchAll(
+    /^[ \t]*[Ss][Ee][Tt][ \t]+(?<outer>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})[ \t]*=[ \t]*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^"'\r\n]*?))(?:\k<outer>)?[ \t]*$/gm,
+  );
+  return hasSensitiveCredentialAssignment(quotedSetAssignments, isSourceCode);
+}
+
+function hasSensitiveCredentialAssignment(
+  assignments: Iterable<RegExpMatchArray>,
+  isSourceCode: boolean,
+): boolean {
   for (const match of assignments) {
-    const key = String(match.groups?.key || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    const key = String(match.groups?.key || match.groups?.key2 || '')
+      .replace(/[^A-Za-z0-9]/g, '')
+      .toLowerCase();
     if (!/(?:apikey|accesstoken|authtoken|clientsecret|secretaccesskey|secretkey|password|passwd|token|secret)$/.test(key)) {
       continue;
     }
     const candidate = String(
       match.groups?.double ?? match.groups?.single ?? match.groups?.bare ?? '',
     ).toLowerCase();
-    if (!isExplicitSafeCredentialValue(key, candidate)) return true;
+    const isBare = match.groups?.bare !== undefined;
+    if (!isExplicitSafeCredentialValue(key, candidate, isBare, isSourceCode)) return true;
   }
   return false;
 }
 
-function isExplicitSafeCredentialValue(key: string, candidate: string): boolean {
+function isExplicitSafeCredentialValue(
+  key: string,
+  candidate: string,
+  isBare: boolean,
+  isSourceCode: boolean,
+): boolean {
   return (
     candidate === ''
     || /^\$\{[a-z_][a-z0-9_]*\}$/.test(candidate)
+    || /^%[a-z_][a-z0-9_]*%$/.test(candidate)
+    || /^\$env:[a-z_][a-z0-9_]*$/.test(candidate)
+    || (isBare && isSourceCode && isRuntimeCredentialExpression(candidate))
     || (
       /(?:password|passwd)$/.test(key)
       && /^(?:minimum|maximum)[-_]length[-_]\d+$/.test(candidate)
     )
     || /^(?:string|number|boolean|unknown|null|undefined|z\.string\(\)(?:\.min\(\d+\))?)$/.test(candidate)
     || /^(?:example[-_](?:api[-_]?key|token|secret|password)|placeholder(?:[-_]value)?|dummy[-_]value|changeme(?:[-_]please)?|your[-_](?:api[-_]?key|token|secret|password)[-_]here|\*{3,})$/.test(candidate)
+    || (isSourceCode && EXPLICIT_SAFE_CREDENTIAL_VALUES.has(candidate))
+  );
+}
+
+function isRuntimeCredentialExpression(candidate: string): boolean {
+  const identifier = '[a-z_$][a-z0-9_$]*';
+  const accessor = `(?:\\??\\.${identifier}|\\[(?:${identifier}|\\d+|["'][a-z0-9_$.-]+["'])\\])`;
+  const expressionPath = `${identifier}(?:${accessor})*`;
+  const call = `\\((?:${expressionPath}|\\d+)?\\)`;
+  return (
+    new RegExp(`^${identifier}$`).test(candidate)
+    || new RegExp(`^(?:${expressionPath}|${identifier})(?:(?:${accessor})|${call})+$`).test(candidate)
+    || /^(?:os\.environ\.get|process\.env(?:\??\.[a-z_$][a-z0-9_$]*)?)\(/.test(candidate)
   );
 }
 
