@@ -2,13 +2,14 @@
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
-## 当前状态（2026-08-05）
+## 当前状态（2026-08-06，已合并 + 已发布 v1.4.8）
 
-- **分支/head：** `feat/ctyun-worker-image-pipeline` @ `5c83dc8`（已 rebase 到 `upstream/main` `dc22252` 之上，相对 main 22 commits）
-- **CI：** 最新一次全绿（Build and runtime tests + cross-repo smoke）
-- **Review：** 已完成 6 轮处理并回复（自查 / c3811yyds / Nobody-ly 4 项 / atridaisuki 4 项 / 子 agent 独立审核 / Nobody-ly 复审 fc49cc0 3 项），当前**等复审**；合并前需用户确认
-- **测试：** `worker-image-pipeline.test.ts` 11/11、加固探针 7 场景、全量 `npm test`（唯一失败为已知 pre-existing flaky `logger.test.ts`，与改动无关）、`npm run build` 通过
-- **下一步：** reviewer 复审 → 合并 → workflow 真实 bake 验证（见步骤 10 验收标准）
+- **分支/head：** PR #271 `feat/ctyun-worker-image-pipeline` 已 **squash 合并**进 `upstream/main`（merge commit `3bb5164`，2026-08-06）；合并前 rebase 到最新 main（`4606f78`，28 commits）
+- **Review：** 6 轮处理全部闭环；Nobody-ly 08-06 05:43 复核 head `b410d43` 确认三项阻塞已修复、**未发现新阻塞**（issuecomment-5200843141）后合并
+- **版本：** bump `1.4.7 → 1.4.8`（`inject-version.js v1.4.8`，commit `fbb919e` 直接推送 main；`verify-release-version` 要求三处同步已确认）
+- **发布：** 设置 repo var `CTYUN_AUTO_BAKE_WORKER_IMAGE=true`（tag 触发 bake 的前提）→ 打 `v1.4.8` tag 推送 → **Bake Tianyi Cloud Worker Image**（run=1）与 **Desktop Release CD**（run=25）均已触发并运行中
+- **测试：** `worker-image-pipeline.test.ts` 11/11、`npm run build` 通过（rebase 后本地已验证）
+- **下一步：** 等待 bake 完成 → 按下方步骤 10 验收标准在云端验收（platform 版本、fwupd mask、npm mirror、残留清理）→ 确认后删除验证用临时实例
 - **关联计划：** 应用制品更新 Part A 见 `2026-08-04-worker-artifact-update.md`（worker 更新通道与镜像烘焙并存，互为回退）
 
 **目标：** 把 `deploy-catsco-linux-agent` 部署 skill 在 2026-08 踩过的平台故障固化进 `ops/ctyun-worker-image/prepare-image.sh`，让新 bake 的 worker 镜像自带免疫——新 worker 从镜像启动即健康，手动部署不再需要逐台升级 systemd/glibc、mask fwupd、修复 dpkg、配置 npm 镜像、更新 grub。
