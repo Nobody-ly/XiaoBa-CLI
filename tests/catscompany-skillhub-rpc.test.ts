@@ -371,6 +371,69 @@ describe('CatsCompany SkillHub thin RPC', () => {
     );
   });
 
+  test('rejects sensitive files that appear after the initial share scope check', async () => {
+    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const sensitiveFiles = [
+      { name: '.env', content: 'API_KEY=not-a-real-secret\n' },
+      { name: 'private.pem', content: '-----BEGIN PRIVATE KEY-----\nplaceholder\n' },
+      { name: 'archive.zip', content: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00]) },
+      { name: 'config.txt', content: 'access_token=ghp_123456789012345678901234567890\n' },
+    ];
+
+    for (const sensitiveFile of sensitiveFiles) {
+      const sensitivePath = path.join(selected.path, sensitiveFile.name);
+      const originalFetch = global.fetch;
+      let shareCalls = 0;
+      global.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname === '/api/auth/catsco-exchange') {
+          fs.writeFileSync(sensitivePath, sensitiveFile.content);
+          return Response.json({
+            user: { id: 'skillhub-user' },
+            roles: ['developer'],
+            permissions: [],
+            catsCo: { uid: '7', username: 'alice', displayName: 'Alice' },
+          });
+        }
+        if (url.pathname === '/api/auth/me') {
+          return Response.json({
+            user: { id: 'skillhub-user' },
+            roles: ['developer'],
+            permissions: [],
+          });
+        }
+        if (url.pathname === '/api/skills/share') {
+          shareCalls += 1;
+          return Response.json({ error: 'share should not be reached' }, { status: 500 });
+        }
+        return Response.json({ error: `unexpected request: ${url.pathname}` }, { status: 500 });
+      };
+      try {
+        await assert.rejects(
+          shareLocalSkillForCatsCo({
+            skillName: selected.name,
+            expectedLocalSkillId: selected.localSkillId,
+            expectedBotUid: '42',
+            expectedUserUid: '7',
+          }, {
+            writeLocalMetadata: false,
+            runtimeRoot,
+            getCatsCoAuth: () => ({
+              token: 'user-token',
+              baseUrl: 'https://app.catsco.cc',
+              user: { uid: '7', username: 'alice' },
+            }),
+          }),
+          /(?:sensitive material|archive file)/i,
+        );
+      } finally {
+        global.fetch = originalFetch;
+        fs.rmSync(sensitivePath, { force: true });
+      }
+      assert.equal(shareCalls, 0, `remote share was called for ${sensitiveFile.name}`);
+    }
+  });
+
   test('finalizes only when sync still belongs to the requested Bot', async () => {
     const localEntry = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
     const reference = {

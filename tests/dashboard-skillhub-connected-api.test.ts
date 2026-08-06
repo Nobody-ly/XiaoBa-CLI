@@ -139,8 +139,6 @@ describe('dashboard connected SkillHub API', () => {
     fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.xiaoba-bundled-skill.json'), '{}\n');
     fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.xiaoba-skillhub-install.json'), '{}\n');
     fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.xiaoba-bot-skill.json'), '{}\n');
-    fs.mkdirSync(path.join(testRoot, 'skills', 'quick-demo', '.ssh'), { recursive: true });
-    fs.writeFileSync(path.join(testRoot, 'skills', 'quick-demo', '.ssh', 'id_test'), 'private\n');
 
     const fixture = createFixture();
     await startCloud(fixture);
@@ -172,11 +170,36 @@ describe('dashboard connected SkillHub API', () => {
     assert.equal(uploadedPaths.includes('.xiaoba-bundled-skill.json'), false);
     assert.equal(uploadedPaths.includes('.xiaoba-skillhub-install.json'), false);
     assert.equal(uploadedPaths.includes('.xiaoba-bot-skill.json'), false);
-    assert.equal(uploadedPaths.some((value: string) => value.startsWith('.ssh/')), false);
     const skillText = fs.readFileSync(path.join(testRoot, 'skills', 'quick-demo', 'SKILL.md'), 'utf8');
     assert.match(skillText, /skillhub_author:\s+["']?lin["']?/);
     assert.match(skillText, /skillhub_version:\s+["']?1\.0\.0["']?/);
     assert.match(skillText, /skillhub_uploaded_at:/);
+  });
+
+  test('rejects a sensitive local package before calling the SkillHub share endpoint', async () => {
+    const skillRoot = path.join(testRoot, 'skills', 'unsafe-demo');
+    fs.mkdirSync(skillRoot, { recursive: true });
+    fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+      '---',
+      'name: unsafe-demo',
+      'description: Unsafe demo skill',
+      '---',
+      '',
+      '# Unsafe Demo',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(skillRoot, '.env'), 'API_KEY=not-a-real-secret\n');
+
+    const fixture = createFixture();
+    await startCloud(fixture);
+    process.env.CATSCO_SKILLHUB_BASE_URL = cloudBaseUrl;
+    await startDashboard();
+
+    await post('/api/skillhub/auth/login', { email: 'demo@example.com', password: 'passw0rd!!' });
+    const share = await post('/api/skillhub/share-local-skill', { skillName: 'unsafe-demo' });
+    assert.equal(share.status, 400);
+    assert.equal(share.body.code, 'skillhub.local_skill_unsafe_package');
+    assert.match(share.body.error, /sensitive material/i);
   });
 
   test('connects SkillHub with the current CatsCo login token', async () => {

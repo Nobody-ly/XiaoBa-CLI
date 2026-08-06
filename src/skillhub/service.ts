@@ -1,6 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { createCatsCoLocalConfigService } from '../catscompany/local-config';
+import {
+  BotSkillPackageValidationError,
+  collectBotSkillPackageFiles,
+} from '../bot-skills/local-manifest';
 import { SkillParser } from '../skills/skill-parser';
 import type { Skill } from '../types/skill';
 import { PathResolver } from '../utils/path-resolver';
@@ -256,7 +260,19 @@ export class SkillHubService {
 
     const { skill } = localSkill;
     const localPath = path.dirname(skill.filePath);
-    const files = collectSkillSourceFiles(localPath);
+    let files: Array<{ path: string; contentBase64: string }>;
+    try {
+      files = collectBotSkillPackageFiles(localPath).map(({ path: filePath, contentBase64 }) => ({
+        path: filePath,
+        contentBase64,
+      }));
+    } catch (caught: any) {
+      if (!(caught instanceof BotSkillPackageValidationError)) throw caught;
+      const error: any = new Error(caught?.message || 'Local Skill package is unsafe to share.');
+      error.status = 400;
+      error.code = 'skillhub.local_skill_unsafe_package';
+      throw error;
+    }
     if (!files.length) {
       const error: any = new Error('Local skill package has no shareable files.');
       error.status = 400;
