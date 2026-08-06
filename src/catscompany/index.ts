@@ -426,6 +426,7 @@ export class CatsCompanyBot {
   /** Bot 自身的 uid，用于过滤自己发出的消息 */
   private botUid: string | null = null;
   private connectorReady = false;
+  private shuttingDown = false;
   private runtime: AdapterRuntimeBundle;
   private runtimeProfile: AdapterRuntimeBundle['profile'];
   private localDeviceGrant?: ScopedLocalDeviceGrant;
@@ -520,15 +521,24 @@ export class CatsCompanyBot {
     });
 
     this.bot.on('message', async (ctx: MessageContext) => {
+      if (this.shuttingDown) return;
       await this.onMessage(ctx);
     });
 
     this.bot.on('device_rpc_request', async (request: CatsDeviceRpcMessage) => {
-      await this.handleDeviceRpcRequest(request);
+      // Shutdown fence: destroy() 开始后拒绝新的设备 RPC，避免在销毁窗口内
+      // 继续执行本地 write_file/edit_file/execute_shell 等副作用工具。
+      // runTrackedConversationWork 让已进入的 RPC 工作计入 in-flight 计数，
+      // destroy() 的 quiesce 会等待它完成（review 2026-08-06）。
+      if (this.shuttingDown) return;
+      await this.runTrackedConversationWork(() => this.handleDeviceRpcRequest(request));
     });
 
     this.bot.on('thin_tool_rpc_request', async (request: CatsThinToolRpcMessage) => {
-      await this.handleThinToolRpcRequest(request);
+      // Shutdown fence: 与 device_rpc_request 一致，拒绝销毁窗口内的新
+      // thin-tool RPC，并将已进入的工作纳入 quiescence 等待。
+      if (this.shuttingDown) return;
+      await this.runTrackedConversationWork(() => this.handleThinToolRpcRequest(request));
     });
 
     this.bot.on('error', (err: Error) => {
@@ -715,6 +725,8 @@ export class CatsCompanyBot {
   }
 
   private async handleThinToolRpcRequest(request: CatsThinToolRpcMessage): Promise<void> {
+    // Shutdown fence: destroy() 开始后不再执行新的 thin-tool RPC 工具。
+    if (this.shuttingDown) return;
     const requestID = request.request_id;
     if (!requestID) return;
     Logger.info(`[CatsCompany][thin_tool_rpc] target received request: request=${requestID}, tool=${request.tool_name || ''}, targetOwner=${request.target_owner_user_id || ''}, targetDevice=${request.target_device_id || ''}, device=${request.device_id || ''}`);
@@ -740,6 +752,12 @@ export class CatsCompanyBot {
           message: result.message,
         };
 
+    // Shutdown fence: 工具执行期间 destroy() 可能已开始（quiesce 超时后继续），
+    // 此时连接即将断开，不再发送迟到结果（review 2026-08-06）。
+    if (this.shuttingDown) {
+      Logger.info(`[CatsCompany][thin_tool_rpc] destroy 已开始，丢弃 RPC 结果: request=${requestID}`);
+      return;
+    }
     try {
       await this.bot.sendThinToolRpcResult({
         request_id: requestID,
@@ -833,6 +851,8 @@ export class CatsCompanyBot {
   }
 
   private async handleDeviceRpcRequest(request: CatsDeviceRpcMessage): Promise<void> {
+    // Shutdown fence: destroy() 开始后不再执行新的设备 RPC 工具。
+    if (this.shuttingDown) return;
     const requestID = request.request_id;
     if (!requestID) return;
 
@@ -857,6 +877,12 @@ export class CatsCompanyBot {
           message: result.message,
         });
 
+    // Shutdown fence: 工具执行期间 destroy() 可能已开始（quiesce 超时后继续），
+    // 此时连接即将断开，不再发送迟到结果（review 2026-08-06）。
+    if (this.shuttingDown) {
+      Logger.info(`[CatsCompany] destroy 已开始，丢弃 Device RPC 结果: request=${requestID}`);
+      return;
+    }
     try {
       await this.bot.sendDeviceRpcResult({
         request_id: requestID,
@@ -1213,8 +1239,9 @@ export class CatsCompanyBot {
       ? opts.clearGeneration ?? this.getSessionClearGeneration(opts.sessionKey)
       : undefined;
     const isStaleCallback = (): boolean => Boolean(
-      opts?.sessionKey
-      && callbackGeneration !== this.getSessionClearGeneration(opts.sessionKey),
+      this.shuttingDown
+      || (opts?.sessionKey
+        && callbackGeneration !== this.getSessionClearGeneration(opts.sessionKey)),
     );
     return {
       onRetry: async (attempt, maxRetries, info) => {
@@ -1497,6 +1524,11 @@ export class CatsCompanyBot {
       }
       : undefined;
 
+    // Shutdown barrier after pre-turn awaits (cloud restore / attachment
+    // download / hydration): if destroy() started meanwhile, drop this turn and
+    // never enter the model path (review 2026-08-05).
+    if (this.shuttingDown) return;
+
     if (!this.tryReserveSessionExecution(key, session)) {
       const queue = this.messageQueue.get(key) ?? [];
       queue.push({
@@ -1543,6 +1575,11 @@ export class CatsCompanyBot {
       }
       if (shouldProcess) {
         task = this.beginConversationTask(key, msg.topic);
+        if (!task) {
+          // Shutdown barrier at the call site: never start the model after
+          // destroy() even when a pre-turn await resumed afterwards.
+          return;
+        }
         const result = await session.handleMessage(userMessage, {
           channel,
           sessionRoute,
@@ -1565,6 +1602,13 @@ export class CatsCompanyBot {
         });
 
         if (entryClearGeneration === this.getSessionClearGeneration(key)) {
+          // Shutdown fence: destroy() may have timed out its quiesce wait and
+          // returned while this model turn was still in flight. Never deliver a
+          // late user reply after the connector is gone.
+          if (this.shuttingDown) {
+            Logger.info(`[${key}] destroy 已开始，丢弃迟到的用户回合结果`);
+            return;
+          }
           // 最终文本回复
           let replyDelivered = true;
           if (result.visibleToUser && result.text) {
@@ -1718,7 +1762,10 @@ export class CatsCompanyBot {
     return true;
   }
 
-  private beginConversationTask(sessionKey: string, topic: string): ActiveConversationTask {
+  private beginConversationTask(sessionKey: string, topic: string): ActiveConversationTask | undefined {
+    // Shutdown barrier: shutdown 开始后禁止创建新任务（不发 running），
+    // 避免 shutdown snapshot 之后出现孤儿任务（排队消息在 drain 中被丢弃而非留下无终态任务）。
+    if (this.shuttingDown) return undefined;
     const tasks = this.activeConversationTasks ??= new Map<string, ActiveConversationTask>();
     const active = tasks.get(sessionKey);
     if (active && !active.finished) return active;
@@ -1795,6 +1842,29 @@ export class CatsCompanyBot {
       return { state: 'failed', summary: '回复发送失败', error: '回复发送失败' };
     }
     return { state: 'completed', summary: '任务已完成' };
+  }
+
+  private async finishActiveConversationTasksForShutdown(timeoutMs = 3_000): Promise<void> {
+    const activeTasks = Array.from(this.activeConversationTasks.entries());
+    for (const [sessionKey, task] of activeTasks) {
+      this.finishConversationTask(sessionKey, task, {
+        state: 'stale',
+        summary: 'Agent 正在重启，本次任务已自动中止，可重新发送',
+        error: 'connector shutdown before terminal task status',
+      });
+    }
+
+    const pending = Array.from(this.taskStatusTasks.values());
+    if (pending.length === 0) return;
+
+    let timeout: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>(resolve => {
+        timeout = setTimeout(resolve, Math.max(1, timeoutMs));
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
   }
 
   private releaseSessionExecution(sessionKey: string): void {
@@ -2006,9 +2076,25 @@ export class CatsCompanyBot {
   }
 
   /**
-   * 处理子智能体反馈注入
+   * 处理子智能体反馈注入。
+   *
+   * 入口统一收口到 shutdown fence + in-flight 计数：子智能体完成回调可能在
+   * destroy() 开始后才触发，这里必须保证它既不能启动新的模型回合，也要被
+   * destroy() 的 quiesce 等待（见 runTrackedConversationWork）。
    */
   private async handleSubAgentFeedback(
+    sessionKey: string,
+    topic: string,
+    senderId: string,
+    text: string,
+    executionScope?: ParsedCatsMessage['executionScope'],
+    clearGeneration = this.getSessionClearGeneration(sessionKey),
+  ): Promise<void> {
+    await this.runTrackedConversationWork(() =>
+      this.handleSubAgentFeedbackInner(sessionKey, topic, senderId, text, executionScope, clearGeneration));
+  }
+
+  private async handleSubAgentFeedbackInner(
     sessionKey: string,
     topic: string,
     senderId: string,
@@ -2074,6 +2160,11 @@ export class CatsCompanyBot {
       });
       if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
         Logger.info(`[${sessionKey}] clear 后忽略旧子智能体反馈结果`);
+      } else if (this.shuttingDown) {
+        // Shutdown fence: destroy() may have timed out its quiesce wait and
+        // returned while this sub-agent feedback model turn was still in
+        // flight. Do not deliver a reply, do not requeue, do not mark handled.
+        Logger.info(`[${sessionKey}] destroy 已开始，丢弃迟到的子智能体反馈结果`);
       } else if (result.text === BUSY_MESSAGE) {
         this.enqueueSubAgentFeedback(sessionKey, topic, senderId, text, executionScope, 0, clearGeneration);
         Logger.info(`[${sessionKey}] 主会话竞态忙碌，子智能体反馈已入队`);
@@ -2095,8 +2186,14 @@ export class CatsCompanyBot {
       }
     } catch (err: any) {
       if (clearGeneration === this.getSessionClearGeneration(sessionKey)) {
-        this.enqueueSubAgentFeedback(sessionKey, topic, senderId, text, executionScope, 1, clearGeneration);
-        Logger.warning(`[${sessionKey}] 子智能体反馈执行异常，已入队重试: ${err?.message || err}`);
+        // Shutdown fence: destroy() 已开始时不再入队重试，避免在已清空/销毁的
+        // 队列中留下不可消费的内存条目（与 batch/queue 的 catch 对齐）。
+        if (this.shuttingDown) {
+          Logger.info(`[${sessionKey}] destroy 已开始，跳过子智能体反馈失败重试`);
+        } else {
+          this.enqueueSubAgentFeedback(sessionKey, topic, senderId, text, executionScope, 1, clearGeneration);
+          Logger.warning(`[${sessionKey}] 子智能体反馈执行异常，已入队重试: ${err?.message || err}`);
+        }
       }
 
     } finally {
@@ -2176,7 +2273,17 @@ export class CatsCompanyBot {
     this.subAgentCompletionBatches.set(sessionKey, batch);
   }
 
+  /**
+   * 批量回流子智能体完成结果。同样经统一 shutdown fence + in-flight 计数收口：
+   * completion-batch timer 可能在 destroy() 开始后才触发，这里必须保证既不能
+   * 启动新的模型回合，也要被 destroy() 的 quiesce 等待。
+   */
   private async flushSubAgentCompletionBatch(sessionKey: string, force = false): Promise<void> {
+    await this.runTrackedConversationWork(() =>
+      this.flushSubAgentCompletionBatchInner(sessionKey, force));
+  }
+
+  private async flushSubAgentCompletionBatchInner(sessionKey: string, force = false): Promise<void> {
     const batch = this.subAgentCompletionBatches.get(sessionKey);
     if (!batch || batch.items.size === 0) return;
     if (batch.clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
@@ -2237,6 +2344,11 @@ export class CatsCompanyBot {
       });
       if (batch.clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
         Logger.info(`[${sessionKey}] clear 后忽略旧批量子任务回流结果`);
+      } else if (this.shuttingDown) {
+        // Shutdown fence: destroy() may have timed out its quiesce wait and
+        // returned while this completion-batch model turn was still in flight.
+        // Do not deliver a reply, do not requeue, do not mark handled.
+        Logger.info(`[${sessionKey}] destroy 已开始，丢弃迟到的批量回流结果`);
       } else if (result.text === BUSY_MESSAGE) {
         const pendingBatch = this.subAgentCompletionBatches.get(sessionKey);
         if (pendingBatch && pendingBatch !== batch) {
@@ -2261,6 +2373,12 @@ export class CatsCompanyBot {
     } catch (err: any) {
       Logger.warning(`后台子任务批量回流失败: ${err.message}`);
       if (batch.clearGeneration !== this.getSessionClearGeneration(sessionKey)) return;
+      // Shutdown fence: destroy() 已开始时不发兜底通知、不重试入队，避免越过
+      // 销毁边界继续产生副作用。
+      if (this.shuttingDown) {
+        Logger.info(`[${sessionKey}] destroy 已开始，跳过批量回流失败兜底`);
+        return;
+      }
       const fallback = this.formatSubAgentCompletionNotice(items, activeSubAgents.length);
       let fallbackDelivered = false;
       if (fallback) {
@@ -2489,6 +2607,8 @@ export class CatsCompanyBot {
     channelSource?: string,
     sessionKey?: string,
   ): Promise<void> {
+    // Shutdown fence: destroy() 开始后不再向外部发送子智能体运行时事件。
+    if (this.shuttingDown) return;
     const subAgentId = String(event?.subAgentId || info?.id || '');
     if (!subAgentId) return;
 
@@ -2646,6 +2766,8 @@ export class CatsCompanyBot {
    * 排空消息队列：将忙时积压的消息合并为一条，一次性处理
    */
   private async drainMessageQueue(sessionKey: string): Promise<void> {
+    // Shutdown barrier: destroy() 开始后禁止消费队列，排队用户工作不得再启动新任务。
+    if (this.shuttingDown) return;
     const queue = this.messageQueue.get(sessionKey);
     if (!queue || queue.length === 0) return;
 
@@ -2740,8 +2862,11 @@ export class CatsCompanyBot {
         );
       }
       if (shouldProcess) {
+        // Shutdown barrier: destroy() may have started while queued work ran.
+        if (this.shuttingDown) return;
         if (msg.source === 'user') {
           task = this.beginConversationTask(sessionKey, msg.topic);
+          if (!task) return;
         }
         const result = msg.source === 'subagent_feedback'
           ? await session.handleRuntimeObservation(msg.userMessage as string, {
@@ -2782,6 +2907,11 @@ export class CatsCompanyBot {
           });
         if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
           Logger.info(`[${sessionKey}] clear 后忽略已出队旧消息的返回`);
+        } else if (this.shuttingDown) {
+          // Shutdown fence: destroy() may have timed out its quiesce wait and
+          // returned while this queued model turn was still in flight. Do not
+          // deliver a reply or requeue after the connector is gone.
+          Logger.info(`[${sessionKey}] destroy 已开始，丢弃迟到出队消息的结果`);
         } else if (result.text === BUSY_MESSAGE) {
           const pending = this.messageQueue.get(sessionKey) ?? [];
           pending.unshift(msg);
@@ -2815,6 +2945,10 @@ export class CatsCompanyBot {
       const attempts = (msg.attempts ?? 0) + 1;
       if (clearGeneration !== this.getSessionClearGeneration(sessionKey)) {
         Logger.info(`[${sessionKey}] clear 后不再重试已出队的旧消息`);
+      } else if (this.shuttingDown) {
+        // Shutdown fence: destroy() 已开始时不再重试或发送错误提示，避免越过
+        // 销毁边界继续产生副作用。
+        Logger.info(`[${sessionKey}] destroy 已开始，跳过队列消息失败重试`);
       } else if (attempts <= 2) {
         const pending = this.messageQueue.get(sessionKey) ?? [];
         pending.unshift({ ...msg, attempts });
@@ -2950,10 +3084,12 @@ export class CatsCompanyBot {
    * 停止机器人
    */
   async destroy(): Promise<void> {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
     this.connectorReady = false;
     this.stopDeviceRegistrationRefresh();
-    this.bot.disconnect();
-    await this.sessionManager.destroy();
+    // 原子停止：在第一个 await 之前显式取消排队用户工作、子任务批量定时器与云恢复，
+    // 保证 shutdown 开始后 drainMessageQueue / beginConversationTask 不再消费或新建任务。
     this.pendingAttachments.clear();
     this.messageQueue.clear();
     this.sessionExecutionReservations?.clear();
@@ -2965,7 +3101,63 @@ export class CatsCompanyBot {
       if (batch.timer) clearTimeout(batch.timer);
     }
     this.subAgentCompletionBatches.clear();
+    // Interrupt every busy session before quiescing. requestInterrupt() aborts
+    // the session's active model turn (AbortController), so an in-flight
+    // handleMessage / handleRuntimeObservation returns a cancellation instead of
+    // running past the 3s quiesce budget and delivering side effects after the
+    // connector is gone (review 2026-08-05).
+    (this.sessionManager as any)?.interruptAll?.('connector shutdown');
+    // Quiesce in-flight handlers so pre-turn awaits (attachment download /
+    // cloud restore / hydration) that resume after shutdown cannot start the
+    // model (review 2026-08-05).
+    await this.waitForActiveHandlersToQuiesce();
+    // Stop any still-running sub-agents up front. Their own model turns do not
+    // pass through runTrackedConversationWork (they run inside the agent
+    // session), so an active sub-agent could otherwise keep calling the model
+    // during the destroy window until sessionManager.destroy() cascades a stop.
+    SubAgentManager.getInstance().shutdown('connector shutdown');
+    await this.sessionManager.destroy();
+    await this.finishActiveConversationTasksForShutdown();
+    this.bot.disconnect();
+    // 兜底重扫：在飞 handler quiesce 后再扫一次，捕获 snapshot 之后才注册的孤儿任务（幂等）。
+    for (const [sessionKey, task] of Array.from(this.activeConversationTasks.entries())) {
+      this.finishConversationTask(sessionKey, task, {
+        state: 'stale',
+        summary: 'Agent 正在重启，本次任务已自动中止，可重新发送',
+        error: 'connector shutdown before terminal task status',
+      });
+    }
     Logger.info('CatsCo agent 已停止');
+  }
+
+  /**
+   * Waits (with a bounded timeout) for in-flight message handlers to finish so
+   * destroy() can take a final snapshot after pre-turn awaits have quiesced.
+   */
+  private async waitForActiveHandlersToQuiesce(timeoutMs = 3000): Promise<void> {
+    if (this.activeMessageHandlers <= 0) return;
+    const deadline = Date.now() + timeoutMs;
+    while (this.activeMessageHandlers > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /**
+   * Runs a unit of conversation work under the shutdown fence and the shared
+   * in-flight handler count, so destroy() both fences new work and quiesces
+   * work that already started. Every path that can start a model turn (user
+   * turns, queued drains, sub-agent completion feedback and completion-batch
+   * flushes) must enter through here; destroy() waits for this counter.
+   */
+  private async runTrackedConversationWork<T>(work: () => Promise<T>): Promise<T | undefined> {
+    // Shutdown fence: no new model work may start after destroy() begins.
+    if (this.shuttingDown) return undefined;
+    this.activeMessageHandlers += 1;
+    try {
+      return await work();
+    } finally {
+      this.activeMessageHandlers = Math.max(0, this.activeMessageHandlers - 1);
+    }
   }
 
   private enqueuePendingAttachment(sessionKey: string, attachment: PendingAttachment): number {
