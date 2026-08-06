@@ -526,11 +526,19 @@ export class CatsCompanyBot {
     });
 
     this.bot.on('device_rpc_request', async (request: CatsDeviceRpcMessage) => {
-      await this.handleDeviceRpcRequest(request);
+      // Shutdown fence: destroy() 开始后拒绝新的设备 RPC，避免在销毁窗口内
+      // 继续执行本地 write_file/edit_file/execute_shell 等副作用工具。
+      // runTrackedConversationWork 让已进入的 RPC 工作计入 in-flight 计数，
+      // destroy() 的 quiesce 会等待它完成（review 2026-08-06）。
+      if (this.shuttingDown) return;
+      await this.runTrackedConversationWork(() => this.handleDeviceRpcRequest(request));
     });
 
     this.bot.on('thin_tool_rpc_request', async (request: CatsThinToolRpcMessage) => {
-      await this.handleThinToolRpcRequest(request);
+      // Shutdown fence: 与 device_rpc_request 一致，拒绝销毁窗口内的新
+      // thin-tool RPC，并将已进入的工作纳入 quiescence 等待。
+      if (this.shuttingDown) return;
+      await this.runTrackedConversationWork(() => this.handleThinToolRpcRequest(request));
     });
 
     this.bot.on('error', (err: Error) => {
@@ -717,6 +725,8 @@ export class CatsCompanyBot {
   }
 
   private async handleThinToolRpcRequest(request: CatsThinToolRpcMessage): Promise<void> {
+    // Shutdown fence: destroy() 开始后不再执行新的 thin-tool RPC 工具。
+    if (this.shuttingDown) return;
     const requestID = request.request_id;
     if (!requestID) return;
     Logger.info(`[CatsCompany][thin_tool_rpc] target received request: request=${requestID}, tool=${request.tool_name || ''}, targetOwner=${request.target_owner_user_id || ''}, targetDevice=${request.target_device_id || ''}, device=${request.device_id || ''}`);
@@ -742,6 +752,12 @@ export class CatsCompanyBot {
           message: result.message,
         };
 
+    // Shutdown fence: 工具执行期间 destroy() 可能已开始（quiesce 超时后继续），
+    // 此时连接即将断开，不再发送迟到结果（review 2026-08-06）。
+    if (this.shuttingDown) {
+      Logger.info(`[CatsCompany][thin_tool_rpc] destroy 已开始，丢弃 RPC 结果: request=${requestID}`);
+      return;
+    }
     try {
       await this.bot.sendThinToolRpcResult({
         request_id: requestID,
@@ -835,6 +851,8 @@ export class CatsCompanyBot {
   }
 
   private async handleDeviceRpcRequest(request: CatsDeviceRpcMessage): Promise<void> {
+    // Shutdown fence: destroy() 开始后不再执行新的设备 RPC 工具。
+    if (this.shuttingDown) return;
     const requestID = request.request_id;
     if (!requestID) return;
 
@@ -859,6 +877,12 @@ export class CatsCompanyBot {
           message: result.message,
         });
 
+    // Shutdown fence: 工具执行期间 destroy() 可能已开始（quiesce 超时后继续），
+    // 此时连接即将断开，不再发送迟到结果（review 2026-08-06）。
+    if (this.shuttingDown) {
+      Logger.info(`[CatsCompany] destroy 已开始，丢弃 Device RPC 结果: request=${requestID}`);
+      return;
+    }
     try {
       await this.bot.sendDeviceRpcResult({
         request_id: requestID,
