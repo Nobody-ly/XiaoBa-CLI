@@ -13,6 +13,7 @@ const {
 
 function makeHarness(overrides = {}) {
   let nowValue = 0;
+  let nextTimerId = 0;
   const timers = [];
   const reloaded = [];
   const window = overrides.window || {
@@ -23,10 +24,14 @@ function makeHarness(overrides = {}) {
     window,
     now: () => nowValue,
     scheduleReload: (fn) => {
-      timers.push(fn);
-      return timers.length;
+      nextTimerId += 1;
+      timers.push({ id: nextTimerId, fn });
+      return nextTimerId;
     },
-    clearReload: () => {},
+    clearReload: (id) => {
+      const index = timers.findIndex((timer) => timer.id === id);
+      if (index >= 0) timers.splice(index, 1);
+    },
     reloadWindow: (target) => reloaded.push(target),
     ...overrides,
   });
@@ -39,9 +44,9 @@ function makeHarness(overrides = {}) {
       nowValue = value;
     },
     fire: () => {
-      // fire the latest scheduled reload callback synchronously
-      const fn = timers.pop();
-      if (fn) fn();
+      // fire the most recently scheduled callback synchronously
+      const last = timers.pop();
+      if (last) last.fn();
     },
   };
 }
@@ -89,7 +94,7 @@ test('retry budget is bounded within the recovery window', () => {
   assert.equal(reloaded.length, MAX_RELOADS_IN_WINDOW);
 });
 
-test('retry budget resets after did-finish-load (reset)', () => {
+test('explicit reset reopens the budget', () => {
   const { guard, timers, reloaded, fire, setNow } = makeHarness();
   for (let i = 0; i < MAX_RELOADS_IN_WINDOW; i++) {
     guard.onRenderProcessGone('crashed');
@@ -100,6 +105,44 @@ test('retry budget resets after did-finish-load (reset)', () => {
   setNow(MAX_RELOADS_IN_WINDOW * 1000);
   const afterReset = guard.onRenderProcessGone('crashed');
   assert.equal(afterReset.recovered, true);
+});
+
+test('crash -> reload -> load loop cannot reset its own budget (lifecycle regression)', () => {
+  const { guard, timers, reloaded, fire, setNow } = makeHarness();
+  // Two full crash/reload/load rounds inside the 30s window.
+  for (let round = 0; round < MAX_RELOADS_IN_WINDOW; round++) {
+    setNow(round * 1000);
+    const outcome = guard.onRenderProcessGone('crashed');
+    assert.equal(outcome.recovered, true, `round ${round + 1} should schedule`);
+    fire(); // delayed reload fires and records a timestamp
+    guard.onLoadFinished(); // page loads; must NOT clear the budget
+  }
+  assert.equal(reloaded.length, MAX_RELOADS_IN_WINDOW);
+  // Third crash within the window -> budget still exhausted despite the loads.
+  setNow(MAX_RELOADS_IN_WINDOW * 1000);
+  const exhausted = guard.onRenderProcessGone('crashed');
+  assert.deepEqual(exhausted, { recovered: false, reason: 'retries-exhausted' });
+  fire();
+  assert.equal(reloaded.length, MAX_RELOADS_IN_WINDOW);
+});
+
+test('budget recovers only after a stability period without crashes', () => {
+  const { guard, timers, fire, setNow } = makeHarness();
+  // Crash -> reload -> successful load starts the stability timer.
+  guard.onRenderProcessGone('crashed');
+  fire();
+  guard.onLoadFinished();
+  assert.equal(timers.length, 1); // the stability timer
+  // Crash again within the stability period -> budget still counts.
+  setNow(5_000);
+  const withinStable = guard.onRenderProcessGone('crashed');
+  assert.equal(withinStable.recovered, true);
+  // Load again and stay stable past the 30s window -> budget resets.
+  guard.onLoadFinished();
+  setNow(40_000);
+  fire(); // stability timer fires -> reset
+  const afterStable = guard.onRenderProcessGone('crashed');
+  assert.equal(afterStable.recovered, true);
 });
 
 test('reload never fires for a window that was destroyed (window replaced)', () => {

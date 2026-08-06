@@ -597,7 +597,11 @@ function createWindow() {
     }
   });
   mainWindow.webContents.on('did-finish-load', () => {
-    rendererGoneGuard.reset();
+    // Do NOT clear the retry budget immediately on load: a crash -> reload ->
+    // load loop would reset its own budget every round and bypass the cap.
+    // The guard clears it only after the page stays loaded for a stability
+    // period (30s), keeping the bounded retry effective.
+    rendererGoneGuard.onLoadFinished();
   });
 }
 

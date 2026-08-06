@@ -23,13 +23,32 @@ function createRendererGoneGuard(options = {}) {
   const clearReload = options.clearReload || ((timer) => clearTimeout(timer));
   const reloadWindow = options.reloadWindow || ((win) => win.reload());
   const log = options.log || (() => {});
+  const stableWindowMs = options.stableWindowMs || RECOVERY_WINDOW_MS;
 
   let windowRef = options.window || null;
   let reloadTimestamps = [];
   let pendingTimer = null;
+  let stableTimer = null;
 
   function reset() {
     reloadTimestamps = [];
+    if (stableTimer !== null) {
+      clearReload(stableTimer);
+      stableTimer = null;
+    }
+  }
+
+  // Called on each successful page load. Starts (or restarts) a stability
+  // timer; the retry budget is only cleared after the window has stayed loaded
+  // for stableWindowMs. Crashes within the stability period keep earlier
+  // reloads on record, so a crash -> reload -> load loop cannot reset its own
+  // budget and bypass the retry cap.
+  function onLoadFinished() {
+    if (stableTimer !== null) clearReload(stableTimer);
+    stableTimer = scheduleReload(() => {
+      stableTimer = null;
+      reset();
+    }, stableWindowMs);
   }
 
   function onRenderProcessGone(reason) {
@@ -59,7 +78,7 @@ function createRendererGoneGuard(options = {}) {
     return { recovered: true, reason: 'scheduled' };
   }
 
-  return { onRenderProcessGone, reset };
+  return { onRenderProcessGone, onLoadFinished, reset };
 }
 
 module.exports = {
