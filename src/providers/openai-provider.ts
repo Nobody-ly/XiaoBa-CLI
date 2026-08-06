@@ -28,6 +28,7 @@ interface ResponsesFailureMetadata {
   failurePhase?: ResponsesFailurePhase;
   terminalEvent?: string;
   responseId?: string;
+  requestId?: string;
 }
 
 interface ResponsesBreakpointDiagnostic {
@@ -1093,7 +1094,12 @@ export class OpenAIProvider implements AIProvider {
       || details?.response_id
       || '',
     ).trim();
-    const requestId = String(details?.request_id || response?.request_id || '').trim();
+    const requestId = String(
+      details?.request_id
+      || response?.request_id
+      || metadata.requestId
+      || '',
+    ).trim();
     return Object.assign(
       new Error(String(details?.message || 'Responses API request failed')),
       {
@@ -1120,15 +1126,48 @@ export class OpenAIProvider implements AIProvider {
       type: 'stream_error',
       message,
     };
+    const { requestId, ...failureMetadata } = metadata;
     return Object.assign(new Error(message), {
       code: details.code,
       providerCode: details.code,
       providerType: details.type,
       status: 502,
       error: details,
-      ...metadata,
-      ...(cause ? { cause } : {}),
+      ...failureMetadata,
+      ...(requestId ? { request_id: requestId } : {}),
+      ...(cause !== undefined ? { cause } : {}),
     });
+  }
+
+  private responsesRequestIdFromHeaders(headers: any): string | undefined {
+    for (const name of ['x-request-id', 'request-id', 'openai-request-id', 'x-openai-request-id']) {
+      let value: unknown;
+      try {
+        value = headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.toLowerCase()];
+      } catch {
+        // Some Axios-compatible header implementations can throw for unknown keys.
+      }
+      if (value === undefined && headers && typeof headers === 'object') {
+        const matchingKey = Object.keys(headers).find(key => key.toLowerCase() === name);
+        if (matchingKey) value = headers[matchingKey];
+      }
+      if (Array.isArray(value)) value = value[0];
+      const requestId = typeof value === 'string' ? value.trim() : '';
+      if (requestId) return requestId;
+    }
+    return undefined;
+  }
+
+  private isStructuredResponsesStreamError(error: any): boolean {
+    return [
+      error?.code,
+      error?.status,
+      error?.response?.status,
+      error?.providerCode,
+      error?.providerType,
+      error?.error?.code,
+      error?.error?.type,
+    ].some(value => value !== undefined && value !== null && String(value).trim() !== '');
   }
 
   private parseResponsesUsage(usage: any): ChatResponse['usage'] {
@@ -1227,10 +1266,12 @@ export class OpenAIProvider implements AIProvider {
       );
     }
     ContextDebugLogger.dumpSdkBoundary('after', undefined, { response: response.data });
+    const responseRequestId = this.responsesRequestIdFromHeaders(response.headers);
     const failure = this.responsesFailureError(response.data, {
       failurePhase: 'terminal_event',
       terminalEvent: response.data?.status === 'failed' ? 'response.failed' : undefined,
       responseId: response.data?.id,
+      requestId: responseRequestId,
     });
     if (failure) throw failure;
     const result = this.parseResponsesResponse(response.data);
@@ -1274,6 +1315,8 @@ export class OpenAIProvider implements AIProvider {
         this.responsesUrl, body, true, options, retryHeaders,
       );
     }
+
+    const responseRequestId = this.responsesRequestIdFromHeaders(response.headers);
 
     return new Promise<ChatResponse>((resolve, reject) => {
       const stream = response.data;
@@ -1334,6 +1377,7 @@ export class OpenAIProvider implements AIProvider {
         if (event?.type === 'response.failed' || event?.type === 'error') {
           const failure = this.responsesFailureError(event?.response || {
             status: 'failed',
+            request_id: event?.request_id,
             error: event?.error || {
               code: event?.code,
               message: event?.message,
@@ -1342,6 +1386,7 @@ export class OpenAIProvider implements AIProvider {
             failurePhase: 'terminal_event',
             terminalEvent: event?.type,
             responseId: event?.response?.id || event?.response_id,
+            requestId: responseRequestId,
           });
           finishError(failure || new Error('Responses API request failed'));
         }
@@ -1373,7 +1418,11 @@ export class OpenAIProvider implements AIProvider {
         if (!finalResponse) {
           finishError(this.responsesStreamError(
             'Responses API stream ended without a terminal response',
-            { failurePhase: 'stream', terminalEvent: 'stream.end' },
+            {
+              failurePhase: 'stream',
+              terminalEvent: 'stream.end',
+              requestId: responseRequestId,
+            },
           ));
           return;
         }
@@ -1381,6 +1430,7 @@ export class OpenAIProvider implements AIProvider {
           failurePhase: 'terminal_event',
           terminalEvent: finalResponse?.status === 'failed' ? 'response.failed' : undefined,
           responseId: finalResponse?.id,
+          requestId: responseRequestId,
         });
         if (failure) {
           finishError(failure);
@@ -1413,11 +1463,33 @@ export class OpenAIProvider implements AIProvider {
           finishError(error);
           return;
         }
-        Object.assign(error, {
-          failurePhase: 'stream',
-          terminalEvent: 'stream.error',
-        });
-        finishError(error);
+        if (this.isStructuredResponsesStreamError(error)) {
+          const existingRequestId = String(
+            (error as any)?.request_id
+            || (error as any)?.requestId
+            || (error as any)?.error?.request_id
+            || (error as any)?.response?.request_id
+            || (error as any)?.response?.data?.request_id
+            || (error as any)?.response?.data?.error?.request_id
+            || '',
+          ).trim();
+          Object.assign(error, {
+            failurePhase: 'stream',
+            terminalEvent: 'stream.error',
+            ...(!existingRequestId && responseRequestId ? { request_id: responseRequestId } : {}),
+          });
+          finishError(error);
+          return;
+        }
+        finishError(this.responsesStreamError(
+          error?.message || 'Responses API stream read failed',
+          {
+            failurePhase: 'stream',
+            terminalEvent: 'stream.error',
+            requestId: responseRequestId,
+          },
+          error,
+        ));
       });
     });
   }

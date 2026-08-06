@@ -5,6 +5,7 @@ import axios from 'axios';
 import { OpenAIProvider } from '../src/providers/openai-provider';
 import { AIService } from '../src/utils/ai-service';
 import { Logger } from '../src/utils/logger';
+import { captureModelErrorDiagnostics } from '../src/utils/model-error-observability';
 import type { Message } from '../src/types';
 import type { ToolDefinition } from '../src/types/tool';
 
@@ -336,6 +337,7 @@ describe('OpenAIProvider Responses API mode', () => {
           request_id: 'req_failed_1',
         },
       },
+      headers: { 'X-Request-Id': 'req_header_fallback' },
     });
 
     try {
@@ -551,6 +553,7 @@ describe('OpenAIProvider Responses API mode', () => {
           },
         }),
       ]),
+      headers: { 'x-request-id': 'req_header_fallback' },
     });
 
     try {
@@ -564,6 +567,41 @@ describe('OpenAIProvider Responses API mode', () => {
           && error?.request_id === 'req_stream_failed'
           && error?.terminalEvent === 'response.failed'
           && error?.failurePhase === 'terminal_event'
+        ),
+      );
+    } finally {
+      (axios as any).post = originalPost;
+    }
+  });
+
+  test('preserves the response header request ID when a terminal failure has none', async () => {
+    const originalPost = axios.post;
+    (axios as any).post = async () => ({
+      data: Readable.from([
+        sse({
+          type: 'response.failed',
+          response: {
+            id: 'resp_header_only',
+            status: 'failed',
+            error: {
+              code: 'upstream_error',
+              type: 'server_error',
+              message: 'upstream unavailable',
+            },
+          },
+        }),
+      ]),
+      headers: {
+        get: (name: string) => name === 'x-request-id' ? 'req_header_only' : undefined,
+      },
+    });
+
+    try {
+      await assert.rejects(
+        createProvider().chatStream([{ role: 'user', content: 'hello' }]),
+        (error: any) => (
+          error?.request_id === 'req_header_only'
+          && captureModelErrorDiagnostics(error).request_id === 'req_header_only'
         ),
       );
     } finally {
@@ -591,6 +629,61 @@ describe('OpenAIProvider Responses API mode', () => {
           && error?.status === 503
           && error?.terminalEvent === 'error'
           && error?.failurePhase === 'terminal_event'
+        ),
+      );
+    } finally {
+      (axios as any).post = originalPost;
+    }
+  });
+
+  test('normalizes an unstructured Readable error with its cause and header request ID', async () => {
+    const originalPost = axios.post;
+    const sourceError = new Error('socket stream interrupted');
+    (axios as any).post = async () => ({
+      data: Readable.from((async function* () {
+        throw sourceError;
+      })()),
+      headers: { 'x-request-id': 'req_stream_error' },
+    });
+
+    try {
+      await assert.rejects(
+        createProvider().chatStream([{ role: 'user', content: 'hello' }]),
+        (error: any) => (
+          error?.code === 'stream_read_error'
+          && error?.providerCode === 'stream_read_error'
+          && error?.providerType === 'stream_error'
+          && error?.status === 502
+          && error?.cause === sourceError
+          && error?.request_id === 'req_stream_error'
+          && error?.failurePhase === 'stream'
+          && error?.terminalEvent === 'stream.error'
+        ),
+      );
+    } finally {
+      (axios as any).post = originalPost;
+    }
+  });
+
+  test('preserves structured Readable transport errors while adding stream metadata', async () => {
+    const originalPost = axios.post;
+    const sourceError = Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+    (axios as any).post = async () => ({
+      data: Readable.from((async function* () {
+        throw sourceError;
+      })()),
+      headers: { 'x-request-id': 'req_structured_stream_error' },
+    });
+
+    try {
+      await assert.rejects(
+        createProvider().chatStream([{ role: 'user', content: 'hello' }]),
+        (error: any) => (
+          error === sourceError
+          && error?.code === 'ECONNRESET'
+          && error?.request_id === 'req_structured_stream_error'
+          && error?.failurePhase === 'stream'
+          && error?.terminalEvent === 'stream.error'
         ),
       );
     } finally {
@@ -659,6 +752,64 @@ describe('OpenAIProvider Responses API mode', () => {
       assert.equal(bodies[0].prompt_cache_key, bodies[1].prompt_cache_key);
       assert.equal(requestHeaders[0].session_id, requestHeaders[1].session_id);
       assert.equal(requestHeaders[0]['x-client-request-id'], requestHeaders[1]['x-client-request-id']);
+    } finally {
+      (axios as any).post = originalPost;
+      if (originalRetries === undefined) delete process.env.CATSCO_MODEL_RETRY_MAX_RETRIES;
+      else process.env.CATSCO_MODEL_RETRY_MAX_RETRIES = originalRetries;
+    }
+  });
+
+  test('retries an unstructured Readable error without publishing abandoned text', async () => {
+    const originalPost = axios.post;
+    const originalRetries = process.env.CATSCO_MODEL_RETRY_MAX_RETRIES;
+    let attempts = 0;
+    (axios as any).post = async () => {
+      attempts += 1;
+      return {
+        data: attempts === 1
+          ? Readable.from((async function* () {
+              yield sse({ type: 'response.output_text.delta', delta: 'abandoned' });
+              throw new Error('socket stream interrupted');
+            })())
+          : Readable.from([
+              sse({ type: 'response.output_text.delta', delta: 'recovered' }),
+              sse({
+                type: 'response.completed',
+                response: {
+                  status: 'completed',
+                  output: [{
+                    type: 'message',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'recovered' }],
+                  }],
+                },
+              }),
+            ]),
+        headers: { 'x-request-id': `req_attempt_${attempts}` },
+      };
+    };
+    process.env.CATSCO_MODEL_RETRY_MAX_RETRIES = '1';
+
+    try {
+      const service = new AIService({
+        apiKey: 'test-key',
+        apiUrl: 'https://example.test/v1',
+        model: 'gpt-test',
+        provider: 'openai',
+        openaiApiMode: 'responses',
+      });
+      (service as any).sleepWithAbort = async () => {};
+      const delivered: string[] = [];
+      const result = await service.chatStream(
+        [{ role: 'user', content: 'hello' }],
+        undefined,
+        { onText: text => delivered.push(text) },
+        { streamOutputMode: 'buffered' },
+      );
+
+      assert.equal(attempts, 2);
+      assert.equal(result.content, 'recovered');
+      assert.deepEqual(delivered, ['recovered']);
     } finally {
       (axios as any).post = originalPost;
       if (originalRetries === undefined) delete process.env.CATSCO_MODEL_RETRY_MAX_RETRIES;
