@@ -2,13 +2,16 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell } = 
 const path = require('path');
 const fs = require('fs');
 const { normalizeUpdateError } = require('./update-errors');
+const { shouldDisableHardwareAcceleration } = require('./gpu-compat');
+const { createRendererGoneGuard } = require('./renderer-gone');
 
-// Compatibility: render with software (SwiftShader) instead of GPU-accelerated
-// compositing. Intel Macs running OCLP-patched macOS with legacy NVIDIA GPUs
-// (e.g. GTX 675MX in the Late-2012 iMac) crash the GPU process on launch when
-// hardware acceleration is enabled. The dashboard UI is lightweight and does
-// not require GPU compositing.
-app.disableHardwareAcceleration();
+// Compatibility: render with software (SwiftShader) on Intel Macs, where
+// OCLP-patched macOS with legacy NVIDIA GPUs (e.g. GTX 675MX in the Late-2012
+// iMac) crash the GPU process on launch. Other platforms keep hardware
+// acceleration; XIAOBA_DISABLE_GPU=1 forces software rendering anywhere.
+if (shouldDisableHardwareAcceleration()) {
+  app.disableHardwareAcceleration();
+}
 
 const DASHBOARD_PORT = resolveDashboardPort(process.env.XIAOBA_DASHBOARD_PORT);
 const DEEP_LINK_PROTOCOL = 'catsco';
@@ -578,16 +581,23 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Fallback for renderer crashes (e.g. software-renderer hiccups on old Intel
-  // machines): reload instead of leaving a dead window or exiting.
+  // Bounded auto-recovery for transient renderer crashes (e.g. software-renderer
+  // hiccups on old Intel Macs). Only crashed/oom/abnormal-exit reload, at most
+  // MAX_RELOADS_IN_WINDOW times within the recovery window; unrecoverable
+  // failures surface an error dialog instead of looping forever.
+  const rendererGoneGuard = createRendererGoneGuard({
+    window: mainWindow,
+    log: (message) => console.error('[desktop] renderer recovery:', message),
+  });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    console.error('[desktop] renderer process gone:', details?.reason);
-    if (app.isQuitting) return;
-    setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.reload();
-      }
-    }, 1500);
+    const outcome = rendererGoneGuard.onRenderProcessGone(details?.reason);
+    if (!outcome.recovered) {
+      console.error('[desktop] renderer process gone, no auto-recovery:', details?.reason, outcome.reason);
+      dialog.showErrorBox('CatsCo 运行异常', '界面渲染进程异常退出，无法自动恢复，请重新打开应用。');
+    }
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    rendererGoneGuard.reset();
   });
 }
 
