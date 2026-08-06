@@ -3,6 +3,13 @@ const path = require('path');
 const fs = require('fs');
 const { normalizeUpdateError } = require('./update-errors');
 
+// Compatibility: render with software (SwiftShader) instead of GPU-accelerated
+// compositing. Intel Macs running OCLP-patched macOS with legacy NVIDIA GPUs
+// (e.g. GTX 675MX in the Late-2012 iMac) crash the GPU process on launch when
+// hardware acceleration is enabled. The dashboard UI is lightweight and does
+// not require GPU compositing.
+app.disableHardwareAcceleration();
+
 const DASHBOARD_PORT = resolveDashboardPort(process.env.XIAOBA_DASHBOARD_PORT);
 const DEEP_LINK_PROTOCOL = 'catsco';
 const TRUSTED_DEEP_LINK_BASE_ORIGINS = new Set(['https://app.catsco.cc']);
@@ -570,6 +577,18 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // Fallback for renderer crashes (e.g. software-renderer hiccups on old Intel
+  // machines): reload instead of leaving a dead window or exiting.
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[desktop] renderer process gone:', details?.reason);
+    if (app.isQuitting) return;
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.reload();
+      }
+    }, 1500);
+  });
 }
 
 function isTrustedDashboardUrl(value) {
@@ -859,6 +878,12 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('child-process-gone', (_event, details) => {
+  // Observability for utility/GPU crashes; hardware acceleration is disabled
+  // above, so this mainly fires for unexpected utility process failures.
+  console.error('[desktop] child process gone:', details?.type, details?.reason);
 });
 
 app.on('before-quit', () => {
