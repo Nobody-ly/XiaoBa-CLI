@@ -19,6 +19,16 @@ import { createProviderStateReference, isProviderStateCompatible } from './provi
 
 const MAX_PROVIDER_ERROR_BODY_BYTES = 64 * 1024;
 const PROVIDER_ERROR_BODY_READ_TIMEOUT_MS = 2_000;
+const DEFAULT_RESPONSES_HEADERS_TIMEOUT_MS = 120_000;
+const MAX_RESPONSES_HEADERS_TIMEOUT_MS = 10 * 60 * 1000;
+
+type ResponsesFailurePhase = 'headers' | 'stream' | 'terminal_event';
+
+interface ResponsesFailureMetadata {
+  failurePhase?: ResponsesFailurePhase;
+  terminalEvent?: string;
+  responseId?: string;
+}
 
 interface ResponsesBreakpointDiagnostic {
   label: 'S';
@@ -1053,29 +1063,72 @@ export class OpenAIProvider implements AIProvider {
     };
   }
 
-  private responsesFailureError(response: any): Error | undefined {
+  private responsesFailureError(
+    response: any,
+    metadata: ResponsesFailureMetadata = {},
+  ): Error | undefined {
     if (response?.status !== 'failed' && !response?.error) return undefined;
     const details = response?.error && typeof response.error === 'object'
       ? response.error
       : { message: response?.error };
-    const code = String(details?.code || details?.type || '').trim();
+    const providerCode = String(details?.code || '').trim();
+    const providerType = String(details?.type || '').trim();
+    const code = providerCode || providerType;
     const statusByCode: Record<string, number> = {
       server_error: 500,
       rate_limit_exceeded: 429,
       overloaded_error: 529,
+      stream_read_error: 502,
+      upstream_error: 502,
+      server_is_overloaded: 503,
+      service_unavailable_error: 503,
     };
     const explicitStatus = Number(details?.status ?? details?.status_code ?? response?.status_code);
     const status = Number.isFinite(explicitStatus) && explicitStatus > 0
       ? explicitStatus
-      : statusByCode[code];
+      : statusByCode[providerCode] ?? statusByCode[providerType];
+    const responseId = String(
+      metadata.responseId
+      || response?.id
+      || details?.response_id
+      || '',
+    ).trim();
+    const requestId = String(details?.request_id || response?.request_id || '').trim();
     return Object.assign(
       new Error(String(details?.message || 'Responses API request failed')),
       {
         ...(code ? { code } : {}),
+        ...(providerCode ? { providerCode } : {}),
+        ...(providerType ? { providerType } : {}),
         ...(status ? { status } : {}),
+        ...(requestId ? { request_id: requestId } : {}),
+        ...(responseId ? { responseId } : {}),
+        ...(metadata.failurePhase ? { failurePhase: metadata.failurePhase } : {}),
+        ...(metadata.terminalEvent ? { terminalEvent: metadata.terminalEvent } : {}),
         error: details,
       },
     );
+  }
+
+  private responsesStreamError(
+    message: string,
+    metadata: ResponsesFailureMetadata,
+    cause?: unknown,
+  ): Error {
+    const details = {
+      code: 'stream_read_error',
+      type: 'stream_error',
+      message,
+    };
+    return Object.assign(new Error(message), {
+      code: details.code,
+      providerCode: details.code,
+      providerType: details.type,
+      status: 502,
+      error: details,
+      ...metadata,
+      ...(cause ? { cause } : {}),
+    });
   }
 
   private parseResponsesUsage(usage: any): ChatResponse['usage'] {
@@ -1174,7 +1227,11 @@ export class OpenAIProvider implements AIProvider {
       );
     }
     ContextDebugLogger.dumpSdkBoundary('after', undefined, { response: response.data });
-    const failure = this.responsesFailureError(response.data);
+    const failure = this.responsesFailureError(response.data, {
+      failurePhase: 'terminal_event',
+      terminalEvent: response.data?.status === 'failed' ? 'response.failed' : undefined,
+      responseId: response.data?.id,
+    });
     if (failure) throw failure;
     const result = this.parseResponsesResponse(response.data);
     this.logResponsesCacheUsage(
@@ -1277,7 +1334,14 @@ export class OpenAIProvider implements AIProvider {
         if (event?.type === 'response.failed' || event?.type === 'error') {
           const failure = this.responsesFailureError(event?.response || {
             status: 'failed',
-            error: event?.error || { message: event?.message },
+            error: event?.error || {
+              code: event?.code,
+              message: event?.message,
+            },
+          }, {
+            failurePhase: 'terminal_event',
+            terminalEvent: event?.type,
+            responseId: event?.response?.id || event?.response_id,
           });
           finishError(failure || new Error('Responses API request failed'));
         }
@@ -1307,10 +1371,17 @@ export class OpenAIProvider implements AIProvider {
         const tail = contentStripper.flush();
         emitVisibleText(tail);
         if (!finalResponse) {
-          finishError(new Error('Responses API stream ended without a terminal response'));
+          finishError(this.responsesStreamError(
+            'Responses API stream ended without a terminal response',
+            { failurePhase: 'stream', terminalEvent: 'stream.end' },
+          ));
           return;
         }
-        const failure = this.responsesFailureError(finalResponse);
+        const failure = this.responsesFailureError(finalResponse, {
+          failurePhase: 'terminal_event',
+          terminalEvent: finalResponse?.status === 'failed' ? 'response.failed' : undefined,
+          responseId: finalResponse?.id,
+        });
         if (failure) {
           finishError(failure);
           return;
@@ -1338,6 +1409,14 @@ export class OpenAIProvider implements AIProvider {
 
       stream.on('error', (error: Error) => {
         options?.signal?.removeEventListener('abort', onAbort);
+        if (isProviderAbortError(error) || options?.signal?.aborted) {
+          finishError(error);
+          return;
+        }
+        Object.assign(error, {
+          failurePhase: 'stream',
+          terminalEvent: 'stream.error',
+        });
         finishError(error);
       });
     });
@@ -1362,17 +1441,60 @@ export class OpenAIProvider implements AIProvider {
     options?: AIRequestOptions,
     headers: Record<string, string> = this.headers,
   ): Promise<any> {
+    const headersTimeoutMs = stream && url === this.responsesUrl
+      ? this.responsesHeadersTimeoutMs()
+      : 0;
+    const watchdogController = headersTimeoutMs > 0 ? new AbortController() : undefined;
+    let watchdogTimedOut = false;
+    let watchdogTimer: NodeJS.Timeout | undefined;
+    const onUserAbort = () => watchdogController?.abort();
+    if (watchdogController && options?.signal) {
+      if (options.signal.aborted) watchdogController.abort();
+      else options.signal.addEventListener('abort', onUserAbort, { once: true });
+    }
+    if (watchdogController) {
+      watchdogTimer = setTimeout(() => {
+        watchdogTimedOut = true;
+        watchdogController.abort();
+      }, headersTimeoutMs);
+    }
+
     try {
       return await axios.post(url, body, {
         headers,
         ...(stream ? { responseType: 'stream' as const } : {}),
-        signal: options?.signal,
+        signal: watchdogController?.signal ?? options?.signal,
       });
     } catch (error) {
+      if (watchdogTimedOut) {
+        throw Object.assign(
+          new Error(`Responses API did not return headers within ${headersTimeoutMs}ms`),
+          {
+            name: 'ResponsesHeadersTimeoutError',
+            code: 'XIAOBA_RESPONSES_HEADERS_TIMEOUT',
+            status: 504,
+            providerCode: 'headers_timeout',
+            failurePhase: 'headers' as const,
+            cause: error,
+          },
+        );
+      }
       if (options?.signal?.aborted || isProviderAbortError(error)) throw error;
       const normalizedError = await this.normalizeProviderErrorResponse(error);
       throw normalizedError;
+    } finally {
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      options?.signal?.removeEventListener('abort', onUserAbort);
     }
+  }
+
+  private responsesHeadersTimeoutMs(): number {
+    const raw = String(process.env.XIAOBA_RESPONSES_HEADERS_TIMEOUT_MS || '').trim();
+    if (!raw) return DEFAULT_RESPONSES_HEADERS_TIMEOUT_MS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return DEFAULT_RESPONSES_HEADERS_TIMEOUT_MS;
+    if (parsed <= 0) return 0;
+    return Math.min(MAX_RESPONSES_HEADERS_TIMEOUT_MS, Math.max(1, Math.floor(parsed)));
   }
 
   private async normalizeProviderErrorResponse(error: unknown): Promise<unknown> {
