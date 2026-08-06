@@ -72,6 +72,11 @@ import {
   CatsCompanyCloudSessionRestorer,
   type CloudSessionRestoreResult,
 } from './cloud-session-restore';
+import {
+  SkillHubThinRpcError,
+  SkillHubThinRpcHandler,
+  SKILLHUB_THIN_RPC_TOOLS,
+} from './skillhub-rpc';
 
 interface PendingAttachment {
   fileName: string;
@@ -173,6 +178,10 @@ export const CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[
   'edit_file',
   'send_file',
   'execute_shell',
+  SKILLHUB_THIN_RPC_TOOLS.workspace,
+  SKILLHUB_THIN_RPC_TOOLS.share,
+  SKILLHUB_THIN_RPC_TOOLS.finalize,
+  SKILLHUB_THIN_RPC_TOOLS.switchBot,
 ];
 
 function currentRuntimeOS(): 'windows' | 'macos' | 'linux' | 'unknown' {
@@ -441,6 +450,7 @@ export class CatsCompanyBot {
     capabilities: string[];
     model_status?: ReturnType<typeof resolveCatsDeviceModelStatus>;
   };
+  private readonly skillHubThinRpc: SkillHubThinRpcHandler;
 
   constructor(config: CatsCompanyConfig) {
     this.botUid = String(config.botUid || '').trim() || null;
@@ -476,6 +486,9 @@ export class CatsCompanyBot {
       capabilities: [...CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES],
     });
     this.deviceRegistration = deviceRegistration;
+    this.skillHubThinRpc = new SkillHubThinRpcHandler({
+      isShuttingDown: () => this.shuttingDown,
+    });
 
     const runtime = createCatsCompanyRuntime(config.sessionTTL);
     this.runtime = runtime;
@@ -731,6 +744,11 @@ export class CatsCompanyBot {
     if (!requestID) return;
     Logger.info(`[CatsCompany][thin_tool_rpc] target received request: request=${requestID}, tool=${request.tool_name || ''}, targetOwner=${request.target_owner_user_id || ''}, targetDevice=${request.target_device_id || ''}, device=${request.device_id || ''}`);
 
+    if (this.skillHubThinRpc.supports(String(request.tool_name || ''))) {
+      await this.handleSkillHubThinToolRpcRequest(request);
+      return;
+    }
+
     let result: ToolExecutionResult;
     try {
       result = await this.executeLocalThinToolRpcTool(request);
@@ -771,6 +789,36 @@ export class CatsCompanyBot {
       Logger.info(`[CatsCompany][thin_tool_rpc] target sent result: request=${requestID}, tool=${request.tool_name || ''}, ok=${result.ok}`);
     } catch (err: any) {
       Logger.warning(`[CatsCompany] Thin Tool RPC result send failed: request=${requestID}, error=${err?.message || err}`);
+    }
+  }
+
+  private async handleSkillHubThinToolRpcRequest(request: CatsThinToolRpcMessage): Promise<void> {
+    let result: Record<string, unknown> | undefined;
+    let error: { code: string; message: string } | undefined;
+    try {
+      result = await this.skillHubThinRpc.execute(request);
+    } catch (caught: any) {
+      error = {
+        code: caught instanceof SkillHubThinRpcError ? caught.code : 'SKILLHUB_OPERATION_FAILED',
+        message: caught?.message || 'SkillHub device operation failed.',
+      };
+    }
+    if (this.shuttingDown) {
+      Logger.info(`[CatsCompany][thin_tool_rpc] destroy started, dropping SkillHub RPC result: request=${request.request_id}`);
+      return;
+    }
+    try {
+      await this.bot.sendThinToolRpcResult({
+        request_id: request.request_id,
+        target_owner_user_id: request.target_owner_user_id,
+        target_device_id: request.target_device_id,
+        device_id: this.localDeviceGrant?.deviceId || request.device_id || request.target_device_id,
+        tool_name: request.tool_name,
+        result: error ? undefined : result,
+        error,
+      });
+    } catch (caught: any) {
+      Logger.warning(`[CatsCompany] SkillHub Thin Tool RPC result send failed: request=${request.request_id}, error=${caught?.message || caught}`);
     }
   }
 

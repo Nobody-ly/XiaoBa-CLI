@@ -595,6 +595,7 @@ describe('CatsCompany Device RPC file tools', () => {
         captured.result = result;
       },
     };
+    bot.skillHubThinRpc = { supports: () => false };
     bot.executeLocalThinToolRpcTool = async () => {
       bot.shuttingDown = true;
       return { ok: true, content: 'executed' };
@@ -613,5 +614,37 @@ describe('CatsCompany Device RPC file tools', () => {
     } as any);
 
     assert.equal(captured.result, undefined, 'late thin-tool RPC result must not be sent after shutdown started');
+  });
+
+  test('drops a late SkillHub thin-tool RPC result when shutdown starts during execution', async () => {
+    const captured: { result?: any } = {};
+    const bot = Object.create(CatsCompanyBot.prototype) as any;
+    bot.shuttingDown = false;
+    bot.bot = {
+      sendThinToolRpcResult: async (result: any) => {
+        captured.result = result;
+      },
+    };
+    bot.skillHubThinRpc = {
+      supports: () => true,
+      execute: async () => {
+        bot.shuttingDown = true;
+        return { bot_uid: '42' };
+      },
+    };
+
+    await bot.handleThinToolRpcRequest({
+      type: 'request',
+      request_id: 'rpc-late-skillhub-1',
+      tool_name: 'skillhub.localWorkspace.get',
+      target_owner_user_id: 'usr7',
+      target_device_id: 'install-remote',
+      device_id: 'install-device',
+      payload: { bot_uid: '42' },
+      created_at: Date.now(),
+      expires_at: Date.now() + 60_000,
+    } as any);
+
+    assert.equal(captured.result, undefined, 'late SkillHub RPC result must not be sent after shutdown started');
   });
 });
