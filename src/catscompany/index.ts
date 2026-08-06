@@ -742,7 +742,7 @@ export class CatsCompanyBot {
     if (!requestID) return;
     Logger.info(`[CatsCompany][thin_tool_rpc] target received request: request=${requestID}, tool=${request.tool_name || ''}, targetOwner=${request.target_owner_user_id || ''}, targetDevice=${request.target_device_id || ''}, device=${request.device_id || ''}`);
 
-    if (this.skillHubThinRpc.supports(String(request.tool_name || ''))) {
+    if (this.skillHubThinRpc?.supports(String(request.tool_name || ''))) {
       await this.handleSkillHubThinToolRpcRequest(request);
       return;
     }
@@ -800,6 +800,10 @@ export class CatsCompanyBot {
         code: caught instanceof SkillHubThinRpcError ? caught.code : 'SKILLHUB_OPERATION_FAILED',
         message: caught?.message || 'SkillHub device operation failed.',
       };
+    }
+    if (this.shuttingDown) {
+      Logger.info(`[CatsCompany][thin_tool_rpc] destroy started, dropping SkillHub RPC result: request=${request.request_id}`);
+      return;
     }
     try {
       await this.bot.sendThinToolRpcResult({
