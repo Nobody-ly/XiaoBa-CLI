@@ -7,7 +7,9 @@
 - **分支/head：** PR #271 `feat/ctyun-worker-image-pipeline` 已 **squash 合并**进 `upstream/main`（merge commit `3bb5164`，2026-08-06）；合并前 rebase 到最新 main（`4606f78`，28 commits）
 - **Review：** 6 轮处理全部闭环；Nobody-ly 08-06 05:43 复核 head `b410d43` 确认三项阻塞已修复、**未发现新阻塞**（issuecomment-5200843141）后合并
 - **版本：** bump `1.4.7 → 1.4.8`（`inject-version.js v1.4.8`，commit `fbb919e` 直接推送 main；`verify-release-version` 要求三处同步已确认）
-- **发布：** 设置 repo var `CTYUN_AUTO_BAKE_WORKER_IMAGE=true`（tag 触发 bake 的前提）→ 打 `v1.4.8` tag 推送 → **Bake Tianyi Cloud Worker Image**（run=1）与 **Desktop Release CD**（run=25）均已触发并运行中
+- **发布：** 设置 repo var `CTYUN_AUTO_BAKE_WORKER_IMAGE=true`（tag 触发 bake 的前提）→ 打 `v1.4.8` tag 推送 → **Desktop Release CD**（run=25）已触发；**首次 bake**（run=1）**失败**
+- **⚠️ 首次 bake 失败根因（2026-08-06，天翼云配置前置条件）**：`ImportEcsKeypair` 报 `Ecs.OrderCheck.InvalidProjectID`——**不是代码/AK 问题**，而是子账号**缺少企业项目管理（EPS）权限**。天翼云 key pair 创建 API 的 OrderCheck **强制校验企业项目权限**，而 `CreateEcsInstance`/查询 API 不强制（所以实例创建正常、key pair 卡住）。排查链：本地同 AK 复现 → 排除 AK/节点类型/参数 → 控制台确认 default 项目 ID=0 → 发现 `ListRosProject` 403 → 子账号用户组 `catsco-cli-provisioner` 关联策略数 0 → 补加企业项目（EPS）策略后 `ImportEcsKeypair` 本地验证 **SUCCESS**。**前置条件：bake 用的天翼云子账号必须被"用户授权"关联到 default 企业项目并授予企业项目（EPS）权限**；`ros:project:list`（ListRosProject）仍 403 但不影响 bake。
+- **重试：** workflow_dispatch 重新触发 bake（run `31079403507`，2026-08-06 07:02，main + bake_image=true）运行中
 - **测试：** `worker-image-pipeline.test.ts` 11/11、`npm run build` 通过（rebase 后本地已验证）
 - **下一步：** 等待 bake 完成 → 按下方步骤 10 验收标准在云端验收（platform 版本、fwupd mask、npm mirror、残留清理）→ 确认后删除验证用临时实例
 - **关联计划：** 应用制品更新 Part A 见 `2026-08-04-worker-artifact-update.md`（worker 更新通道与镜像烘焙并存，互为回退）
