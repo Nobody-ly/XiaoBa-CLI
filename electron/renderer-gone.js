@@ -30,12 +30,30 @@ function createRendererGoneGuard(options = {}) {
   let pendingTimer = null;
   let stableTimer = null;
 
-  function reset() {
-    reloadTimestamps = [];
+  function cancelStableTimer() {
     if (stableTimer !== null) {
       clearReload(stableTimer);
       stableTimer = null;
     }
+  }
+
+  function cancelPendingReload() {
+    if (pendingTimer !== null) {
+      clearReload(pendingTimer);
+      pendingTimer = null;
+    }
+  }
+
+  function reset() {
+    reloadTimestamps = [];
+    cancelStableTimer();
+  }
+
+  // Release all pending timers. Called when the window is closed or the app is
+  // quitting so no stale reload/stability callback fires afterwards.
+  function dispose() {
+    cancelStableTimer();
+    cancelPendingReload();
   }
 
   // Called on each successful page load. Starts (or restarts) a stability
@@ -44,7 +62,7 @@ function createRendererGoneGuard(options = {}) {
   // reloads on record, so a crash -> reload -> load loop cannot reset its own
   // budget and bypass the retry cap.
   function onLoadFinished() {
-    if (stableTimer !== null) clearReload(stableTimer);
+    cancelStableTimer();
     stableTimer = scheduleReload(() => {
       stableTimer = null;
       reset();
@@ -52,6 +70,12 @@ function createRendererGoneGuard(options = {}) {
   }
 
   function onRenderProcessGone(reason) {
+    // Any renderer loss invalidates the current stability period immediately,
+    // regardless of whether the reason is recoverable. Otherwise the old
+    // stability timer could expire after a new crash and clear recent reloads,
+    // allowing more than MAX_RELOADS_IN_WINDOW reloads in one window.
+    cancelStableTimer();
+
     if (!isRecoverableRendererGoneReason(reason)) {
       log(`renderer gone reason is not auto-recoverable: ${reason}`);
       return { recovered: false, reason: 'unrecoverable' };
@@ -65,7 +89,7 @@ function createRendererGoneGuard(options = {}) {
     }
 
     const target = windowRef;
-    if (pendingTimer !== null) clearReload(pendingTimer);
+    cancelPendingReload();
     pendingTimer = scheduleReload(() => {
       pendingTimer = null;
       // Only touch the window instance captured at schedule time; if it was
@@ -78,7 +102,7 @@ function createRendererGoneGuard(options = {}) {
     return { recovered: true, reason: 'scheduled' };
   }
 
-  return { onRenderProcessGone, onLoadFinished, reset };
+  return { onRenderProcessGone, onLoadFinished, reset, dispose };
 }
 
 module.exports = {

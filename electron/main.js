@@ -578,6 +578,7 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => {
+    rendererGoneGuard.dispose();
     mainWindow = null;
   });
 
@@ -590,6 +591,7 @@ function createWindow() {
     log: (message) => console.error('[desktop] renderer recovery:', message),
   });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (app.isQuitting) return;
     const outcome = rendererGoneGuard.onRenderProcessGone(details?.reason);
     if (!outcome.recovered) {
       console.error('[desktop] renderer process gone, no auto-recovery:', details?.reason, outcome.reason);

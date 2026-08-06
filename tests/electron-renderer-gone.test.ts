@@ -162,6 +162,57 @@ test('reload never fires for a window that was destroyed (window replaced)', () 
   assert.equal(reloaded.length, 0);
 });
 
+test('a renderer crash cancels the pending stability timer (edge regression)', () => {
+  const { guard, timers, reloaded, fire, setNow } = makeHarness();
+  // Load completes and starts the stability timer (fires at +30s).
+  guard.onLoadFinished();
+  assert.equal(timers.length, 1);
+  // Crash mid-stability: the old stability timer must be cancelled so it can
+  // never expire after the new crash and clear the fresh reload record.
+  setNow(20_000);
+  const outcome = guard.onRenderProcessGone('crashed');
+  assert.equal(outcome.recovered, true);
+  assert.equal(timers.length, 1); // only the reload timer, stability timer gone
+  // Advance past the OLD stability deadline: nothing must reset the budget.
+  setNow(40_000);
+  fire(); // reload executes, records a timestamp at 40s
+  assert.equal(reloaded.length, 1);
+  // Second crash within 30s of the reload is still allowed.
+  setNow(40_500);
+  assert.equal(guard.onRenderProcessGone('crashed').recovered, true);
+  fire();
+  // Third crash within the rolling 30s window must be rejected.
+  setNow(41_000);
+  const third = guard.onRenderProcessGone('crashed');
+  assert.deepEqual(third, { recovered: false, reason: 'retries-exhausted' });
+  fire();
+  assert.equal(reloaded.length, 2); // never more than MAX in one window
+});
+
+test('unrecoverable renderer loss also cancels the stability timer', () => {
+  const { guard, timers } = makeHarness();
+  guard.onLoadFinished();
+  assert.equal(timers.length, 1);
+  const outcome = guard.onRenderProcessGone('launch-failed');
+  assert.deepEqual(outcome, { recovered: false, reason: 'unrecoverable' });
+  // Stability timer cancelled and no reload scheduled.
+  assert.equal(timers.length, 0);
+});
+
+test('dispose cancels pending reload and stability timers', () => {
+  const { guard, timers } = makeHarness();
+  guard.onLoadFinished();
+  guard.onRenderProcessGone('crashed'); // cancels stability, schedules reload
+  assert.equal(timers.length, 1);
+  guard.dispose();
+  assert.equal(timers.length, 0);
+  // A later crash still schedules normally after dispose.
+  const after = guard.onRenderProcessGone('crashed');
+  assert.equal(after.recovered, true);
+  guard.dispose();
+  assert.equal(timers.length, 0);
+});
+
 test('recovery window constants are sane', () => {
   assert.equal(MAX_RELOADS_IN_WINDOW, 2);
   assert.equal(RECOVERY_WINDOW_MS, 30_000);
