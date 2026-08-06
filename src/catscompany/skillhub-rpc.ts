@@ -39,12 +39,14 @@ export interface SkillHubThinRpcHandlerOptions {
   runtimeRoot?: string;
   scheduleBotSwitch?: (botUid: string) => void;
   finalizeCurrentBotSkill?: typeof finalizeCurrentBotPublicSkillNow;
+  isShuttingDown?: () => boolean;
 }
 
 export class SkillHubThinRpcHandler {
   private readonly runtimeRoot: string;
   private readonly scheduleBotSwitch: (botUid: string) => void;
   private readonly finalizeCurrentBotSkill: typeof finalizeCurrentBotPublicSkillNow;
+  private readonly isShuttingDown: () => boolean;
   private readonly completed = new Map<string, {
     fingerprint: string;
     operation: Promise<Record<string, unknown>>;
@@ -52,7 +54,9 @@ export class SkillHubThinRpcHandler {
 
   constructor(options: SkillHubThinRpcHandlerOptions = {}) {
     this.runtimeRoot = path.resolve(options.runtimeRoot ?? PathResolver.getRuntimeDataRoot());
-    this.scheduleBotSwitch = options.scheduleBotSwitch ?? scheduleDashboardBotSwitch;
+    this.isShuttingDown = options.isShuttingDown ?? (() => false);
+    this.scheduleBotSwitch = options.scheduleBotSwitch
+      ?? ((botUid) => scheduleDashboardBotSwitch(botUid, this.isShuttingDown));
     this.finalizeCurrentBotSkill = options.finalizeCurrentBotSkill
       ?? finalizeCurrentBotPublicSkillNow;
   }
@@ -62,7 +66,7 @@ export class SkillHubThinRpcHandler {
   }
 
   async execute(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
-    this.assertFreshRequest(request);
+    this.assertOperational(request);
     const requestID = String(request.request_id || '').trim();
     if (!requestID) throw new SkillHubThinRpcError('INVALID_REQUEST', 'request_id is required.');
     const fingerprint = requestFingerprint(request);
@@ -95,7 +99,7 @@ export class SkillHubThinRpcHandler {
   }
 
   private async executeOnce(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
-    this.assertFreshRequest(request);
+    this.assertOperational(request);
     const payload = recordValue(request.payload);
     const botUid = requiredText(payload.bot_uid, 'bot_uid', 160);
     if (!BOT_UID_PATTERN.test(botUid)) {
@@ -129,7 +133,7 @@ export class SkillHubThinRpcHandler {
     request: CatsThinToolRpcMessage,
   ): Promise<Record<string, unknown>> {
     return withCurrentBotSkillWorkspaceWrite((context) => {
-      this.assertFreshRequest(request);
+      this.assertOperational(request);
       this.assertRequestScope(request, botUid, true);
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
       const entries = scanBotSkillWorkspace(context.skillsRoot).slice(0, MAX_SKILLS);
@@ -200,7 +204,7 @@ export class SkillHubThinRpcHandler {
         };
       },
       validateScope: (context) => {
-        this.assertFreshRequest(request);
+        this.assertOperational(request);
         this.assertRequestScope(request, botUid, true);
         this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
       },
@@ -254,7 +258,7 @@ export class SkillHubThinRpcHandler {
           Math.min(45_000, Number(request.expires_at || 0) - Date.now() - 1_000),
         ),
         validateScope: () => {
-          this.assertFreshRequest(request);
+          this.assertOperational(request);
           this.assertRequestScope(request, botUid, true);
         },
       });
@@ -292,6 +296,16 @@ export class SkillHubThinRpcHandler {
     };
   }
 
+  private assertOperational(request: CatsThinToolRpcMessage): void {
+    if (this.isShuttingDown()) {
+      throw new SkillHubThinRpcError(
+        'SHUTTING_DOWN',
+        'The XiaoBa device is shutting down. Retry the SkillHub operation after it reconnects.',
+      );
+    }
+    this.assertFreshRequest(request);
+  }
+
   private assertFreshRequest(request: CatsThinToolRpcMessage): void {
     const expiresAt = Number(request.expires_at || 0);
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
@@ -327,8 +341,12 @@ export class SkillHubThinRpcHandler {
   }
 }
 
-export function scheduleDashboardBotSwitch(botUid: string): void {
+export function scheduleDashboardBotSwitch(
+  botUid: string,
+  isShuttingDown: () => boolean = () => false,
+): void {
   const timer = setTimeout(() => {
+    if (isShuttingDown()) return;
     void requestDashboardBotSwitch(botUid).catch((error) => {
       Logger.warning(`SkillHub remote Bot switch failed: ${error?.message || String(error)}`);
     });

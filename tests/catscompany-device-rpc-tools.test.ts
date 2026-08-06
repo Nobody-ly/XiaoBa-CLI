@@ -595,6 +595,7 @@ describe('CatsCompany Device RPC file tools', () => {
         captured.result = result;
       },
     };
+    bot.skillHubThinRpc = { supports: () => false };
     bot.executeLocalThinToolRpcTool = async () => {
       bot.shuttingDown = true;
       return { ok: true, content: 'executed' };

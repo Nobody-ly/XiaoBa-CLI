@@ -366,7 +366,7 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       }, {
         validateScope: () => {
           scopeChecks += 1;
-          if (scopeChecks === 1) {
+          if (scopeChecks === 2) {
             fs.writeFileSync(skillFile, skillText('shared-new', 'edited while publishing'));
           }
         },
@@ -428,7 +428,7 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       }, {
         validateScope: () => {
           scopeChecks += 1;
-          if (scopeChecks === 2) {
+          if (scopeChecks === 3) {
             fixture.cloud = { revision: 2, skills: [] };
           }
         },
@@ -499,6 +499,76 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       fixture.botId,
       `${target.localSkillId}.json`,
     )), false);
+  });
+
+  test('halts a real public finalize before its cloud CAS when shutdown starts during package validation', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'shutdown-finalize', 'shutdown-finalize', 'published body');
+    const skillFile = path.join(fixture.skillsRoot, 'shutdown-finalize', 'SKILL.md');
+    const metadata = {
+      author: 'alice',
+      version: '1.0.0',
+      uploadedAt: '2026-08-06T00:00:00.000Z',
+    };
+    fs.writeFileSync(
+      skillFile,
+      applySkillHubLocalMetadata(fs.readFileSync(skillFile, 'utf8'), metadata),
+    );
+    await fixture.sync();
+    const target = scanLocalBotSkill(path.join(fixture.skillsRoot, 'shutdown-finalize'));
+    const privateReference = fixture.cloud.skills[0];
+    const publicReference = {
+      source: 'skillhub' as const,
+      skillId: 'alice/shutdown-finalize',
+      version: metadata.version,
+      contentHash: target.contentHash,
+    };
+    const publicPackage: BotSkillPackage = {
+      schema: 'catsco.private-skill-package.v1',
+      source: 'public',
+      reference: { skillId: publicReference.skillId, version: publicReference.version },
+      localSkillId: target.localSkillId,
+      name: target.name,
+      contentHash: target.contentHash,
+      createdAt: metadata.uploadedAt,
+      files: target.files,
+    };
+    delete (publicPackage as Partial<BotSkillPackage>).schema;
+    fixture.packages.set(refKey(publicReference), publicPackage);
+    fixture.cloud = {
+      revision: fixture.cloud.revision + 1,
+      skills: [privateReference, publicReference],
+    };
+    fixture.packageDownloads = 0;
+    const previousSkill = fs.readFileSync(skillFile, 'utf8');
+    const markerFile = path.join(target.path, BOT_SKILL_LOCAL_MARKER_FILE);
+    const previousMarker = fs.readFileSync(markerFile, 'utf8');
+    const previousBase = new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId);
+    const previousCloud = structuredClone(fixture.cloud);
+    const previousPatches = fixture.patches;
+    let shuttingDown = false;
+
+    await assert.rejects(
+      fixture.finalize({
+        localSkillId: target.localSkillId,
+        skillName: target.name,
+        reference: publicReference,
+      }, {
+        validateScope: () => {
+          // The first public download is publication readiness; the second is
+          // pushLocal's marker verification. Shutdown starts during that await.
+          if (fixture.packageDownloads >= 2) shuttingDown = true;
+          if (shuttingDown) throw new Error('connector shutdown');
+        },
+      }),
+      /connector shutdown/i,
+    );
+
+    assert.equal(fs.readFileSync(skillFile, 'utf8'), previousSkill);
+    assert.equal(fs.readFileSync(markerFile, 'utf8'), previousMarker);
+    assert.deepEqual(new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId), previousBase);
+    assert.deepEqual(fixture.cloud, previousCloud);
+    assert.equal(fixture.patches, previousPatches);
   });
 
   test('recovers a public reference after a crash between SKILL.md and marker writes', async () => {
@@ -1326,6 +1396,7 @@ function createFixture(
     cloudReadStatus: 200,
     patchStatus: 200,
     publicDownloadMisses: 0,
+    packageDownloads: 0,
     omitSkillsField: false,
     cloudModel: { kind: 'catalog', modelId: 'minimax-m3' } as BotDefinition['model'],
     cloudPrompt: { selected: 'default' } as NonNullable<BotDefinition['prompt']>,
@@ -1450,6 +1521,7 @@ function createFixture(
     }
     if (url.hostname === 'hub.test' && method === 'GET') {
       assert.equal(new Headers(init?.headers).get('X-CatsCo-Bot-Id'), botId);
+      fixture.packageDownloads += 1;
       const packageValue = [...fixture.packages.values()].find(item => (
         url.pathname.includes(item.reference.version)
         && url.pathname.includes(item.reference.skillId.split('/').at(-1) || '')

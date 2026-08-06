@@ -435,7 +435,12 @@ function walk(dir: string): string[] {
       if (entry.isSymbolicLink()) continue;
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (!SOURCE_SKIP_DIRS.has(entry.name)) visit(fullPath);
+        if (
+          !SOURCE_SKIP_DIRS.has(entry.name)
+          && !fs.existsSync(path.join(fullPath, 'SKILL.md'))
+        ) {
+          visit(fullPath);
+        }
       } else if (entry.isFile() && !SOURCE_SKIP_FILES.has(entry.name)) {
         result.push(fullPath);
         if (result.length > MAX_SOURCE_FILES) {

@@ -288,6 +288,7 @@ export class BotSkillSyncService {
     );
     const initialCloud = await pullCloudBotSkills(this.cloudOptions);
     if (!initialCloud) throw new Error('Bot Skill cloud sync is unavailable for public finalization.');
+    await options.validateScope?.();
     this.recoverInterruptedFinalizes(initialCloud);
     const base = this.baseStore.read(this.botId);
     const local = this.readLocalManifest();
@@ -319,6 +320,10 @@ export class BotSkillSyncService {
       throw new Error('The selected local Skill changed before public finalization could be committed.');
     }
 
+    // Keep the final local journal/file write behind the same lifecycle fence as
+    // the cloud checks. Once this synchronous block starts, no JS shutdown hook
+    // can interleave between its individual filesystem writes.
+    await options.validateScope?.();
     const skillFile = path.join(readyToWrite.path, 'SKILL.md');
     const markerFile = path.join(readyToWrite.path, BOT_SKILL_LOCAL_MARKER_FILE);
     const previousSkill = fs.readFileSync(skillFile, 'utf8');
@@ -364,6 +369,7 @@ export class BotSkillSyncService {
       await options.validateScope?.();
       const result = await this.pushLocal(updatedLocal, currentCloud, base, {
         requiredCloudReference: reference,
+        validateScope: options.validateScope,
       });
       try {
         this.removeFinalizeJournal(localSkillId);
@@ -504,7 +510,10 @@ export class BotSkillSyncService {
     local: LocalBotSkillManifestEntry[],
     initialCloud: CloudBotSkills,
     base: BotSkillSyncBase | undefined,
-    options: { requiredCloudReference?: BotSkillRef } = {},
+    options: {
+      requiredCloudReference?: BotSkillRef;
+      validateScope?: () => Promise<void> | void;
+    } = {},
   ): Promise<BotSkillSyncResult> {
     if (
       options.requiredCloudReference
@@ -540,6 +549,7 @@ export class BotSkillSyncService {
         reference = entry.reference;
       }
       if (!reference) {
+        await options.validateScope?.();
         const uploaded = await this.privateClient.upsert(entry);
         if (uploaded.contentHash !== entry.contentHash) {
           throw new Error(`SkillHub returned a mismatched content hash for ${entry.name}`);
@@ -572,15 +582,18 @@ export class BotSkillSyncService {
         ...(entry.origin ? { origin: entry.origin } : {}),
       });
     }
+    await options.validateScope?.();
     const refs = canonicalizeBotSkillRefs(nextEntries.map(entry => entry.reference));
     if (
       base
       && !botSkillRefsEqual(initialCloud.skills, base.skills.map(entry => entry.reference))
     ) {
+      await options.validateScope?.();
       this.writeConflictSnapshot(initialCloud, refs);
     }
     let cloud = initialCloud;
     try {
+      await options.validateScope?.();
       cloud = await replaceCloudBotSkills(this.cloudOptions, cloud, refs);
     } catch (error) {
       if (!(error instanceof BotSkillsCloudConflictError)) throw error;
@@ -593,11 +606,14 @@ export class BotSkillSyncService {
         throw new Error('The public Skill reference was removed from BotDefinition during finalization.');
       }
       if (!base || !botSkillRefsEqual(latest.skills, base.skills.map(entry => entry.reference))) {
+        await options.validateScope?.();
         this.writeConflictSnapshot(latest, refs);
       }
       // The current single-device contract explicitly protects local changes.
+      await options.validateScope?.();
       cloud = await replaceCloudBotSkills(this.cloudOptions, latest, refs);
     }
+    await options.validateScope?.();
     for (const item of pendingMarkers) {
       writeBotSkillLocalMarker(item.path, item.marker);
     }

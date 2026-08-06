@@ -486,7 +486,9 @@ export class CatsCompanyBot {
       capabilities: [...CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES],
     });
     this.deviceRegistration = deviceRegistration;
-    this.skillHubThinRpc = new SkillHubThinRpcHandler();
+    this.skillHubThinRpc = new SkillHubThinRpcHandler({
+      isShuttingDown: () => this.shuttingDown,
+    });
 
     const runtime = createCatsCompanyRuntime(config.sessionTTL);
     this.runtime = runtime;
@@ -742,7 +744,7 @@ export class CatsCompanyBot {
     if (!requestID) return;
     Logger.info(`[CatsCompany][thin_tool_rpc] target received request: request=${requestID}, tool=${request.tool_name || ''}, targetOwner=${request.target_owner_user_id || ''}, targetDevice=${request.target_device_id || ''}, device=${request.device_id || ''}`);
 
-    if (this.skillHubThinRpc?.supports(String(request.tool_name || ''))) {
+    if (this.skillHubThinRpc.supports(String(request.tool_name || ''))) {
       await this.handleSkillHubThinToolRpcRequest(request);
       return;
     }

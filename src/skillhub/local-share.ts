@@ -97,6 +97,7 @@ export async function shareLocalSkillForCatsCo(
       writeLocalMetadata: false,
       ...(selectedSkill ? { localSkillPath: selectedSkill.path } : {}),
     });
+    let revalidatedSkill = selectedSkill;
     if (selectedSkill) {
       const currentSkill = scanBotSkillWorkspace(context.skillsRoot).find((candidate) => (
         candidate.localSkillId === selectedSkill.localSkillId
@@ -108,10 +109,11 @@ export async function shareLocalSkillForCatsCo(
           'skillhub.share_local_skill_changed',
         );
       }
+      revalidatedSkill = currentSkill;
     }
     await options.validateScope?.(context);
     if (result?.skillHub && options.writeLocalMetadata !== false) {
-      const localSkillPath = selectedSkill?.path || String(result?.skill?.path || '').trim();
+      const localSkillPath = revalidatedSkill?.path || String(result?.skill?.path || '').trim();
       writeSkillHubLocalMetadata(path.join(localSkillPath, 'SKILL.md'), result.skillHub);
     }
     return { ...result, botUid: expectedBotUid };

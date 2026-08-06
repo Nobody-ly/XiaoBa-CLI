@@ -178,11 +178,24 @@ describe('CatsCompany SkillHub thin RPC', () => {
       '# Second Local Demo',
       '',
     ].join('\n'));
+    const nestedRoot = path.join(secondRoot, 'nested-skill');
+    fs.mkdirSync(nestedRoot, { recursive: true });
+    fs.writeFileSync(path.join(nestedRoot, 'SKILL.md'), [
+      '---',
+      'name: nested-skill',
+      'description: Independent nested Skill',
+      '---',
+      '',
+      '# Nested Skill',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(nestedRoot, 'secret.txt'), 'must not be uploaded with the parent');
     const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))
       .find(entry => entry.installName === 'second-demo');
     assert.ok(selected);
     const originalFetch = global.fetch;
     let uploadedSkill = '';
+    let uploadedPaths: string[] = [];
     let shareResult: Record<string, unknown> | undefined;
     global.fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
@@ -204,6 +217,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
       if (url.pathname === '/api/skills/share') {
         const body = JSON.parse(String(init?.body || '{}'));
         assert.equal(body.confirmVersionPublish, true);
+        uploadedPaths = body.source.files.map((file: any) => String(file.path));
         const skillFile = body.source.files.find((file: any) => file.path === 'SKILL.md');
         uploadedSkill = Buffer.from(skillFile.contentBase64, 'base64').toString('utf8');
         return Response.json({
@@ -238,6 +252,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
     }
     assert.match(uploadedSkill, /# Second Local Demo/);
     assert.doesNotMatch(uploadedSkill, /# Local Demo/);
+    assert.equal(uploadedPaths.some(file => file.startsWith('nested-skill/')), false);
     assert.equal((shareResult?.skill as Record<string, unknown>)?.id, 'alice/local-demo');
     assert.equal(shareResult?.latest_version, '2.0.0');
     assert.equal(shareResult?.content_hash, 'a'.repeat(64));
@@ -281,6 +296,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
   test('writes share metadata only after revalidating the selected local Skill and scope', async () => {
     const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
     const skillFile = path.join(selected.path, 'SKILL.md');
+    const movedSkillPath = path.join(runtimeRoot, 'skills', 'moved-local-demo');
     const metadata = {
       author: 'alice',
       version: '1.0.0',
@@ -306,6 +322,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
         });
       }
       if (url.pathname === '/api/skills/share') {
+        fs.renameSync(selected.path, movedSkillPath);
         return Response.json({
           skillId: 'alice/local-demo',
           packageVersion: {
@@ -334,7 +351,10 @@ describe('CatsCompany SkillHub thin RPC', () => {
         }),
         validateScope: () => {
           scopeValidations += 1;
-          assert.equal(readSkillHubLocalMetadata(skillFile), null);
+          const currentSkillFile = fs.existsSync(skillFile)
+            ? skillFile
+            : path.join(movedSkillPath, 'SKILL.md');
+          assert.equal(readSkillHubLocalMetadata(currentSkillFile), null);
         },
       });
     } finally {
@@ -344,7 +364,11 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(scopeValidations, 2);
     assert.equal(result.botUid, '42');
     assert.deepEqual(result.skillHub, metadata);
-    assert.deepEqual(readSkillHubLocalMetadata(skillFile), metadata);
+    assert.equal(fs.existsSync(skillFile), false);
+    assert.deepEqual(
+      readSkillHubLocalMetadata(path.join(movedSkillPath, 'SKILL.md')),
+      metadata,
+    );
   });
 
   test('finalizes only when sync still belongs to the requested Bot', async () => {
@@ -445,6 +469,50 @@ describe('CatsCompany SkillHub thin RPC', () => {
       })),
       (error: any) => error instanceof SkillHubThinRpcError && error.code === 'REQUEST_EXPIRED',
     );
+  });
+
+  test('stops finalization writes when connector shutdown starts during the operation', async () => {
+    const localEntry = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const reference = {
+      source: 'skillhub' as const,
+      skillId: 'alice/local-demo',
+      version: '1.0.0',
+      contentHash: 'f'.repeat(64),
+    };
+    let shuttingDown = false;
+    let writes = 0;
+    const shutdownHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      isShuttingDown: () => shuttingDown,
+      finalizeCurrentBotSkill: async (_botUid, _input, options) => {
+        await Promise.resolve();
+        shuttingDown = true;
+        await options.validateScope?.();
+        writes += 1;
+        return {
+          botId: '42',
+          direction: 'local_to_cloud',
+          skills: [reference],
+        };
+      },
+    });
+
+    await assert.rejects(
+      shutdownHandler.execute(request({
+        request_id: 'finalize-shutdown',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.finalize,
+        payload: {
+          bot_uid: '42',
+          local_skill_id: localEntry.localSkillId,
+          skill_name: localEntry.name,
+          skill_id: reference.skillId,
+          version: reference.version,
+          content_hash: reference.contentHash,
+        },
+      })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'SHUTTING_DOWN',
+    );
+    assert.equal(writes, 0);
   });
 
   function request(overrides: Record<string, any> = {}): any {
