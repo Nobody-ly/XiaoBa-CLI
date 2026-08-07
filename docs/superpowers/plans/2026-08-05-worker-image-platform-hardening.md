@@ -40,6 +40,7 @@
 
 ## 后续改进项（Follow-ups，不阻塞合入）
 
+- **▶ 镜像生命周期 + 云端控制（下一步主方向）**：见 `2026-08-07-worker-cloud-control-image-lifecycle.md`——私有 `catsco-worker-*` 镜像保留 6 个、bake 后自动清理；控制面 web（「云托管」入口）统一云虚拟员工创建（带配额）/版本展示/镜像回滚/单 worker 重置；Part A 制品更新（有数据回滚）为后续项。
 - **发现阶段 3 次空读无直接测试场景**：Remove-Builder/Remove-KeyPair 的连续空读发现逻辑只在确认阶段有测试覆盖；构造"builder ID 存在但查询为空"场景成本高，防御性逻辑，后续补。
 - **`/boot` 校验的 `NEWEST_KERNEL_IMG` 变量是死代码**：非空性已被前置 `ls -1 /boot/vmlinuz-*` 保证，可删除或改为与升级前内核版本做真实比较。
 - **`Invoke-ExactBakeCleanup` key pair 单次读**与 Remove-* 的 3 次空读不对称（最终一致性风险低，因 Cleanup 运行在中断后较久），后续可对齐。
