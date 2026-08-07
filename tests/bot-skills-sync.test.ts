@@ -1277,7 +1277,7 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       'const assertedToken = process.env.CATSCO_TOKEN as string;',
       'const aliasedToken = process.env.CATSCO_TOKEN, label = "production";',
       'const chainedToken = process.env.CATSCO_TOKEN || process.env.CATSCOMPANY_USER_TOKEN;',
-      'const undefinedToken = process.env.CATSCO_TOKEN ?? undefined;',
+      'const undefinedToken = process.env.CATSCO_TOKEN ?? void 0;',
       'const nullToken = process.env.CATSCO_TOKEN ?? null;',
       'const emptyToken = process.env.CATSCO_TOKEN ?? "";',
       "const emptyFallbackToken = process.env.CATSCO_TOKEN || '';",
@@ -1377,6 +1377,15 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       [
         'const fallbackValue = "a-real-secret-value-that-must-not-leave-device";',
         'const token = process.env.CATSCO_TOKEN || fallbackValue;',
+      ].join('\n'),
+      [
+        'const undefined = "a-real-secret-value-that-must-not-leave-device";',
+        'const token = process.env.CATSCO_TOKEN ?? undefined;',
+      ].join('\n'),
+      [
+        'function run(undefined = "a-real-secret-value-that-must-not-leave-device") {',
+        '  const token = process.env.CATSCO_TOKEN ?? undefined;',
+        '}',
       ].join('\n'),
     ];
     for (const unsafeAssignment of unsafeAssignments) {
