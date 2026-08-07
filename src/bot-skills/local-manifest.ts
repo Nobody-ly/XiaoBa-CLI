@@ -35,6 +35,8 @@ const SKIP_FILES = new Set([
 const MAX_FILES = 200;
 const MAX_SINGLE_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+const MAX_CREDENTIAL_ASSIGNMENTS = 512;
+const MAX_CREDENTIAL_EXPRESSION_CHARS = 16 * 1024;
 const ARCHIVE_FILE_EXTENSIONS = [
   '.7z',
   '.a',
@@ -74,6 +76,11 @@ const EXPLICIT_SAFE_CREDENTIAL_VALUES = new Set([
   'reference-smoke-secret',
   'smoke-key',
   'smoke-secret',
+]);
+const CREDENTIAL_EXPRESSION_CONTINUATION_TOKENS = new Set([
+  '\\', '||', '??', '&&', '=', '==', '===', '!=', '!==', '=>', '<=', '>=',
+  '?', ':', '+', '-', '*', '/', '%', '&', '|', '^', '~', '.', '?.', '<', '>',
+  '(', '[', '!', 'as', 'satisfies', 'instanceof', 'in',
 ]);
 
 export interface BotSkillWorkspaceValidationFailure {
@@ -357,14 +364,28 @@ function containsHighConfidenceSecret(filePath: string, bytes: Buffer): boolean 
   if (/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/.test(text)) return true;
   const sourceExtension = path.posix.extname(filePath).toLowerCase();
   const isSourceCode = ['.cjs', '.js', '.jsx', '.mjs', '.py', '.ts', '.tsx'].includes(sourceExtension);
-  const equalsAssignments = text.matchAll(
-    /(?=(?:^|[^A-Za-z0-9_.'"`-])[ \t]*(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>\]?[ \t]*(?:[?+]?=(?![=>]))[ \t]*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+)))/gim,
-  );
-  if (hasSensitiveCredentialAssignment(equalsAssignments, isSourceCode)) return true;
-  const colonAssignments = text.matchAll(
-    /(?=(?:^|[\[,{])[ \t]*(?:-[ \t]+)?(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>[ \t]*:[ \t]*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+)))/gim,
-  );
-  if (hasSensitiveCredentialAssignment(colonAssignments, isSourceCode)) return true;
+  const equalsAssignments = text.matchAll(new RegExp(
+    /(?=(?:^|[^A-Za-z0-9_.'"`-])(?:[ \t\r\n]|\/\*[\s\S]*?\*\/)*(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>\]?(?:[ \t\r\n]|\/\*[\s\S]*?\*\/)*(?:\|\|=|\?\?=|&&=|[?+]?=(?![=>]))(?:[ \t\r\n]|\/\*[\s\S]*?\*\/)*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+)))/im.source,
+    'gimd',
+  ));
+  if (hasSensitiveCredentialAssignment(
+    equalsAssignments,
+    isSourceCode,
+    text,
+    'equals',
+    sourceExtension,
+  )) return true;
+  const colonAssignments = text.matchAll(new RegExp(
+    /(?=(?:^|[\[,{])(?:[ \t\r\n]|\/\*[\s\S]*?\*\/)*(?:-[ \t]+)?(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>(?:[ \t\r\n]|\/\*[\s\S]*?\*\/)*:(?:[ \t\r\n]|\/\*[\s\S]*?\*\/)*(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+)))/im.source,
+    'gimd',
+  ));
+  if (hasSensitiveCredentialAssignment(
+    colonAssignments,
+    isSourceCode,
+    text,
+    'colon',
+    sourceExtension,
+  )) return true;
   const commandAssignments = text.matchAll(
     /^(?:[ \t]*[Ss][Ee][Tt][Xx](?:[ \t]+\/[A-Za-z]+)*[ \t]+(?<quote>["']?)(?<key>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote>[ \t]+|[ \t]*ENV[ \t]+(?<quote2>["']?)(?<key2>[A-Za-z_][A-Za-z0-9_.-]{0,127})\k<quote2>[ \t]+)(?:"(?<double>[^"\r\n]*)"|'(?<single>[^'\r\n]*)'|(?<bare>[^\s#,;}]+))/gm,
   );
@@ -378,7 +399,11 @@ function containsHighConfidenceSecret(filePath: string, bytes: Buffer): boolean 
 function hasSensitiveCredentialAssignment(
   assignments: Iterable<RegExpMatchArray>,
   isSourceCode: boolean,
+  sourceText?: string,
+  boundary?: 'equals' | 'colon',
+  sourceExtension = '',
 ): boolean {
+  let scannedAssignments = 0;
   for (const match of assignments) {
     const key = String(match.groups?.key || match.groups?.key2 || '')
       .replace(/[^A-Za-z0-9]/g, '')
@@ -386,13 +411,265 @@ function hasSensitiveCredentialAssignment(
     if (!/(?:apikey|accesstoken|authtoken|clientsecret|secretaccesskey|secretkey|password|passwd|token|secret)$/.test(key)) {
       continue;
     }
+    scannedAssignments += 1;
+    if (scannedAssignments > MAX_CREDENTIAL_ASSIGNMENTS) return true;
     const candidate = String(
       match.groups?.double ?? match.groups?.single ?? match.groups?.bare ?? '',
     ).toLowerCase();
     const isBare = match.groups?.bare !== undefined;
-    if (!isExplicitSafeCredentialValue(key, candidate, isBare, isSourceCode)) return true;
+    const expression = sourceText && boundary
+      ? readCredentialExpression(sourceText, match, boundary, sourceExtension)
+      : undefined;
+    if (sourceText && boundary && !expression) return true;
+    if (
+      isBare
+      && isSourceCode
+      && expression
+      && isSafeRuntimeCredentialExpression(expression.value.toLowerCase())
+    ) {
+      continue;
+    }
+    if (
+      isSourceCode
+      && expression
+      && isSafeTypeOnlyCredentialDeclaration(expression.value.toLowerCase())
+    ) {
+      continue;
+    }
+    if (
+      !isExplicitSafeCredentialValue(key, candidate, isBare, isSourceCode)
+      || !isOnlyCredentialExpressionTrivia(expression?.tail || '')
+    ) {
+      return true;
+    }
   }
   return false;
+}
+
+type MatchIndices = Array<[number, number] | undefined> & {
+  groups?: Record<string, [number, number] | undefined>;
+};
+
+function readCredentialExpression(
+  source: string,
+  match: RegExpMatchArray,
+  boundary: 'equals' | 'colon',
+  sourceExtension: string,
+): { value: string; tail: string } | undefined {
+  const indices = (match as RegExpMatchArray & { indices?: MatchIndices }).indices?.groups;
+  const group = match.groups?.bare !== undefined
+    ? 'bare'
+    : match.groups?.double !== undefined
+      ? 'double'
+      : match.groups?.single !== undefined
+        ? 'single'
+        : undefined;
+  const range = group ? indices?.[group] : undefined;
+  if (!group || !range) return undefined;
+  const quoted = group !== 'bare';
+  const valueStart = Math.max(0, range[0] - (quoted ? 1 : 0));
+  const tokenEnd = Math.min(source.length, range[1] + (quoted ? 1 : 0));
+  const valueEnd = findCredentialExpressionEnd(
+    source,
+    valueStart,
+    boundary,
+    boundary === 'colon' || sourceExtension !== '.py',
+  );
+  if (valueEnd === undefined || valueEnd < tokenEnd) return undefined;
+  return {
+    value: source.slice(valueStart, valueEnd).trim(),
+    tail: source.slice(tokenEnd, valueEnd),
+  };
+}
+
+function findCredentialExpressionEnd(
+  source: string,
+  start: number,
+  boundary: 'equals' | 'colon',
+  stopAtComma: boolean,
+): number | undefined {
+  let roundDepth = 0;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+  let quote = '';
+  let escaped = false;
+  let blockComment = false;
+  let lineComment = false;
+  let lastToken = '';
+
+  for (let index = start; index < source.length; index += 1) {
+    if (index - start > MAX_CREDENTIAL_EXPRESSION_CHARS) return undefined;
+    const char = source[index];
+    const next = source[index + 1] || '';
+    if (lineComment) {
+      if (char !== '\n' && char !== '\r') continue;
+      lineComment = false;
+      if (roundDepth || squareDepth || curlyDepth || expressionContinues(lastToken, source, index)) {
+        continue;
+      }
+      return index;
+    }
+    if (blockComment) {
+      if (char === '*' && next === '/') {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = '';
+        lastToken = 'literal';
+      }
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === '\'' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') roundDepth += 1;
+    else if (char === '[') squareDepth += 1;
+    else if (char === '{') curlyDepth += 1;
+    else if (char === ')' && roundDepth > 0) roundDepth -= 1;
+    else if (char === ']' && squareDepth > 0) squareDepth -= 1;
+    else if (char === '}' && curlyDepth > 0) curlyDepth -= 1;
+    else if (!roundDepth && !squareDepth && !curlyDepth) {
+      if (
+        char === ';'
+        || (stopAtComma && char === ',')
+        || (boundary === 'colon' && char === '}')
+      ) return index;
+      if (char === '\n' || char === '\r') {
+        if (expressionContinues(lastToken, source, index)) continue;
+        return index;
+      }
+    }
+    if (/\s/.test(char)) continue;
+    const token = readCredentialToken(source, index);
+    lastToken = token.value;
+    index = token.end - 1;
+  }
+  return source.length - start <= MAX_CREDENTIAL_EXPRESSION_CHARS
+    ? source.length
+    : undefined;
+}
+
+function expressionContinues(lastToken: string, source: string, lineEnd: number): boolean {
+  if (isCredentialContinuationToken(lastToken)) return true;
+  const nextToken = readNextCredentialToken(source, lineEnd + 1);
+  return nextToken === '`' || isCredentialContinuationToken(nextToken);
+}
+
+function isCredentialContinuationToken(value: string): boolean {
+  return CREDENTIAL_EXPRESSION_CONTINUATION_TOKENS.has(value);
+}
+
+function readNextCredentialToken(source: string, start: number): string {
+  let index = start;
+  while (index < source.length) {
+    if (/\s/.test(source[index])) {
+      index += 1;
+      continue;
+    }
+    if (source[index] === '/' && source[index + 1] === '/') {
+      index = source.indexOf('\n', index + 2);
+      if (index < 0) return '';
+      continue;
+    }
+    if (source[index] === '/' && source[index + 1] === '*') {
+      const end = source.indexOf('*/', index + 2);
+      if (end < 0) return '';
+      index = end + 2;
+      continue;
+    }
+    return readCredentialToken(source, index).value;
+  }
+  return '';
+}
+
+function readCredentialToken(source: string, start: number): { value: string; end: number } {
+  const operator = /^(?:\|\||\?\?|&&|===|!==|==|!=|=>|<=|>=|\?\.|.)/.exec(source.slice(start));
+  const word = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(source.slice(start));
+  const value = word?.[0] || operator?.[0] || source[start];
+  return { value: value.toLowerCase(), end: start + value.length };
+}
+
+function isOnlyCredentialExpressionTrivia(value: string): boolean {
+  const withoutBlockComments = value.replace(/\/\*[\s\S]*?\*\//g, '');
+  const trimmed = withoutBlockComments.trim();
+  return trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('#');
+}
+
+function isSafeEmptyEnvironmentLookup(candidate: string): boolean {
+  const identifier = '[a-z_$][a-z0-9_$]*';
+  const accessor = `(?:\\??\\.${identifier}|\\[(?:${identifier}|\\d+|["'][a-z0-9_$.-]+["'])\\])`;
+  const expressionPath = `${identifier}(?:${accessor})*`;
+  const environmentKey = `(?:${expressionPath}|["'][a-z0-9_.-]+["'])`;
+  return new RegExp(
+    `^os\\.environ\\.get\\(${environmentKey},\\s*(?:""|'')\\)`
+      + `(?:\\s+if\\s+${expressionPath}\\s+else\\s+(?:""|''))?$`,
+  ).test(candidate);
+}
+
+function isSafeRuntimeCredentialExpression(
+  candidate: string,
+  depth = 0,
+  allowBareIdentifier = true,
+): boolean {
+  if (depth > 4) return false;
+  const normalized = candidate
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/[ \t]+(?:\/\/|#).*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (
+    (isRuntimeCredentialExpression(normalized) && (
+      allowBareIdentifier || !/^[a-z_$][a-z0-9_$]*$/.test(normalized)
+    ))
+    || isSafeEmptyEnvironmentLookup(normalized)
+  ) {
+    return true;
+  }
+  const chain = normalized.split(/\s*(?:\|\||\?\?|&&)\s*/);
+  if (chain.length > 1 && chain.every(part => (
+    part && isSafeRuntimeCredentialExpression(part, depth + 1, false)
+  ))) {
+    return true;
+  }
+  const ternary = /^(.+?)(?<!\?)\?(?![?.])(.+?):(.+)$/.exec(normalized);
+  if (
+    ternary
+    && isSafeRuntimeCredentialExpression(ternary[1], depth + 1, true)
+    && ternary.slice(2).every(part => (
+      isSafeRuntimeCredentialExpression(part, depth + 1, false)
+    ))
+  ) {
+    return true;
+  }
+  const typeAssertion = /^(.+?)\s+as\s+[a-z_$][a-z0-9_$]*(?:\[\])?$/.exec(normalized);
+  return Boolean(
+    typeAssertion
+    && isSafeRuntimeCredentialExpression(typeAssertion[1], depth + 1, allowBareIdentifier),
+  );
+}
+
+function isSafeTypeOnlyCredentialDeclaration(candidate: string): boolean {
+  const type = '(?:string|number|boolean|unknown|null|undefined)';
+  return new RegExp(`^${type}(?:\\s*\\|\\s*${type})+$`).test(candidate.trim());
 }
 
 function isExplicitSafeCredentialValue(
@@ -425,7 +702,7 @@ function isRuntimeCredentialExpression(candidate: string): boolean {
   return (
     new RegExp(`^${identifier}$`).test(candidate)
     || new RegExp(`^(?:${expressionPath}|${identifier})(?:(?:${accessor})|${call})+$`).test(candidate)
-    || /^(?:os\.environ\.get|process\.env(?:\??\.[a-z_$][a-z0-9_$]*)?)\(/.test(candidate)
+    || new RegExp(`^os\\.environ\\.get\\((?:${expressionPath}|["'][a-z0-9_.-]+["'])\\)$`).test(candidate)
   );
 }
 
