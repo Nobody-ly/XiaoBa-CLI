@@ -636,6 +636,7 @@ function isSafeRuntimeCredentialExpression(
     .replace(/[ \t]+(?:\/\/|#).*$/, '')
     .replace(/\s+/g, ' ')
     .trim();
+  if (/^(?:undefined|null|""|'')$/.test(normalized)) return true;
   if (
     (isRuntimeCredentialExpression(normalized) && (
       allowBareIdentifier || !/^[a-z_$][a-z0-9_$]*$/.test(normalized)
