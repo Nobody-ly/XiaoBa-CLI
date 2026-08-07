@@ -141,13 +141,22 @@
   git push origin feat/ctyun-worker-image-pipeline
   ```
 
-- [ ] **步骤 10：PR 等审核 + 真实 bake 验收**
-  合并前需用户确认。合并后触发 `worker-image.yml`（手动 `workflow_dispatch` 勾选 `bake_image` 或打 `vX.Y.Z` tag 且 `CTYUN_AUTO_BAKE_WORKER_IMAGE=true`）。
+- [x] **步骤 10：PR 等审核 + 真实 bake 验收（2026-08-07 全部通过）**
+  **前置条件（首次 bake 失败后补齐）**：① 天翼云子账号需被"用户授权"关联到 default 企业项目并授予企业项目（EPS）权限（否则 `ImportEcsKeypair` 报 `OrderCheck.InvalidProjectID`）；② repo var `CTYUN_AUTO_BAKE_WORKER_IMAGE=true`。触发：workflow_dispatch `bake_image=true`。
+  **三次失败→成功**：① EPS 权限（#271 后配置）；② `instanceID` 延迟填充导致 `Find-BuilderInstance` 记空 ID → `outside this bake`（PR #340）；③ `cloud-init status --wait` 返回 exit 2 → SSH 探测全失败（PR #343）。第四次 bake（run `31137245566`）**成功**，镜像 `catsco-worker-1-4-8-f3f1f3e6`（imageID `79f5b7f4-...`，active，私有，Ubuntu 24.04，labels 含 version/commit/bake）。
 
-  **验收标准（bake 日志 + 新 worker 实例）：**
+  **验收标准（bake 日志 + 新 worker 实例）：**（2026-08-07 实测全部 ✅）
   1. bake 日志出现 `platform_systemd=255.4-1ubuntu8.16+ glibc=2.39-0ubuntu8.8+ kernel=...` 且最终 `image_prepared=yes`（任一版本不达标 bake 会失败）
   2. 从镜像开一台临时 worker 验证：`readlink /etc/systemd/system/fwupd.service` = `/dev/null`（fwupd/refresh/timer 均 masked）、`systemctl is-system-running` = `running`（无 freeze）
   3. `/srv/catsco-agent/.npmrc` 与 `/root/.npmrc` 存在且含 `registry.npmmirror.com`；`systemctl cat catsco-agent.service` 含 `NPM_CONFIG_REGISTRY`
   4. `/etc/catsco-image-packages.txt` 记录 systemd/glibc/kernel 版本；`/boot/vmlinuz-*` 存在最新内核
   5. 镜像内 `catsco-agent.service` 为 disabled（首次供给由控制面启用）；无临时 key pair/builder 残留（`ecs GetEcsKeypairDetails` 查询 `catsco-img-key-*` 为空）
   6. 确认后删除验证用临时实例，避免计费残留
+
+  **验收结果（2026-08-07 实测，验证实例 IP 203.32.69.72）：**
+  1. ✅ bake 日志 `platform_systemd=255.4-1ubuntu8.16 glibc=2.39-0ubuntu8.8 kernel=6.8.0-90-generic` + `image_prepared=yes` + `finalized=yes` + `result: created`
+  2. ✅ `readlink fwupd.service/fwupd-refresh.service/fwupd-refresh.timer` 均 = `/dev/null`；`systemctl is-system-running` = `running`
+  3. ✅ `/root/.npmrc` 与 `/srv/catsco-agent/.npmrc` = `registry=https://registry.npmmirror.com`；`systemctl cat catsco-agent.service` 含 `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com`
+  4. ✅ `/etc/catsco-image-packages.txt` 存在（含全部包版本）；`/boot/vmlinuz-6.8.0-137-generic`（运行内核 6.8.0-137）
+  5. ✅ `catsco-agent.service` = disabled；云上 key pair/builder 残留均为 0
+  6. ✅ 验证实例 + key pair 已删除（验证私有镜像创建实例需 `--imageType 0`，`1` 报 `Image.ImageCheck.NotFound`）
