@@ -252,7 +252,10 @@ export class SkillHubService {
       localSkill = options.localSkillPath
         ? findLocalShareableSkillAtPath(options.localSkillPath, skillName)
         : findLocalShareableSkill(skillName);
-    } catch {
+    } catch (caught: any) {
+      if (caught?.code === 'skillhub.local_skill_ambiguous' && caught?.status === 409) {
+        throw caught;
+      }
       throw localSkillValidationFailed();
     }
     if (!localSkill) {
