@@ -202,3 +202,20 @@ Provisioning from this image must:
 
 Never place a long-lived account password, relay administrator key, or shared
 bot token in image metadata or Cloud-init user data.
+
+## Existing Worker Updates (Part A: Application Artifacts)
+
+- **New workers** get the full baked image (`catsco-worker-*`, provisioned via
+  the cloud control plane).
+- **Existing workers** are updated at the application layer with a deterministic
+  artifact (`npm run worker:artifact`) — no rebake, no system-disk change, and
+  `/srv/catsco-agent` data is never touched. See `docs/worker-artifact-update.md`.
+- The worker-side updater is `scripts/update-worker-artifact.sh` (checksum +
+  manifest verify, native-module smoke, symlink switch, restart, heartbeat
+  check, automatic rollback); the dispatcher is
+  `scripts/deploy-worker-artifact.mjs` (serial ssh/scp across targets).
+- CI trigger: stable tag + repo var `CTYUN_WORKER_APP_UPDATE=true`
+  (`.github/workflows/worker-app-update.yml`), or manual workflow_dispatch
+  with `update_workers` from `main`, or local dry-run via
+  `npm run worker:update:dry`.
+- Workers hold no cloud credentials: distribution goes over SSH only.
