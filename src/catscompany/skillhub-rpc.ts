@@ -9,10 +9,12 @@ import {
 } from '../bot-skills/runtime';
 import {
   scanBotSkillWorkspace,
-  type BotSkillWorkspaceValidationFailure,
 } from '../bot-skills/local-manifest';
 import { readSkillHubLocalMetadata } from '../skillhub/local-skill-metadata';
-import { shareLocalSkillForCatsCo } from '../skillhub/local-share';
+import {
+  shareLocalSkillForCatsCo,
+  validateSkillHubShareMetadata,
+} from '../skillhub/local-share';
 import { PathResolver } from '../utils/path-resolver';
 import { Logger } from '../utils/logger';
 
@@ -30,6 +32,14 @@ const MAX_RELATIVE_PATH_LENGTH = 500;
 const MAX_COMPLETED_REQUESTS = 256;
 const BOT_UID_PATTERN = /^[A-Za-z0-9_.-]{1,160}$/;
 const CONTENT_HASH_PATTERN = /^[0-9a-f]{64}$/;
+
+interface SkillHubWorkspaceValidationFailure {
+  localSkillId: string;
+  name: string;
+  installName: string;
+  path: string;
+  error: Error;
+}
 
 export class SkillHubThinRpcError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -139,9 +149,20 @@ export class SkillHubThinRpcHandler {
       this.assertOperational(request);
       this.assertRequestScope(request, botUid, true);
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
-      const rejected: BotSkillWorkspaceValidationFailure[] = [];
-      const entries = scanBotSkillWorkspace(context.skillsRoot, {
+      const rejected: SkillHubWorkspaceValidationFailure[] = [];
+      const entries = scanSkillHubWorkspace(context.skillsRoot, {
         onValidationFailure: failure => rejected.push(failure),
+      }).filter((entry) => {
+        const error = validateSkillHubShareMetadata(entry.path);
+        if (!error) return true;
+        rejected.push({
+          localSkillId: entry.localSkillId,
+          name: entry.name,
+          installName: entry.installName,
+          path: entry.path,
+          error,
+        });
+        return false;
       });
       const listed = [
         ...entries.map(entry => ({ kind: 'valid' as const, entry })),
@@ -151,33 +172,31 @@ export class SkillHubThinRpcHandler {
       const skills = listed.map((item) => {
         if (item.kind === 'valid') {
           const { entry } = item;
-          const parsed = matter(fs.readFileSync(path.join(entry.path, 'SKILL.md'), 'utf8'));
-          const metadata = readSkillHubLocalMetadata(path.join(entry.path, 'SKILL.md'));
+          const presentation = readLocalSkillPresentation(entry.path);
           return {
             local_skill_id: limitText(entry.localSkillId, MAX_NAME_LENGTH),
             name: limitText(entry.name, MAX_NAME_LENGTH),
-            description: limitText(String(parsed.data?.description || ''), MAX_DESCRIPTION_LENGTH),
+            description: limitText(presentation.description, MAX_DESCRIPTION_LENGTH),
             relative_path: limitText(entry.installName, MAX_RELATIVE_PATH_LENGTH),
             source: 'user',
             can_share: !entry.reference || isPrivateSkillReference(entry.reference.skillId),
             skill_hub: {
-              ...(metadata || {}),
+              ...(presentation.metadata || {}),
               ...(entry.reference ? { reference: entry.reference } : {}),
             },
           };
         }
         const { entry } = item;
-        const parsed = matter(fs.readFileSync(path.join(entry.path, 'SKILL.md'), 'utf8'));
-        const metadata = readSkillHubLocalMetadata(path.join(entry.path, 'SKILL.md'));
+        const presentation = readLocalSkillPresentation(entry.path);
         return {
           local_skill_id: limitText(entry.localSkillId, MAX_NAME_LENGTH),
           name: limitText(entry.name, MAX_NAME_LENGTH),
-          description: limitText(String(parsed.data?.description || ''), MAX_DESCRIPTION_LENGTH),
+          description: limitText(presentation.description, MAX_DESCRIPTION_LENGTH),
           relative_path: limitText(entry.installName, MAX_RELATIVE_PATH_LENGTH),
           source: 'user',
           can_share: false,
           share_error: limitText(entry.error.message, MAX_DESCRIPTION_LENGTH),
-          skill_hub: metadata || {},
+          skill_hub: presentation.metadata || {},
         };
       });
       return {
@@ -200,13 +219,24 @@ export class SkillHubThinRpcHandler {
     const skillName = requiredText(payload.skill_name, 'skill_name', MAX_NAME_LENGTH);
     await withCurrentBotSkillWorkspaceWrite((context) => {
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
-      const entry = scanBotSkillWorkspace(context.skillsRoot, {
-        onValidationFailure: () => {},
+      const rejected: SkillHubWorkspaceValidationFailure[] = [];
+      const entry = scanSkillHubWorkspace(context.skillsRoot, {
+        onValidationFailure: failure => rejected.push(failure),
       }).find((candidate) => (
         candidate.localSkillId === localSkillId && candidate.name === skillName
       ));
       if (!entry) {
+        const invalid = rejected.find(candidate => (
+          candidate.localSkillId === localSkillId && candidate.name === skillName
+        ));
+        if (invalid) {
+          throw new SkillHubThinRpcError('LOCAL_SKILL_INVALID', invalid.error.message);
+        }
         throw new SkillHubThinRpcError('LOCAL_SKILL_NOT_FOUND', 'The selected local Skill no longer exists.');
+      }
+      const validationError = validateSkillHubShareMetadata(entry.path);
+      if (validationError) {
+        throw new SkillHubThinRpcError('LOCAL_SKILL_INVALID', validationError.message);
       }
     }, { runtimeRoot: this.runtimeRoot });
 
@@ -402,6 +432,36 @@ export async function requestDashboardBotSwitch(
   });
   if (!response.ok) {
     throw new Error(`Dashboard rejected the Bot switch (HTTP ${response.status}).`);
+  }
+}
+
+function readLocalSkillPresentation(skillDir: string): {
+  description: string;
+  metadata: ReturnType<typeof readSkillHubLocalMetadata>;
+} {
+  const skillFile = path.join(skillDir, 'SKILL.md');
+  try {
+    const parsed = matter(fs.readFileSync(skillFile, 'utf8'), {});
+    return {
+      description: String(parsed.data?.description || ''),
+      metadata: readSkillHubLocalMetadata(skillFile),
+    };
+  } catch {
+    return { description: '', metadata: null };
+  }
+}
+
+function scanSkillHubWorkspace(
+  skillsRoot: string,
+  options: Parameters<typeof scanBotSkillWorkspace>[1],
+): ReturnType<typeof scanBotSkillWorkspace> {
+  try {
+    return scanBotSkillWorkspace(skillsRoot, options);
+  } catch {
+    throw new SkillHubThinRpcError(
+      'LOCAL_SKILL_INVALID',
+      'The local Skill workspace could not be validated safely.',
+    );
   }
 }
 
