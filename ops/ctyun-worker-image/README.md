@@ -21,12 +21,13 @@ session, skill installation, or runtime `.env`.
   `/opt/catsco/current/worker-release.json` and `/etc/catsco-image.json`.
 - `Manage-WorkerImages.ps1` automates housekeeping: `-Action Prune` keeps the
   newest 6 `catsco-worker-*` images (bake-labeled) and deletes older ones
-  (fail-closed, deletion confirmed by name-scoped reads). It does **not**
-  check the production launch template reference — if the provisioning
-  template still points at an image older than the newest 6, pin the template
-  to a recent image first or prune manually. As a manual safety rule keep the
-  newest two active images plus the image currently referenced by the
-  production launch template.
+  (fail-closed, deletion confirmed by name-scoped reads). **Prune protects
+  production references via `-ProtectedImageIDs`**: the image(s) still
+  referenced by the production launch template (or a pinned rollback target)
+  are never deleted even when older than `-Keep`, and if deletion is needed
+  but no protected list is provided Prune refuses to run (fail-closed). The
+  GitHub workflow passes the repo variable `CTYUN_WORKER_PROTECTED_IMAGE_IDS`
+  (see “Protected image list maintenance” below).
 
 This avoids rebuilding a large system disk for documentation-only or emergency
 application releases while still allowing new workers to start without GitHub.
@@ -37,15 +38,39 @@ application releases while still allowing new workers to start without GitHub.
 (created by `New-CatsCoWorkerImage.ps1`):
 
 - `-Action List`   : list all bake-channel images
-  (`imageID/name/version/commit/createdTime/status`), newest first
-- `-Action Latest` : print the newest imageID (used by deployment / the cloud
-  control plane to pick the latest image)
+  (`imageID/name/version/commit/createdTime/status`), newest first.
+  > **Contract note**: this PowerShell output (pretty JSON) is for CI / humans
+  > on the bake toolchain. The cats-company control plane (`/api/cloud-workers`)
+  > runs on a Linux image **without PowerShell**; its image contract is the
+  > bash `list-worker-images.sh` (TSV, one image per line) from the
+  > cats-company B4-1 scripts. Do not point `CATSCO_WORKER_IMAGES_SCRIPT` at
+  > this `.ps1`.
+- `-Action Latest` : print the newest imageID (used by deployment to pick the
+  latest image)
 - `-Action Prune`  : keep the newest `-Keep` images (default 6) and delete
   older bake-labeled `catsco-worker-*` images; each deletion is confirmed by a
-  name-scoped `ListImage` read, and failures fail closed
+  name-scoped `ListImage` read, and failures fail closed.
+  Requires `-ProtectedImageIDs` (comma-separated) when there are images to
+  delete — protected images are never deleted.
 
 CI runs `Prune -Keep 6` after every successful bake (`continue-on-error`,
-30-minute budget).
+30-minute budget), passing `$env:WORKER_PROTECTED_IMAGE_IDS` (repo var
+`CTYUN_WORKER_PROTECTED_IMAGE_IDS`).
+
+### Protected image list maintenance
+
+- **What to put in it**: the `imageID` currently referenced by the production
+  launch template, plus any pinned rollback/staged-rollout target. The script
+  only verifies the list is non-empty; it does not auto-discover the template
+  reference, so keep it in sync when the template moves.
+- **Local invocation**: `./Manage-WorkerImages.ps1 -Action Prune -Keep 6
+  -RegionID <region> -ProjectID 0 -ProtectedImageIDs
+  "<imageID1>,<imageID2>"`.
+- **Rotating / emergency**: after a bake that becomes the new production
+  reference, update the repo var to the new `imageID` (Settings → Variables),
+  then the next bake’s Prune can safely clean older images. To disable
+  automatic pruning entirely, remove the variable — Prune will refuse to
+  delete (fail-closed) instead of guessing.
 
 ## Layout
 
