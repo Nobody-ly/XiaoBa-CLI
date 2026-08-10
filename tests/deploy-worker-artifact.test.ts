@@ -3,7 +3,7 @@ import * as assert from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deployWorkerArtifact, validate } from "../scripts/deploy-worker-artifact.mjs";
+import { deployWorkerArtifact, validate, buildSshArgs, sshDestination } from "../scripts/deploy-worker-artifact.mjs";
 
 const VERSION = "1.4.9";
 const COMMIT = "b".repeat(40);
@@ -146,4 +146,19 @@ test("validate rejects malformed inputs", () => {
   } finally {
     fs.rmSync(base.artifact, { force: true });
   }
+});
+
+test("ssh/scp args never pass -l <user> to scp; user is encoded into destination", () => {
+  // P1: `scp -l <n>` is a bandwidth limit, not a user — passing -l root would
+  // fail at argument parsing. User must go into the destination (user@host).
+  const opts = { sshUser: "root", sshKey: "/tmp/k", knownHosts: "/tmp/kh" };
+  const args = buildSshArgs(opts);
+  assert.ok(!args.includes("-l"), "scp would reject -l <user> (bandwidth limit)");
+  assert.ok(!args.includes("root"), "user must not appear as a bare argument");
+  assert.ok(args.includes("-i") && args.includes("/tmp/k"));
+  assert.ok(args.includes("-o") && args.includes("StrictHostKeyChecking=yes"));
+  assert.ok(args.includes("UserKnownHostsFile=/tmp/kh"));
+  assert.strictEqual(sshDestination("host1", opts), "root@host1");
+  assert.strictEqual(sshDestination("host1", { ...opts, sshUser: "" }), "host1");
+  assert.strictEqual(sshDestination("host1", {}), "host1");
 });

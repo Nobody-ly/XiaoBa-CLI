@@ -153,8 +153,10 @@ fi
 OLD_TARGET="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
 mkdir -p "$(dirname "$PREV_FILE")"
 printf '%s\n' "$OLD_TARGET" > "$PREV_FILE"
-# 记录重启起始时间：心跳验证只接受本次重启之后的日志（避免命中旧连接日志）
-SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
+# 记录重启起始时间：心跳验证只接受本次重启之后的日志（避免命中旧连接日志）。
+# 用 epoch 秒（@...）而非本地时间字符串——journalctl --since 解析 @epoch 无
+# 时区歧义（非 UTC 主机也不会把 UTC 当本地时间）。
+SINCE="@$(date +%s)"
 ln -sfn "$RELEASE_ROOT" "$CURRENT_LINK"
 systemctl restart "$SERVICE"
 

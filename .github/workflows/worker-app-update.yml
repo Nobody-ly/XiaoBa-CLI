@@ -63,6 +63,11 @@ jobs:
           }
       - name: Deploy artifact to worker targets
         run: |
+          # P2: fail-closed — 未配置目标列表时拒绝回退到本地 alias 默认矩阵
+          [[ -n "$WORKER_SSH_TARGETS" ]] || {
+            echo "WORKER_SSH_TARGETS is empty; refusing to fall back to local aliases" >&2
+            exit 1
+          }
           # 安全写入临时私钥与 known_hosts（来自 repo secrets/vars，仅按名引用）
           KEY_FILE="$RUNNER_TEMP/worker_ssh_key"
           KNOWN_HOSTS="$RUNNER_TEMP/worker_known_hosts"

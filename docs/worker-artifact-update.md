@@ -64,9 +64,12 @@ node scripts/deploy-worker-artifact.mjs \
 ```
 
 - 未指定 `--targets` 时使用默认矩阵：`worker1 worker2 ck-work-hn2 zh-work yjz-work`
-  （本地 SSH alias；CI 必须显式传真实 host）
+  （本地 SSH alias；**CI 必须显式传真实 host，且 `WORKER_SSH_TARGETS` 为空时
+  fail-closed 拒绝执行**，不会回退到 alias）
 - 每台执行：`scp 制品+脚本 → update-worker-artifact.sh → 验证`
 - 提供 `--known-hosts` 时强制 `StrictHostKeyChecking=yes`，否则 `accept-new`
+- SSH 用户通过 `--ssh-user` 编码进 destination（`user@host`），**不向 scp 传
+  `-l <user>`**（OpenSSH 的 `scp -l` 是带宽限制，不是用户）
 - 单台失败不阻塞后续（除非 `--abort-on-failure`）；结束时清理远端 `/tmp` 临时文件
 - 远端 `current` release_id 已是目标版本时自动跳过该台（幂等）
 - **回滚归属**：切换后的失败（服务不 active/心跳失败）由 worker 侧脚本自动回滚；
@@ -81,8 +84,8 @@ node scripts/deploy-worker-artifact.mjs \
   worker 不需要天翼云 AK/SK。
 - 校验链：制品 SHA256 匹配 → manifest `version/commit` 匹配 → 捆绑 Node/npm
   存在 → 原生模块冒烟（`sharp`/`@napi-rs/canvas`，在 release 目录内运行）→
-  重启后心跳验证（`journalctl --since 重启时间`，只认本次重启后的日志，
-  含 `已连接`/`握手成功`/`uid=`）。
+  重启后心跳验证（`journalctl --since @$(date +%s)`，epoch 秒无时区歧义，
+  只认本次重启后的日志，含 `已连接`/`握手成功`/`uid=`）。
 - 任一验证失败：**自动切回旧 release 并重启**，绝不留指向坏版本的 `current`。
 
 ## 回滚

@@ -271,10 +271,10 @@ test("rolls back when heartbeat verification fails", { skip: !hasBash || isWindo
     );
     assert.notStrictEqual(res.status, 0);
     assert.match(res.stderr, /heartbeat/i);
-    // heartbeat must only accept logs after the restart (--since), never old
-    // connection lines from before the update
+    // heartbeat must only accept logs after the restart (--since @epoch is
+    // timezone-agnostic), never old connection lines from before the update
     const log = fs.readFileSync(fake.log, "utf8");
-    assert.match(log, /journalctl -u catsco-agent\.service --since/);
+    assert.match(log, /journalctl -u catsco-agent\.service --since @/);
     // current must not point at the broken release
     assert.throws(() => fs.readlinkSync(path.join(root, "current")));
   } finally {

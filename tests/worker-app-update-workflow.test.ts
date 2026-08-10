@@ -45,6 +45,9 @@ test("worker app update workflow writes SSH key/known_hosts and passes them expl
   assert.match(workflow, /--known-hosts "\$KNOWN_HOSTS"/);
   assert.match(workflow, /--ssh-user "\$\{WORKER_SSH_USER:-root\}"/);
   assert.match(workflow, /--targets "\$WORKER_SSH_TARGETS"/);
+  // P2: empty/absent target list must fail closed (no fallback to local aliases)
+  assert.match(workflow, /WORKER_SSH_TARGETS is empty; refusing to fall back to local aliases/);
+  assert.match(workflow, /\[\[ -n "\$WORKER_SSH_TARGETS" \]\]/);
   assert.match(workflow, /WORKER_SSH_KEY: \$\{\{\s*secrets\.WORKER_SSH_KEY\s*\}\}/);
   assert.match(workflow, /WORKER_SSH_KNOWN_HOSTS: \$\{\{\s*secrets\.WORKER_SSH_KNOWN_HOSTS\s*\}\}/);
   assert.match(workflow, /WORKER_SSH_TARGETS: \$\{\{\s*vars\.WORKER_SSH_TARGETS\s*\}\}/);

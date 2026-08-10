@@ -77,27 +77,41 @@ export function validate(opts) {
   if (errs.length) throw new Error(errs.join("; "));
 }
 
+// OpenSSH pitfall: `ssh -l <user>` sets the login user, but `scp -l <n>`
+// means bandwidth limit — passing `-l root` to scp fails at argument parsing.
+// We therefore never use `-l`; the user is encoded into the destination
+// (`user@host`) which works identically for both ssh and scp.
+export function buildSshArgs(opts) {
+  const a = [];
+  if (opts.sshKey) a.push("-i", opts.sshKey);
+  a.push("-o", "BatchMode=yes", "-o", "ConnectTimeout=15");
+  if (opts.knownHosts) {
+    a.push("-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${opts.knownHosts}`);
+  } else {
+    a.push("-o", "StrictHostKeyChecking=accept-new");
+  }
+  return a;
+}
+
+export function sshDestination(host, opts) {
+  return opts.sshUser ? `${opts.sshUser}@${host}` : host;
+}
+
 // Real ssh/scp implementation used by the CLI entrypoint.
 function makeDefaultDeps(opts) {
-  const sshArgs = () => {
-    const a = [];
-    if (opts.sshUser) a.push("-l", opts.sshUser);
-    if (opts.sshKey) a.push("-i", opts.sshKey);
-    a.push("-o", "BatchMode=yes", "-o", "ConnectTimeout=15");
-    if (opts.knownHosts) {
-      a.push("-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${opts.knownHosts}`);
-    } else {
-      a.push("-o", "StrictHostKeyChecking=accept-new");
-    }
-    return a;
-  };
   return {
     ssh(host, cmd) {
-      const r = spawnSync("ssh", [...sshArgs(), host, cmd], { encoding: "utf8" });
+      const r = spawnSync("ssh", [...buildSshArgs(opts), sshDestination(host, opts), cmd], {
+        encoding: "utf8",
+      });
       return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
     },
     scp(host, local, remote) {
-      const r = spawnSync("scp", [...sshArgs(), local, `${host}:${remote}`], { encoding: "utf8" });
+      const r = spawnSync(
+        "scp",
+        [...buildSshArgs(opts), local, `${sshDestination(host, opts)}:${remote}`],
+        { encoding: "utf8" },
+      );
       return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
     },
     rand: () => crypto.randomBytes(6).toString("hex"),
