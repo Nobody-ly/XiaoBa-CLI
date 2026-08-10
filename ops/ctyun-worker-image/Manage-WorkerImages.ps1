@@ -47,9 +47,51 @@ function Invoke-Ctyun {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
     try {
-        $raw = & timeout '--signal=TERM' '--kill-after=15s' '90s' ctyun-cli @Arguments '--output' 'json' 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "ctyun-cli failed with exit code $LASTEXITCODE`n$($raw -join "`n")"
+        if ($IsWindows) {
+            # Windows PowerShell 7：系统 timeout.exe 不支持 GNU --signal/--kill-after，
+            # 直接调用会 `ERROR: Invalid syntax`。改用 .NET Process + ArgumentList
+            # 做 90s 超时（超时终止进程）。ArgumentList 正确处理参数引用，且兼容
+            # PATH 里的 .cmd（测试 fake）与 .exe（真实 ctyun-cli）。
+            # Get-Command 可能返回多个（fake .cmd + 真实 .exe 等）：取 PATH 第一个
+            $cmd = @(Get-Command 'ctyun-cli' -CommandType Application -ErrorAction SilentlyContinue)[0]
+            if (-not $cmd) { throw "ctyun-cli not found on PATH" }
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $source = $cmd.Source
+            if ($source -match '\.(cmd|bat)$') {
+                # .cmd/.bat 需要 cmd.exe /c 包装（CreateProcess 不能直接跑）
+                $psi.FileName = $env:ComSpec
+                [void]$psi.ArgumentList.Add('/d')
+                [void]$psi.ArgumentList.Add('/s')
+                [void]$psi.ArgumentList.Add('/c')
+                [void]$psi.ArgumentList.Add($source)
+            } else {
+                $psi.FileName = $source
+            }
+            foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add($a) }
+            [void]$psi.ArgumentList.Add('--output')
+            [void]$psi.ArgumentList.Add('json')
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            if (-not $proc.WaitForExit(90000)) {
+                $proc.Kill()
+                throw "ctyun-cli timed out after 90s"
+            }
+            $out = $outTask.GetAwaiter().GetResult()
+            $err = $errTask.GetAwaiter().GetResult()
+            if ($proc.ExitCode -ne 0) {
+                throw "ctyun-cli failed with exit code $($proc.ExitCode)`n$err"
+            }
+            $raw = @($out -split "`r?`n")
+        } else {
+            # Linux（GitHub Actions / bake CI）：GNU timeout 可用
+            $raw = & timeout '--signal=TERM' '--kill-after=15s' '90s' ctyun-cli @Arguments '--output' 'json' 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "ctyun-cli failed with exit code $LASTEXITCODE`n$($raw -join "`n")"
+            }
         }
         # Join lines before parsing: ConvertFrom-Json on a multi-line JSON
         # array would otherwise parse line by line (same as bake's
