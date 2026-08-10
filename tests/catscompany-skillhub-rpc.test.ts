@@ -224,6 +224,61 @@ describe('CatsCompany SkillHub thin RPC', () => {
     }
   });
 
+  test('rejects a Skill name with surrounding whitespace before CatsCo authentication', async () => {
+    const skillRoot = path.join(runtimeRoot, 'skills', 'whitespace-name');
+    fs.mkdirSync(skillRoot, { recursive: true });
+    fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+      '---',
+      'name: " demo "',
+      'description: Valid description',
+      '---',
+      '',
+    ].join('\n'));
+
+    const metadataError = validateSkillHubShareMetadata(skillRoot);
+    assert.ok(metadataError);
+    assert.match(metadataError.message, /name.*首尾空格/);
+    const workspace = await handler.execute(request({ request_id: 'workspace-whitespace-name' }));
+    const entry = (workspace.skills as Array<Record<string, unknown>>)
+      .find(skill => skill.relative_path === 'whitespace-name');
+    assert.ok(entry?.local_skill_id);
+    assert.equal(entry.name, 'demo');
+    assert.equal(entry.can_share, false);
+
+    const originalFetch = global.fetch;
+    let authExchangeCalls = 0;
+    let remoteRequestCount = 0;
+    global.fetch = async (input: string | URL | Request) => {
+      remoteRequestCount += 1;
+      if (new URL(String(input)).pathname === '/api/auth/catsco-exchange') {
+        authExchangeCalls += 1;
+      }
+      return Response.json({ error: 'unexpected request' }, { status: 500 });
+    };
+    try {
+      await assert.rejects(
+        handler.execute(request({
+          request_id: 'share-whitespace-name',
+          tool_name: SKILLHUB_THIN_RPC_TOOLS.share,
+          payload: {
+            bot_uid: '42',
+            local_skill_id: entry.local_skill_id,
+            skill_name: entry.name,
+            confirm_publish: true,
+          },
+        })),
+        (error: any) => (
+          error instanceof SkillHubThinRpcError
+          && error.code === 'LOCAL_SKILL_INVALID'
+        ),
+      );
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.equal(authExchangeCalls, 0);
+    assert.equal(remoteRequestCount, 0);
+  });
+
   test('sorts valid and rejected local Skills by the complete canonical ID', async () => {
     const skillsRoot = path.join(runtimeRoot, 'skills');
     writeBotSkillLocalMarker(path.join(skillsRoot, 'local-demo'), {

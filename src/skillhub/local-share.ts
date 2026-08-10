@@ -177,6 +177,9 @@ export function validateSkillHubShareMetadata(skillDir: string): Error | undefin
     const parsed = matter(fs.readFileSync(skillFile, 'utf8'), {});
     const name = parsed.data?.name;
     const description = parsed.data?.description;
+    if (typeof name === 'string' && name.trim() && name !== name.trim()) {
+      return new Error('SKILL.md 的 name 不能包含首尾空格。请移除多余空格后重试。');
+    }
     if (
       typeof name !== 'string'
       || !name.trim()
