@@ -11,13 +11,17 @@ import {
   requestDashboardBotSwitch,
 } from '../src/catscompany/skillhub-rpc';
 import { BotSkillWorkspaceService } from '../src/bot-skills/workspace';
-import { shareLocalSkillForCatsCo } from '../src/skillhub/local-share';
+import {
+  shareLocalSkillForCatsCo,
+  validateSkillHubShareMetadata,
+} from '../src/skillhub/local-share';
 import { scanBotSkillWorkspace } from '../src/bot-skills/local-manifest';
 import { writeBotSkillLocalMarker } from '../src/bot-skills/local-manifest';
 import {
   applySkillHubLocalMetadata,
   readSkillHubLocalMetadata,
 } from '../src/skillhub/local-skill-metadata';
+import { SkillHubService } from '../src/skillhub/service';
 
 describe('CatsCompany SkillHub thin RPC', () => {
   let runtimeRoot = '';
@@ -126,8 +130,10 @@ describe('CatsCompany SkillHub thin RPC', () => {
       '---\nname: [unterminated\ndescription: Broken YAML\n---\n',
     );
 
-    const compatibilityScan = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'));
-    assert.equal(compatibilityScan.length, 3);
+    assert.throws(
+      () => scanBotSkillWorkspace(path.join(runtimeRoot, 'skills')),
+      /SKILL\.md format is invalid/i,
+    );
 
     const result = await handler.execute(request({ request_id: 'workspace-with-invalid-skill' }));
     const skills = result.skills as Array<Record<string, unknown>>;
@@ -140,7 +146,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
     const malformed = skills.find(skill => skill.name === 'broken_yaml');
     assert.ok(malformed?.local_skill_id);
     assert.equal(malformed?.can_share, false);
-    assert.match(String(malformed?.share_error || ''), /SKILL\.md.*格式无效.*YAML frontmatter/i);
+    assert.match(String(malformed?.share_error || ''), /SKILL\.md format is invalid.*YAML frontmatter/i);
 
     await assert.rejects(
       handler.execute(request({
@@ -159,6 +165,63 @@ describe('CatsCompany SkillHub thin RPC', () => {
         && /name.*description.*YAML frontmatter/i.test(error.message)
       ),
     );
+  });
+
+  test('returns LOCAL_SKILL_INVALID for non-string or blank share metadata', async () => {
+    const skillRoot = path.join(runtimeRoot, 'skills', 'metadata-validation');
+    fs.mkdirSync(skillRoot, { recursive: true });
+    const invalidValues = [
+      { label: 'blank', yaml: '"   "' },
+      { label: 'number', yaml: '123' },
+      { label: 'array', yaml: '[value]' },
+      { label: 'object', yaml: '{ value: text }' },
+    ];
+
+    for (const field of ['name', 'description'] as const) {
+      for (const invalid of invalidValues) {
+        const metadata = {
+          name: 'valid-name',
+          description: 'Valid description',
+          [field]: invalid.yaml,
+        };
+        fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+          '---',
+          `name: ${metadata.name}`,
+          `description: ${metadata.description}`,
+          '---',
+          '',
+        ].join('\n'));
+        const error = validateSkillHubShareMetadata(skillRoot);
+        assert.ok(error, `${field} accepted ${invalid.label}`);
+        assert.match(error.message, /name.*description.*非空文本/i);
+
+        const requestSuffix = `${field}-${invalid.label}`;
+        const workspace = await handler.execute(request({
+          request_id: `workspace-invalid-${requestSuffix}`,
+        }));
+        const entry = (workspace.skills as Array<Record<string, unknown>>)
+          .find(skill => skill.relative_path === 'metadata-validation');
+        assert.ok(entry?.local_skill_id);
+        assert.equal(entry?.can_share, false);
+        await assert.rejects(
+          handler.execute(request({
+            request_id: `share-invalid-${requestSuffix}`,
+            tool_name: SKILLHUB_THIN_RPC_TOOLS.share,
+            payload: {
+              bot_uid: '42',
+              local_skill_id: entry.local_skill_id,
+              skill_name: entry.name,
+              confirm_publish: true,
+            },
+          })),
+          (rpcError: any) => (
+            rpcError instanceof SkillHubThinRpcError
+            && rpcError.code === 'LOCAL_SKILL_INVALID'
+            && /name.*description.*非空文本/i.test(rpcError.message)
+          ),
+        );
+      }
+    }
   });
 
   test('sorts valid and rejected local Skills by the complete canonical ID', async () => {
@@ -417,6 +480,180 @@ describe('CatsCompany SkillHub thin RPC', () => {
       }),
       (error: any) => error?.code === 'skillhub.share_local_skill_changed',
     );
+  });
+
+  test('revalidates malformed YAML under the upload lock before authentication', async () => {
+    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    await handler.execute(request({ request_id: 'metadata-first-lock' }));
+    fs.writeFileSync(path.join(selected.path, 'SKILL.md'), [
+      '---',
+      'name: [unterminated',
+      'description: Broken YAML',
+      '---',
+      '',
+    ].join('\n'));
+    let localAuthReads = 0;
+    let authExchangeCalls = 0;
+    let uploadCalls = 0;
+
+    await assert.rejects(
+      shareLocalSkillForCatsCo({
+        skillName: selected.name,
+        expectedLocalSkillId: selected.localSkillId,
+        expectedBotUid: '42',
+        expectedUserUid: '7',
+      }, {
+        writeLocalMetadata: false,
+        runtimeRoot,
+        getCatsCoAuth: () => {
+          localAuthReads += 1;
+          return {
+            token: 'user-token',
+            baseUrl: 'https://app.catsco.cc',
+            user: { uid: '7', username: 'alice' },
+          };
+        },
+        createSkillHubService: () => ({
+          loginWithCatsCo: async () => {
+            authExchangeCalls += 1;
+            throw new Error('remote authentication should not be reached');
+          },
+          shareLocalSkill: async () => {
+            uploadCalls += 1;
+            throw new Error('remote upload should not be reached');
+          },
+        }),
+      }),
+      (error: any) => (
+        error?.code === 'skillhub.share_local_skill_invalid'
+        && /SKILL\.md format is invalid.*YAML frontmatter/i.test(error.message)
+        && !error.message.includes(runtimeRoot)
+      ),
+    );
+    assert.equal(localAuthReads, 1);
+    assert.equal(authExchangeCalls, 0);
+    assert.equal(uploadCalls, 0);
+  });
+
+  test('redacts local paths when locked workspace scanning fails before authentication', async () => {
+    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    fs.writeFileSync(path.join(selected.path, '.xiaoba-bot-skill.json'), '{ invalid json');
+    let authExchangeCalls = 0;
+    let uploadCalls = 0;
+
+    await assert.rejects(
+      handler.execute(request({
+        request_id: 'share-invalid-marker',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.share,
+        payload: {
+          bot_uid: '42',
+          local_skill_id: selected.localSkillId,
+          skill_name: selected.name,
+          confirm_publish: true,
+        },
+      })),
+      (error: any) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'LOCAL_SKILL_INVALID'
+        && error.message === 'The local Skill workspace could not be validated safely.'
+        && !error.message.includes(runtimeRoot)
+        && !error.message.includes(selected.path)
+      ),
+    );
+
+    await assert.rejects(
+      shareLocalSkillForCatsCo({
+        skillName: selected.name,
+        expectedLocalSkillId: selected.localSkillId,
+        expectedBotUid: '42',
+        expectedUserUid: '7',
+      }, {
+        writeLocalMetadata: false,
+        runtimeRoot,
+        getCatsCoAuth: () => ({
+          token: 'user-token',
+          baseUrl: 'https://app.catsco.cc',
+          user: { uid: '7', username: 'alice' },
+        }),
+        createSkillHubService: () => ({
+          loginWithCatsCo: async () => {
+            authExchangeCalls += 1;
+            throw new Error('remote authentication should not be reached');
+          },
+          shareLocalSkill: async () => {
+            uploadCalls += 1;
+            throw new Error('remote upload should not be reached');
+          },
+        }),
+      }),
+      (error: any) => (
+        error?.code === 'skillhub.share_local_skill_invalid'
+        && error.message === 'The selected local Skill could not be validated safely.'
+        && !error.message.includes(runtimeRoot)
+        && !error.message.includes(selected.path)
+      ),
+    );
+    assert.equal(authExchangeCalls, 0);
+    assert.equal(uploadCalls, 0);
+  });
+
+  test('redacts malformed YAML introduced during authentication before quick share', async () => {
+    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const productionService = new SkillHubService({
+      baseUrl: 'http://127.0.0.1:1',
+      sessionScope: 'memory',
+    });
+    let authExchangeCalls = 0;
+    let localSharePreparations = 0;
+
+    await assert.rejects(
+      shareLocalSkillForCatsCo({
+        skillName: selected.name,
+        expectedLocalSkillId: selected.localSkillId,
+        expectedBotUid: '42',
+        expectedUserUid: '7',
+      }, {
+        writeLocalMetadata: false,
+        runtimeRoot,
+        getCatsCoAuth: () => ({
+          token: 'user-token',
+          baseUrl: 'https://app.catsco.cc',
+          user: { uid: '7', username: 'alice' },
+        }),
+        createSkillHubService: () => ({
+          loginWithCatsCo: async () => {
+            authExchangeCalls += 1;
+            fs.writeFileSync(path.join(selected.path, 'SKILL.md'), [
+              '---',
+              'name: [unterminated',
+              'description: Broken during authentication',
+              '---',
+              '',
+            ].join('\n'));
+            return {
+              authenticated: true,
+              baseUrl: 'https://skillhub.example.test',
+              roles: [],
+              permissions: [],
+              catsCo: { uid: '7', username: 'alice', displayName: 'Alice' },
+            };
+          },
+          shareLocalSkill: async (input, options) => {
+            localSharePreparations += 1;
+            return productionService.shareLocalSkill(input, options);
+          },
+        }),
+      }),
+      (error: any) => (
+        error?.code === 'skillhub.local_skill_invalid'
+        && error?.status === 400
+        && error.message === 'The selected local Skill could not be validated safely.'
+        && !error.message.includes(runtimeRoot)
+        && !error.message.includes(selected.path)
+      ),
+    );
+    assert.equal(authExchangeCalls, 1);
+    assert.equal(localSharePreparations, 1);
   });
 
   test('writes share metadata only after revalidating the selected local Skill and scope', async () => {

@@ -126,7 +126,7 @@ export function scanBotSkillWorkspace(
           }
           const marker = readBotSkillLocalMarker(skillDir);
           if (!marker) throw error;
-          const name = readLocalSkillName(skillDir);
+          const name = readLocalSkillNameForValidationFailure(skillDir);
           if (localSkillIds.has(marker.localSkillId)) {
             throw new Error(`Bot Skill workspace contains a duplicate localSkillId: ${marker.localSkillId}`);
           }
@@ -199,7 +199,18 @@ function readLocalSkillName(skillDir: string): string {
     const parsed = matter(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'), {});
     return String(parsed.data?.name || fallback).trim() || fallback;
   } catch {
-    return fallback;
+    throw new BotSkillPackageValidationError(
+      'SKILL.md format is invalid. Check its YAML frontmatter and try again.',
+    );
+  }
+}
+
+function readLocalSkillNameForValidationFailure(skillDir: string): string {
+  try {
+    return readLocalSkillName(skillDir);
+  } catch (error) {
+    if (!(error instanceof BotSkillPackageValidationError)) throw error;
+    return path.basename(skillDir);
   }
 }
 

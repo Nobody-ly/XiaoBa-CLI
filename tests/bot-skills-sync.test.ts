@@ -1242,6 +1242,29 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     assert.deepStrictEqual(fixture.definitionService.read(fixture.botId)?.skills, previousSkills);
   });
 
+  test('rejects malformed SKILL.md before private upload or BotDefinition update', async () => {
+    const fixture = createFixture(roots);
+    const skillRoot = path.join(fixture.skillsRoot, 'malformed');
+    fs.mkdirSync(skillRoot, { recursive: true });
+    fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+      '---',
+      'name: [unterminated',
+      'description: Broken YAML',
+      '---',
+      '',
+    ].join('\n'));
+
+    assert.throws(
+      () => scanBotSkillWorkspace(fixture.skillsRoot),
+      /SKILL\.md format is invalid/i,
+    );
+    await assert.rejects(fixture.sync(), /SKILL\.md format is invalid/i);
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.equal(fixture.definitionService.read(fixture.botId)?.skills, undefined);
+    assert.deepStrictEqual(fixture.cloud.skills, []);
+  });
+
   test('rejects credential files and high-confidence secrets before any upload request is built', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-sensitive-skill-'));
     roots.push(root);

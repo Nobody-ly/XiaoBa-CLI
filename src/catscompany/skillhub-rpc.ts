@@ -11,7 +11,10 @@ import {
   scanBotSkillWorkspace,
 } from '../bot-skills/local-manifest';
 import { readSkillHubLocalMetadata } from '../skillhub/local-skill-metadata';
-import { shareLocalSkillForCatsCo } from '../skillhub/local-share';
+import {
+  shareLocalSkillForCatsCo,
+  validateSkillHubShareMetadata,
+} from '../skillhub/local-share';
 import { PathResolver } from '../utils/path-resolver';
 import { Logger } from '../utils/logger';
 
@@ -147,7 +150,7 @@ export class SkillHubThinRpcHandler {
       this.assertRequestScope(request, botUid, true);
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
       const rejected: SkillHubWorkspaceValidationFailure[] = [];
-      const entries = scanBotSkillWorkspace(context.skillsRoot, {
+      const entries = scanSkillHubWorkspace(context.skillsRoot, {
         onValidationFailure: failure => rejected.push(failure),
       }).filter((entry) => {
         const error = validateSkillHubShareMetadata(entry.path);
@@ -217,7 +220,7 @@ export class SkillHubThinRpcHandler {
     await withCurrentBotSkillWorkspaceWrite((context) => {
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
       const rejected: SkillHubWorkspaceValidationFailure[] = [];
-      const entry = scanBotSkillWorkspace(context.skillsRoot, {
+      const entry = scanSkillHubWorkspace(context.skillsRoot, {
         onValidationFailure: failure => rejected.push(failure),
       }).find((candidate) => (
         candidate.localSkillId === localSkillId && candidate.name === skillName
@@ -432,21 +435,6 @@ export async function requestDashboardBotSwitch(
   }
 }
 
-function validateSkillHubShareMetadata(skillDir: string): Error | undefined {
-  try {
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    const parsed = matter(fs.readFileSync(skillFile, 'utf8'), {});
-    if (!parsed.data?.name || !parsed.data?.description) {
-      return new Error(
-        'SKILL.md 缺少必填字段 name 或 description。请在文件顶部的 YAML frontmatter 中补全后重试。',
-      );
-    }
-    return undefined;
-  } catch {
-    return new Error('SKILL.md 格式无效。请检查文件顶部的 YAML frontmatter 后重试。');
-  }
-}
-
 function readLocalSkillPresentation(skillDir: string): {
   description: string;
   metadata: ReturnType<typeof readSkillHubLocalMetadata>;
@@ -460,6 +448,20 @@ function readLocalSkillPresentation(skillDir: string): {
     };
   } catch {
     return { description: '', metadata: null };
+  }
+}
+
+function scanSkillHubWorkspace(
+  skillsRoot: string,
+  options: Parameters<typeof scanBotSkillWorkspace>[1],
+): ReturnType<typeof scanBotSkillWorkspace> {
+  try {
+    return scanBotSkillWorkspace(skillsRoot, options);
+  } catch {
+    throw new SkillHubThinRpcError(
+      'LOCAL_SKILL_INVALID',
+      'The local Skill workspace could not be validated safely.',
+    );
   }
 }
 
