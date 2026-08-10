@@ -51,15 +51,41 @@ jobs:
         run: |
           mkdir -p release/worker
           node scripts/build-linux-worker-artifact.mjs > release/worker/build-manifest.json
+      # P2 guard: only strict vX.Y.Z release tags may reach production workers
+      # (e.g. v1.0.8-fork-volc-dual-bucket-fix-... must never deploy).
+      - name: Validate release tag is strict SemVer
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "refusing non-SemVer release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          }
       - name: Deploy artifact to worker targets
         run: |
+          # 安全写入临时私钥与 known_hosts（来自 repo secrets/vars，仅按名引用）
+          KEY_FILE="$RUNNER_TEMP/worker_ssh_key"
+          KNOWN_HOSTS="$RUNNER_TEMP/worker_known_hosts"
+          printf '%s\n' "$WORKER_SSH_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          printf '%s\n' "$WORKER_SSH_KNOWN_HOSTS" > "$KNOWN_HOSTS"
+          chmod 600 "$KNOWN_HOSTS"
           ARTIFACT="$(jq -r .artifactPath release/worker/build-manifest.json)"
           SHA="$(jq -r .sha256 release/worker/build-manifest.json)"
           VERSION="$(jq -r .version release/worker/build-manifest.json)"
           COMMIT="$(jq -r .commit release/worker/build-manifest.json)"
           node scripts/deploy-worker-artifact.mjs \
             --artifact "$ARTIFACT" --sha256 "$SHA" \
-            --version "$VERSION" --commit "$COMMIT"
+            --version "$VERSION" --commit "$COMMIT" \
+            --ssh-key "$KEY_FILE" \
+            --ssh-user "${WORKER_SSH_USER:-root}" \
+            --known-hosts "$KNOWN_HOSTS" \
+            --targets "$WORKER_SSH_TARGETS"
         env:
-          # SSH key injected via repo secret (name only — never hardcoded).
+          # Secret values are referenced by name only — never hardcoded.
           WORKER_SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
+          WORKER_SSH_KNOWN_HOSTS: ${{ secrets.WORKER_SSH_KNOWN_HOSTS }}
+          # Target hosts / user come from repo vars so CI resolves real hosts
+          # (not local ssh aliases).
+          WORKER_SSH_TARGETS: ${{ vars.WORKER_SSH_TARGETS }}
+          WORKER_SSH_USER: ${{ vars.WORKER_SSH_USER }}

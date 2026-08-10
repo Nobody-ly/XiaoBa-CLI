@@ -80,19 +80,17 @@ test("deploys artifact to each target serially and reports per-target result", a
   }
 });
 
-test("fails a target when update fails and triggers rollback", async () => {
+test("fails a target when update fails without extra rollback", async () => {
   const deps = makeDeps((host, cmd) => {
     if (cmd.includes(" --artifact ")) return { code: 1, stderr: "update boom" };
-    if (cmd.includes(" --rollback")) return { code: 0, stdout: "rolled back" };
     return undefined;
   });
   const results = await deployWorkerArtifact(opts({ targets: ["w1"] }), deps);
   assert.strictEqual(results[0].status, "failed");
   assert.strictEqual(results[0].stage, "update");
-  assert.strictEqual(results[0].rollback, true);
   assert.ok(
-    deps.calls.some((c) => c.includes("ssh w1: bash /tmp/catsco-uwa-abcd1234.sh --rollback")),
-    "rollback executed after failed update",
+    deps.calls.every((c) => !c.includes(" --rollback")),
+    "updater owns post-switch rollback; dispatcher must not double-rollback a healthy release",
   );
 });
 

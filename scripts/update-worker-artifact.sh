@@ -139,9 +139,11 @@ cp -a "$TEMP/app/." "$RELEASE_ROOT/"
 [[ -x "$RELEASE_ROOT/runtime/node/bin/node" ]] || die "bundled Node.js runtime missing"
 [[ -x "$RELEASE_ROOT/runtime/node/bin/npm" ]] || die "bundled npm runtime missing"
 
-# 4) 原生模块冒烟（切换前）：失败则丢弃新 release，不碰 current
+# 4) 原生模块冒烟（切换前）：失败则丢弃新 release，不碰 current。
+# 必须在 $RELEASE_ROOT 下运行——node -e 按 cwd 解析 node_modules，
+# ssh 执行时 cwd 是登录用户目录（参考 prepare-image.sh 先 cd /opt/catsco/current）。
 if [[ "$SMOKE" == "1" ]]; then
-  if ! "$RELEASE_ROOT/runtime/node/bin/node" -e 'require("sharp"); require("@napi-rs/canvas")' >/dev/null 2>&1; then
+  if ! (cd "$RELEASE_ROOT" && "$RELEASE_ROOT/runtime/node/bin/node" -e 'require("sharp"); require("@napi-rs/canvas")') >/dev/null 2>&1; then
     rm -rf -- "$RELEASE_ROOT"
     die "smoke test failed; release discarded"
   fi
@@ -151,16 +153,18 @@ fi
 OLD_TARGET="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
 mkdir -p "$(dirname "$PREV_FILE")"
 printf '%s\n' "$OLD_TARGET" > "$PREV_FILE"
+# 记录重启起始时间：心跳验证只接受本次重启之后的日志（避免命中旧连接日志）
+SINCE="$(date -u +'%Y-%m-%d %H:%M:%S')"
 ln -sfn "$RELEASE_ROOT" "$CURRENT_LINK"
 systemctl restart "$SERVICE"
 
-# 6) settle + active 验证 + 心跳验证，失败自动切回
+# 6) settle + active 验证 + 心跳验证（--since 只认本次重启后），失败自动切回
 sleep "$SETTLE_SECONDS"
 if [[ "$(systemctl is-active "$SERVICE" 2>/dev/null || true)" != "active" ]]; then
   rollback_to "$OLD_TARGET" || true
   die "service not active after update; rolled back"
 fi
-if ! journalctl -u "$SERVICE" -n 60 --no-pager -o cat 2>/dev/null \
+if ! journalctl -u "$SERVICE" --since "$SINCE" -n 100 --no-pager -o cat 2>/dev/null \
    | grep -Eq '已连接|握手成功|uid='; then
   rollback_to "$OLD_TARGET" || true
   die "heartbeat not detected after update; rolled back"

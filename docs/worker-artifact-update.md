@@ -21,6 +21,25 @@ git tag v1.5.0 && git push origin v1.5.0
 
 关掉开关（`false`）后打 tag 不会触发分发（kill switch）。
 
+**CI 所需仓库配置（secrets/vars，仅按名引用）：**
+
+```bash
+# secrets：SSH 私钥 + 目标主机指纹（known_hosts 内容）
+gh secret set WORKER_SSH_KEY --repo buildsense-ai/XiaoBa-CLI --body "$(cat ~/.ssh/id_rsa)"
+gh secret set WORKER_SSH_KNOWN_HOSTS --repo buildsense-ai/XiaoBa-CLI \
+  --body "$(ssh-keyscan host1 host2)"
+# vars：目标主机列表（真实 host，非本地 alias）+ SSH 用户
+gh variable set WORKER_SSH_TARGETS --repo buildsense-ai/XiaoBa-CLI --body "host1,host2,..."
+gh variable set WORKER_SSH_USER --repo buildsense-ai/XiaoBa-CLI --body root
+```
+
+CI 会把私钥/known_hosts 写入 `$RUNNER_TEMP` 临时文件（`chmod 600`）并显式传
+`--ssh-key`/`--known-hosts`/`--ssh-user`/`--targets` 给分发器——分发器不从环境
+变量读密钥。
+
+⚠️ **严格 SemVer 门控**：只有 `vX.Y.Z`（纯数字三段）tag 才会进入生产分发；
+`v1.0.8-fork-volc-dual-bucket-fix-...` 这类非正式 tag 会被拒绝。
+
 ### 2. 手动触发
 
 GitHub Actions → workflow_dispatch → 勾选 `update_workers`（仅 `main` 分支生效）。
@@ -39,14 +58,19 @@ node scripts/deploy-worker-artifact.mjs \
 # 实际部署
 node scripts/deploy-worker-artifact.mjs \
   --artifact <path.tar.gz> --sha256 <hex> --version <v> --commit <sha> \
-  --targets worker1,worker2 \
-  [--ssh-user root] [--ssh-key ~/.ssh/id_rsa] [--abort-on-failure]
+  --targets host1,host2 \
+  [--ssh-user root] [--ssh-key ~/.ssh/id_rsa] [--known-hosts ~/.ssh/known_hosts] \
+  [--abort-on-failure]
 ```
 
 - 未指定 `--targets` 时使用默认矩阵：`worker1 worker2 ck-work-hn2 zh-work yjz-work`
-- 每台执行：`scp 制品+脚本 → update-worker-artifact.sh → 验证 → 失败自动 --rollback`
+  （本地 SSH alias；CI 必须显式传真实 host）
+- 每台执行：`scp 制品+脚本 → update-worker-artifact.sh → 验证`
+- 提供 `--known-hosts` 时强制 `StrictHostKeyChecking=yes`，否则 `accept-new`
 - 单台失败不阻塞后续（除非 `--abort-on-failure`）；结束时清理远端 `/tmp` 临时文件
 - 远端 `current` release_id 已是目标版本时自动跳过该台（幂等）
+- **回滚归属**：切换后的失败（服务不 active/心跳失败）由 worker 侧脚本自动回滚；
+  切换前的失败（checksum/manifest/冒烟）不动 `current`。分发器**不二次回滚**。
 
 ## 安全边界
 
@@ -56,8 +80,9 @@ node scripts/deploy-worker-artifact.mjs \
 - worker 上**无云凭据**：制品分发走 SSH（CI secret `WORKER_SSH_KEY`），
   worker 不需要天翼云 AK/SK。
 - 校验链：制品 SHA256 匹配 → manifest `version/commit` 匹配 → 捆绑 Node/npm
-  存在 → 原生模块冒烟（`sharp`/`@napi-rs/canvas`）→ 重启后心跳验证
-  （日志含 `已连接`/`握手成功`/`uid=`）。
+  存在 → 原生模块冒烟（`sharp`/`@napi-rs/canvas`，在 release 目录内运行）→
+  重启后心跳验证（`journalctl --since 重启时间`，只认本次重启后的日志，
+  含 `已连接`/`握手成功`/`uid=`）。
 - 任一验证失败：**自动切回旧 release 并重启**，绝不留指向坏版本的 `current`。
 
 ## 回滚

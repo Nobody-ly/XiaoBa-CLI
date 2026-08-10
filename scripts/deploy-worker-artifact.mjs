@@ -4,13 +4,17 @@
 // 用法：
 //   node scripts/deploy-worker-artifact.mjs \
 //     --artifact FILE --sha256 HEX --version V --commit SHA \
-//     [--targets worker1,worker2,...] [--dry-run] [--abort-on-failure]
-//     [--ssh-user USER] [--ssh-key KEY]
+//     [--targets host1,host2,...] [--dry-run] [--abort-on-failure]
+//     [--ssh-user USER] [--ssh-key KEY] [--known-hosts FILE]
 //
 // 行为：逐台串行 —— scp 制品与 update-worker-artifact.sh 到远端 /tmp（唯一名）
-// → 远端执行更新 → 成功继续下一台；失败该台自动 --rollback 并记录；
-// --abort-on-failure 时任一失败立即中止；结束后清理远端临时文件。
+// → 远端执行更新 → 成功继续下一台；失败该台记录（updater 已在切换后自行
+// 回滚，分发器不二次回滚）→ --abort-on-failure 时任一失败立即中止；
+// 结束后清理远端临时文件。
 // 目标已在最新版本（current release_id == version-commit 前 8 位）则跳过。
+//
+// SSH：--ssh-user/--ssh-key/--known-hosts 显式控制（CI 从 secrets/vars 注入）；
+// 提供 known-hosts 时强制 StrictHostKeyChecking=yes，否则 accept-new。
 //
 // 可注入依赖（测试用）：deps.ssh(host, cmd) / deps.scp(host, local, remote)
 // / deps.rand()。真实 CLI 使用系统 ssh/scp。
@@ -24,7 +28,7 @@ const DEFAULT_TARGETS = ["worker1", "worker2", "ck-work-hn2", "zh-work", "yjz-wo
 const LOCAL_SCRIPT = fileURLToPath(new URL("update-worker-artifact.sh", import.meta.url));
 
 function usage() {
-  console.log(`usage: node scripts/deploy-worker-artifact.mjs --artifact FILE --sha256 HEX --version V --commit SHA [--targets a,b] [--dry-run] [--abort-on-failure] [--ssh-user U] [--ssh-key K]`);
+  console.log(`usage: node scripts/deploy-worker-artifact.mjs --artifact FILE --sha256 HEX --version V --commit SHA [--targets a,b] [--dry-run] [--abort-on-failure] [--ssh-user U] [--ssh-key K] [--known-hosts F]`);
 }
 
 function parseArgs(argv) {
@@ -41,6 +45,7 @@ function parseArgs(argv) {
       case "--abort-on-failure": opts.abortOnFailure = true; break;
       case "--ssh-user": opts.sshUser = argv[++i]; break;
       case "--ssh-key": opts.sshKey = argv[++i]; break;
+      case "--known-hosts": opts.knownHosts = argv[++i]; break;
       case "-h":
       case "--help": usage(); process.exit(0);
       default:
@@ -79,6 +84,11 @@ function makeDefaultDeps(opts) {
     if (opts.sshUser) a.push("-l", opts.sshUser);
     if (opts.sshKey) a.push("-i", opts.sshKey);
     a.push("-o", "BatchMode=yes", "-o", "ConnectTimeout=15");
+    if (opts.knownHosts) {
+      a.push("-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${opts.knownHosts}`);
+    } else {
+      a.push("-o", "StrictHostKeyChecking=accept-new");
+    }
     return a;
   };
   return {
@@ -123,14 +133,15 @@ function deployOneTarget(host, opts, d) {
       `--version ${opts.version} --commit ${opts.commit}`;
     const r = d.ssh(host, cmd);
     if (r.code !== 0) {
-      // 失败 → 该台自动回滚（读远端 previous-release）
-      const rb = d.ssh(host, `bash ${remoteSh} --rollback`);
+      // updater already rolls back on any failure AFTER switching current;
+      // failures before the switch (checksum/manifest/smoke) never touched
+      // current. Do NOT blindly --rollback here — it would flip a healthy
+      // release back to previous-release.
       return {
         host,
         status: "failed",
         stage: "update",
         error: r.stderr || r.stdout,
-        rollback: rb.code === 0,
       };
     }
     return { host, status: "ok", releaseId: `${opts.version}-${opts.commit.slice(0, 8)}` };

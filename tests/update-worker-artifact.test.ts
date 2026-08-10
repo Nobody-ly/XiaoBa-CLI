@@ -97,7 +97,8 @@ function makeArtifact(
   );
   const nodeSh = opts.failNode
     ? "#!/usr/bin/env bash\necho 'smoke failed' >&2\nexit 1\n"
-    : "#!/usr/bin/env bash\nexit 0\n";
+    : // records the cwd so tests can assert the smoke runs inside the release root
+      "#!/usr/bin/env bash\npwd > \"\${UWA_NODE_CWD_LOG:-/dev/null}\"\nexit 0\n";
   fs.writeFileSync(path.join(run, "node"), nodeSh, { mode: 0o755 });
   fs.writeFileSync(path.join(run, "npm"), "#!/usr/bin/env bash\nexit 0\n", {
     mode: 0o755,
@@ -213,14 +214,18 @@ test("applies update: creates release dir, switches current, data untouched", { 
     const { root, dataFile } = makeWorkerRoot(dir);
     const fake = makeFakeBins(dir);
     const art = makeArtifact(dir, { version: "1.4.9", commit: "b".repeat(40) });
+    const cwdLog = path.join(dir, "node-cwd.log");
     const res = runScript(
       ["--artifact", art.artifact, "--sha256", art.sha256, "--version", "1.4.9", "--commit", "b".repeat(40)],
-      baseEnv(root, fake),
+      { ...baseEnv(root, fake), UWA_NODE_CWD_LOG: toMsys(cwdLog) },
     );
     assert.strictEqual(res.status, 0, `stderr=${res.stderr}`);
     const releaseRoot = path.join(root, "releases", "1.4.9-bbbbbbbb");
     assert.ok(fs.existsSync(path.join(releaseRoot, "worker-release.json")), "release dir created");
     assert.ok(fs.existsSync(path.join(releaseRoot, "runtime", "node", "bin", "node")), "bundled node copied");
+    // smoke must run inside the release root (node -e resolves node_modules
+    // by cwd, not by the ssh login dir)
+    assert.strictEqual(fs.readFileSync(cwdLog, "utf8").trim(), toMsys(releaseRoot));
     // data dir untouched
     assert.strictEqual(fs.readFileSync(dataFile, "utf8"), "KEEP=1\n");
     const log = fs.readFileSync(fake.log, "utf8");
@@ -266,6 +271,10 @@ test("rolls back when heartbeat verification fails", { skip: !hasBash || isWindo
     );
     assert.notStrictEqual(res.status, 0);
     assert.match(res.stderr, /heartbeat/i);
+    // heartbeat must only accept logs after the restart (--since), never old
+    // connection lines from before the update
+    const log = fs.readFileSync(fake.log, "utf8");
+    assert.match(log, /journalctl -u catsco-agent\.service --since/);
     // current must not point at the broken release
     assert.throws(() => fs.readlinkSync(path.join(root, "current")));
   } finally {

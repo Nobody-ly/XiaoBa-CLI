@@ -18,6 +18,9 @@ test("worker app update workflow exists and is gated by stable tags", () => {
   assert.match(workflow, /default: false/);
   assert.match(workflow, /github\.ref == ['"]refs\/heads\/main['"]/);
   assert.match(workflow, /vars\.CTYUN_WORKER_APP_UPDATE == ['"]true['"]/);
+  // P2 guard: strict SemVer tag validation rejects e.g. v1.0.8-fork-volc-...
+  assert.match(workflow, /refusing non-SemVer release tag/);
+  assert.match(workflow, /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
 });
 
 test("worker app update workflow has minimal permissions and no plaintext secrets", () => {
@@ -28,6 +31,24 @@ test("worker app update workflow has minimal permissions and no plaintext secret
   // Never embed key material
   assert.doesNotMatch(workflow, /BEGIN (OPENSSH|RSA|EC) PRIVATE KEY/);
   assert.doesNotMatch(workflow, /ssh-rsa AAAA/);
+});
+
+test("worker app update workflow writes SSH key/known_hosts and passes them explicitly", () => {
+  // P1 fix: CI must materialize the key + known_hosts to temp files, chmod 600,
+  // and hand them to the dispatcher (the dispatcher never reads WORKER_SSH_KEY
+  // from the env). Targets/user come from repo vars (real hosts, not aliases).
+  assert.match(workflow, /KEY_FILE="\$RUNNER_TEMP\/worker_ssh_key"/);
+  assert.match(workflow, /chmod 600 "\$KEY_FILE"/);
+  assert.match(workflow, /KNOWN_HOSTS="\$RUNNER_TEMP\/worker_known_hosts"/);
+  assert.match(workflow, /chmod 600 "\$KNOWN_HOSTS"/);
+  assert.match(workflow, /--ssh-key "\$KEY_FILE"/);
+  assert.match(workflow, /--known-hosts "\$KNOWN_HOSTS"/);
+  assert.match(workflow, /--ssh-user "\$\{WORKER_SSH_USER:-root\}"/);
+  assert.match(workflow, /--targets "\$WORKER_SSH_TARGETS"/);
+  assert.match(workflow, /WORKER_SSH_KEY: \$\{\{\s*secrets\.WORKER_SSH_KEY\s*\}\}/);
+  assert.match(workflow, /WORKER_SSH_KNOWN_HOSTS: \$\{\{\s*secrets\.WORKER_SSH_KNOWN_HOSTS\s*\}\}/);
+  assert.match(workflow, /WORKER_SSH_TARGETS: \$\{\{\s*vars\.WORKER_SSH_TARGETS\s*\}\}/);
+  assert.match(workflow, /WORKER_SSH_USER: \$\{\{\s*vars\.WORKER_SSH_USER\s*\}\}/);
 });
 
 test("worker app update workflow serializes deployments and uses a prod environment", () => {
