@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
 import {
+  DashboardBotSwitchScheduler,
   SkillHubThinRpcError,
   SkillHubThinRpcHandler,
   SKILLHUB_THIN_RPC_TOOLS,
@@ -345,6 +346,31 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.deepEqual(scheduledBotUIDs, ['44']);
   });
 
+  test('reports an in-progress workspace handoff as a retryable RPC state', async () => {
+    createCatsCoLocalConfigService({ runtimeRoot }).save({
+      version: 1,
+      account: { token: 'user-token', uid: '7', username: 'alice' },
+      currentBot: { uid: '44', apiKey: 'bot-44-key', boundByUserUid: '7' },
+      device: {
+        deviceId: 'alice-device',
+        bodyId: 'alice-device',
+        installationId: 'alice-device',
+      },
+    });
+
+    await assert.rejects(
+      handler.execute(request({
+        request_id: 'workspace-switching',
+        payload: { bot_uid: '44' },
+      })),
+      (error: unknown) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'WORKSPACE_SWITCHING'
+        && /ownership is changing \(42 -> 44\)/i.test(error.message)
+      ),
+    );
+  });
+
   test('rejects reuse of one request ID for a different operation', async () => {
     await handler.execute(request({ request_id: 'reused-request' }));
     await assert.rejects(
@@ -515,6 +541,114 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /^http:\/\/127\.0\.0\.1:\d+\/api\/cats\/switch-bot$/);
     assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { botUid: '44' });
+  });
+
+  test('coalesces delayed Bot switch intents so the latest selection wins', async () => {
+    const calls: string[] = [];
+    const scheduler = new DashboardBotSwitchScheduler(async (botUid) => {
+      calls.push(botUid);
+    }, 5);
+
+    scheduler.schedule('575');
+    scheduler.schedule('412');
+    scheduler.schedule('412');
+    await delay(30);
+
+    assert.deepEqual(calls, ['412']);
+  });
+
+  test('serializes a newer Bot switch behind an in-flight switch', async () => {
+    const calls: string[] = [];
+    let releaseFirst!: () => void;
+    const first = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    const scheduler = new DashboardBotSwitchScheduler(async (botUid) => {
+      calls.push(botUid);
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      if (botUid === '575') await first;
+      concurrent -= 1;
+    }, 5);
+
+    scheduler.schedule('575');
+    await delay(15);
+    scheduler.schedule('412');
+    releaseFirst();
+    await delay(40);
+
+    assert.deepEqual(calls, ['575', '412']);
+    assert.equal(maxConcurrent, 1);
+  });
+
+  test('cancels an opposite queued switch when the latest target is already in flight', async () => {
+    const calls: string[] = [];
+    let releaseFirst!: () => void;
+    const first = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const scheduler = new DashboardBotSwitchScheduler(async (botUid) => {
+      calls.push(botUid);
+      if (botUid === '575') await first;
+    }, 5);
+
+    scheduler.schedule('575');
+    await delay(15);
+    scheduler.schedule('412');
+    scheduler.schedule('575');
+    releaseFirst();
+    await delay(30);
+
+    assert.deepEqual(calls, ['575']);
+  });
+
+  test('refreshes a coalesced switch with the latest connector lifecycle', async () => {
+    const calls: string[] = [];
+    const scheduler = new DashboardBotSwitchScheduler(async (botUid) => {
+      calls.push(botUid);
+    }, 5);
+
+    let oldConnectorShuttingDown = false;
+    scheduler.schedule('575', () => oldConnectorShuttingDown);
+    oldConnectorShuttingDown = true;
+    scheduler.schedule('575', () => false);
+    await delay(30);
+
+    assert.deepEqual(calls, ['575']);
+  });
+
+  test('does not postpone a pending switch when the same target is repeated', async () => {
+    const calls: string[] = [];
+    const scheduler = new DashboardBotSwitchScheduler(async (botUid) => {
+      calls.push(botUid);
+    }, 20);
+
+    scheduler.schedule('575');
+    await delay(8);
+    scheduler.schedule('575');
+    await delay(8);
+    scheduler.schedule('575');
+    await delay(12);
+
+    assert.deepEqual(calls, ['575']);
+  });
+
+  test('does not drain a queued switch after application shutdown begins', async () => {
+    const calls: string[] = [];
+    let releaseFirst!: () => void;
+    const first = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let shuttingDown = false;
+    const scheduler = new DashboardBotSwitchScheduler(async (botUid) => {
+      calls.push(botUid);
+      if (botUid === '575') await first;
+    }, 5);
+
+    scheduler.schedule('575');
+    await delay(15);
+    scheduler.schedule('412', () => shuttingDown);
+    shuttingDown = true;
+    releaseFirst();
+    await delay(40);
+
+    assert.deepEqual(calls, ['575']);
   });
 
   test('revalidates the local Skill identity while holding the upload lock', async () => {
@@ -995,6 +1129,10 @@ describe('CatsCompany SkillHub thin RPC', () => {
     );
     assert.equal(writes, 0);
   });
+
+  function delay(milliseconds: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+  }
 
   function request(overrides: Record<string, any> = {}): any {
     return {
