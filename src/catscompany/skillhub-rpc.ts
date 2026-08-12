@@ -4,6 +4,7 @@ import * as path from 'path';
 import { createCatsCoLocalConfigService } from './local-config';
 import type { CatsThinToolRpcMessage } from './client';
 import {
+  BotSkillWorkspaceChangingError,
   finalizeCurrentBotPublicSkillNow,
   withCurrentBotSkillWorkspaceWrite,
 } from '../bot-skills/runtime';
@@ -103,7 +104,12 @@ export class SkillHubThinRpcHandler {
       );
       return existing.operation;
     }
-    const operation = this.executeOnce(request);
+    const operation = this.executeOnce(request).catch((error) => {
+      if (error instanceof BotSkillWorkspaceChangingError) {
+        throw new SkillHubThinRpcError(error.code, error.message);
+      }
+      throw error;
+    });
     this.completed.set(requestID, { fingerprint, operation });
     while (this.completed.size > MAX_COMPLETED_REQUESTS) {
       this.completed.delete(this.completed.keys().next().value as string);
@@ -404,14 +410,79 @@ export function scheduleDashboardBotSwitch(
   botUid: string,
   isShuttingDown: () => boolean = () => false,
 ): void {
-  const timer = setTimeout(() => {
-    if (isShuttingDown()) return;
-    void requestDashboardBotSwitch(botUid).catch((error) => {
-      Logger.warning(`SkillHub remote Bot switch failed: ${error?.message || String(error)}`);
-    });
-  }, 1_000);
-  timer.unref?.();
+  dashboardBotSwitchScheduler.schedule(botUid, isShuttingDown);
 }
+
+interface PendingDashboardBotSwitch {
+  botUid: string;
+  isShuttingDown: () => boolean;
+}
+
+export class DashboardBotSwitchScheduler {
+  private pending?: PendingDashboardBotSwitch;
+  private timer?: ReturnType<typeof setTimeout>;
+  private running = false;
+  private runningBotUid = '';
+
+  constructor(
+    private readonly requestSwitch: (botUid: string) => Promise<void> = requestDashboardBotSwitch,
+    private readonly delayMs = 1_000,
+  ) {}
+
+  schedule(botUid: string, isShuttingDown: () => boolean = () => false): void {
+    const target = String(botUid || '').trim();
+    if (!target || isShuttingDown()) return;
+    if (this.running && this.runningBotUid === target) {
+      this.pending = undefined;
+      return;
+    }
+    if (this.pending?.botUid === target) {
+      // Refresh the connector lifecycle fence without extending the debounce.
+      this.pending = { botUid: target, isShuttingDown };
+      return;
+    }
+
+    this.pending = {
+      botUid: target,
+      isShuttingDown,
+    };
+    if (!this.running) this.arm();
+  }
+
+  private arm(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      void this.drain();
+    }, this.delayMs);
+    this.timer.unref?.();
+  }
+
+  private async drain(): Promise<void> {
+    if (this.running) return;
+    const next = this.pending;
+    this.pending = undefined;
+    if (!next) return;
+    if (next.isShuttingDown()) {
+      if (this.pending) this.arm();
+      return;
+    }
+
+    this.running = true;
+    this.runningBotUid = next.botUid;
+    try {
+      await this.requestSwitch(next.botUid);
+    } catch (error: any) {
+      Logger.warning(`SkillHub remote Bot switch failed: ${error?.message || String(error)}`);
+    } finally {
+      this.running = false;
+      this.runningBotUid = '';
+      if (this.pending) this.arm();
+    }
+  }
+}
+
+const dashboardBotSwitchScheduler = new DashboardBotSwitchScheduler();
 
 export async function requestDashboardBotSwitch(
   botUid: string,
