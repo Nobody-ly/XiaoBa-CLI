@@ -231,6 +231,28 @@ describe('dashboard service manager', () => {
     assert.equal(service?.status, 'stopped');
     assert.equal(service?.lastError, undefined);
   });
+
+  test('a delayed stop fallback cannot kill a replacement child', async () => {
+    const manager = new ServiceManager(process.cwd());
+    const serviceRecord = (manager as any).services.get('weixin');
+    serviceRecord.info.command = process.execPath;
+    serviceRecord.info.args = ['-e', "process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);"];
+
+    const firstStopped = new Promise<void>(resolve => manager.once('service-stopped', () => resolve()));
+    manager.start('weixin');
+    manager.stop('weixin');
+    await firstStopped;
+
+    serviceRecord.info.args = ['-e', "setInterval(() => {}, 1000);"];
+    manager.start('weixin');
+    const replacementPid = manager.getService('weixin')?.pid;
+    assert.ok(replacementPid);
+
+    await new Promise(resolve => setTimeout(resolve, 5_300));
+    assert.equal(manager.getService('weixin')?.status, 'running');
+    assert.equal(manager.getService('weixin')?.pid, replacementPid);
+    manager.stop('weixin');
+  });
 });
 
 function normalize(value: string): string {
