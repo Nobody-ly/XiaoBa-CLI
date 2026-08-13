@@ -5,9 +5,12 @@ export interface MemorySearchFinishPayload {
   summary: string;
   refs: string[];
   inject: boolean;
+  terminalReason?: 'invalid_finalization_exhausted';
 }
 
 export type MemorySearchFinishHandler = (payload: MemorySearchFinishPayload) => void;
+
+export const MEMORY_FINISH_MAX_INVALID_ATTEMPTS = 3;
 
 const CANONICAL_REF_PATTERN = /^[^/\\#]+\/\d{4}-\d{2}-\d{2}\/[^/\\#]+\.jsonl#\d+$/;
 
@@ -160,8 +163,10 @@ export class FinishMemorySearchTool implements Tool {
     description: [
       '结束 memory search branch。',
       '当你已经拿到足够的记忆证据，或确认没有有用记忆时，调用这个工具。',
-      '正常找到有新增价值的记忆时不需要设置 inject，并必须提供支撑 summary 的 refs。',
+      'inject 是必填布尔值，不得省略。',
+      '找到有新增价值的记忆时设置 inject:true，并必须提供支撑 summary 的 refs。',
       '如果只找到 recent context 已覆盖的信息，或没有值得注入给主 agent 的额外记忆，设置 inject:false 并传空 refs。',
+      '示例：有证据时 {"summary":"...","refs":["chat/2026-08-13/demo.jsonl#1"],"inject":true}；无新增记忆时 {"summary":"No useful memory.","refs":[],"inject":false}。',
       '调用成功后 branch 会立刻结束。',
     ].join(' '),
     controlMode: 'pause_turn',
@@ -179,29 +184,63 @@ export class FinishMemorySearchTool implements Tool {
         },
         inject: {
           type: 'boolean',
-          description: '可选。默认 true。只有确认没有新增价值、只重复 recent context、或没有值得注入的额外记忆时设置为 false；此时 refs 必须为空。',
+          description: '必填。找到有新增价值且 refs 非空时传 true；没有新增价值且 refs 为空时传 false。不得省略。',
         },
       },
-      required: ['summary', 'refs'],
+      required: ['summary', 'refs', 'inject'],
     },
   };
+
+  private invalidAttempts = 0;
 
   constructor(private readonly onFinish: MemorySearchFinishHandler) {}
 
   async execute(args: any): Promise<ToolExecutionResult> {
     const validation = validateFinishArgs(args);
     if (!validation.ok) {
-      return {
-        ok: false,
-        errorCode: 'INVALID_TOOL_ARGUMENTS',
-        message: jsonToolError(validation.error),
-        retryable: false,
-      };
+      return this.invalidResult(validation.error);
     }
+    this.invalidAttempts = 0;
     this.onFinish(validation.payload);
     return {
       ok: true,
       content: jsonToolResult({ ok: true }),
+    };
+  }
+
+  async handleInvalidArguments(message: string): Promise<ToolExecutionResult> {
+    return this.invalidResult(message);
+  }
+
+  private invalidResult(error: string): ToolExecutionResult {
+    this.invalidAttempts += 1;
+    if (this.invalidAttempts >= MEMORY_FINISH_MAX_INVALID_ATTEMPTS) {
+      this.onFinish({
+        summary: 'Memory search stopped after repeated invalid finalization calls; no observation was injected.',
+        refs: [],
+        inject: false,
+        terminalReason: 'invalid_finalization_exhausted',
+      });
+      return {
+        ok: true,
+        content: jsonToolResult({
+          ok: false,
+          terminal: true,
+          reason: 'invalid_finalization_exhausted',
+          invalid_attempts: this.invalidAttempts,
+        }),
+      };
+    }
+    return {
+      ok: false,
+      errorCode: 'INVALID_TOOL_ARGUMENTS',
+      message: jsonToolError([
+        error,
+        `Attempt ${this.invalidAttempts}/${MEMORY_FINISH_MAX_INVALID_ATTEMPTS}. Correct format:`,
+        'publish={"summary":"...","refs":["chat/2026-08-13/demo.jsonl#1"],"inject":true}',
+        'suppress={"summary":"No useful memory.","refs":[],"inject":false}',
+      ].join(' ')),
+      retryable: true,
     };
   }
 }
@@ -216,10 +255,10 @@ function validateFinishArgs(args: any):
   if (!Array.isArray(args?.refs)) {
     return { ok: false, error: 'refs must be an array of canonical memory refs' };
   }
-  if (typeof args?.inject !== 'undefined' && typeof args.inject !== 'boolean') {
-    return { ok: false, error: 'inject must be a boolean when provided' };
+  if (typeof args?.inject !== 'boolean') {
+    return { ok: false, error: 'inject must be explicitly true or false' };
   }
-  const inject = args?.inject !== false;
+  const inject = args.inject;
   const refs: string[] = args.refs.map((ref: unknown) => String(ref || '').trim()).filter(Boolean);
   for (const ref of refs) {
     if (!CANONICAL_REF_PATTERN.test(ref)) {

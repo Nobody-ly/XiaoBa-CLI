@@ -111,10 +111,12 @@ describe('memory branch tools', () => {
     });
 
     assert.equal(tool.definition.controlMode, 'pause_turn');
+    assert.deepEqual(tool.definition.parameters.required, ['summary', 'refs', 'inject']);
 
     const invalid = await tool.execute({
       summary: 'done',
       refs: ['m1'],
+      inject: true,
     }, { workingDirectory: testRoot, conversationHistory: [] });
     assert.equal(invalid.ok, false);
     assert.match(JSON.parse(String(invalid.message)).error, /invalid canonical ref/);
@@ -124,11 +126,12 @@ describe('memory branch tools', () => {
       refs: [],
     }, { workingDirectory: testRoot, conversationHistory: [] });
     assert.equal(emptyDefaultInject.ok, false);
-    assert.match(JSON.parse(String(emptyDefaultInject.message)).error, /unless inject is false/);
+    assert.match(JSON.parse(String(emptyDefaultInject.message)).error, /inject must be explicitly true or false/);
 
     const valid = await tool.execute({
       summary: 'Prior decision found.',
       refs: ['chat/2026-06-16/demo.jsonl#2', 'chat/2026-06-16/demo.jsonl#2'],
+      inject: true,
     }, { workingDirectory: testRoot, conversationHistory: [] });
     assert.equal(valid.ok, true);
     assert.deepEqual(captured, {
