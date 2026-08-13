@@ -1,4 +1,5 @@
 import type { CatsCoAuthSnapshot } from '../catscompany/local-config';
+import { createHash } from 'crypto';
 import { normalizeReasoningEffort } from '../utils/reasoning-effort';
 import type { ReasoningEffort } from '../types';
 import { canonicalizeBotSkillRefs } from '../bot-skills/canonical';
@@ -40,6 +41,12 @@ export interface CloudBotModelClientOptions {
   botId: string;
   auth: CatsCoAuthSnapshot;
   fetchImpl?: typeof fetch;
+}
+
+export interface DefaultPromptSnapshotInput {
+  content: string;
+  xiaobaVersion?: string;
+  runtimeVersion?: string;
 }
 
 export async function pullCloudBotModelSelection(
@@ -203,6 +210,27 @@ export async function acknowledgeCloudBotDefinition(
     revision,
     ...(applyError ? { error: applyError } : {}),
   });
+}
+
+export async function reportCloudDefaultPromptSnapshot(
+  options: CloudBotModelClientOptions,
+  snapshot: DefaultPromptSnapshotInput,
+): Promise<boolean> {
+  const content = String(snapshot.content || '');
+  if (!content.trim()) throw new Error('Default system prompt snapshot cannot be empty.');
+  const response = await cloudDefinitionRequest(
+    options,
+    'bot',
+    'PUT',
+    '/api/bot/definition/default-prompt',
+    {
+      content,
+      contentHash: createHash('sha256').update(content, 'utf-8').digest('hex'),
+      ...(snapshot.xiaobaVersion ? { xiaobaVersion: snapshot.xiaobaVersion } : {}),
+      ...(snapshot.runtimeVersion ? { runtimeVersion: snapshot.runtimeVersion } : {}),
+    },
+  );
+  return response !== undefined;
 }
 
 export async function acknowledgeCloudBotModelSelection(
