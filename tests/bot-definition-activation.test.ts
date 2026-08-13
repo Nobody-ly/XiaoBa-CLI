@@ -57,6 +57,7 @@ describe('BotDefinition activation', () => {
     });
 
     const requests: string[] = [];
+    let resolveSnapshotRequest: ((response: Response) => void) | undefined;
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
       requests.push(`${init?.method || 'GET'} ${url.pathname}`);
@@ -82,6 +83,11 @@ describe('BotDefinition activation', () => {
       if (url.pathname === '/api/bot/definition/skills') {
         return Response.json({ error: 'not deployed' }, { status: 404 });
       }
+      if (url.pathname === '/api/bot/definition/default-prompt') {
+        return new Promise<Response>((resolve) => {
+          resolveSnapshotRequest = resolve;
+        });
+      }
       return Response.json({ error: 'unexpected request' }, { status: 500 });
     }) as typeof fetch;
 
@@ -93,6 +99,8 @@ describe('BotDefinition activation', () => {
     });
 
     assert.equal(prepared?.botId, 'bot-bravo');
+    assert.ok(resolveSnapshotRequest, 'startup should schedule the default prompt snapshot upload');
+    resolveSnapshotRequest(Response.json({ status: 'stored' }));
     assert.equal(prepared?.materializedCatalogRuntime, true);
     const runtime = new FileBotCatalogModelRuntimeRepository({ runtimeRoot }).read('bot-bravo');
     assert.equal(runtime?.modelId, 'minimax-m3');
@@ -108,6 +116,7 @@ describe('BotDefinition activation', () => {
       'GET /api/relay/key',
       'GET /api.json',
       'GET /v1/models',
+      'PUT /api/bot/definition/default-prompt',
       'GET /api/bot/definition',
     ]);
   });
