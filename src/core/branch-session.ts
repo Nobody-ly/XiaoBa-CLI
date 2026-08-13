@@ -13,6 +13,8 @@ import {
   isCheckpointCompactionEnabled,
 } from './checkpoint-compaction';
 
+export const BRANCH_LOG_MAX_BYTES = 1_000_000;
+
 export interface BranchSessionOptions {
   id: string;
   type: string;
@@ -161,6 +163,8 @@ export interface BranchSessionLoggerOptions {
 
 export class BranchSessionLogger {
   private readonly filePath: string | null;
+  private bytesWritten = 0;
+  private capped = false;
 
   constructor(private readonly options: BranchSessionLoggerOptions) {
     if (!options.enabled) {
@@ -172,6 +176,8 @@ export class BranchSessionLogger {
     const dir = PathResolver.getLogsPath('branches', options.branchType, dateStr);
     fs.mkdirSync(dir, { recursive: true });
     this.filePath = path.join(dir, `${sanitizeFilePart(options.branchId)}.jsonl`);
+    this.bytesWritten = fs.existsSync(this.filePath) ? fs.statSync(this.filePath).size : 0;
+    this.capped = this.bytesWritten >= BRANCH_LOG_MAX_BYTES;
   }
 
   write(eventType: string, payload: Record<string, unknown> = {}): void {
@@ -185,7 +191,30 @@ export class BranchSessionLogger {
       ...payload,
     };
     try {
-      fs.appendFileSync(this.filePath, JSON.stringify(entry) + '\n');
+      if (this.capped) return;
+      const line = JSON.stringify(entry) + '\n';
+      const lineBytes = Buffer.byteLength(line, 'utf8');
+      const marker = JSON.stringify({
+        entry_type: 'branch',
+        branch_type: this.options.branchType,
+        branch_id: this.options.branchId,
+        event_type: 'log_limit_reached',
+        timestamp: new Date().toISOString(),
+        dropped_event_type: eventType,
+        dropped_event_bytes: lineBytes,
+        max_bytes: BRANCH_LOG_MAX_BYTES,
+      }) + '\n';
+      const markerBytes = Buffer.byteLength(marker, 'utf8');
+      if (this.bytesWritten + lineBytes + markerBytes > BRANCH_LOG_MAX_BYTES) {
+        if (this.bytesWritten + markerBytes <= BRANCH_LOG_MAX_BYTES) {
+          fs.appendFileSync(this.filePath, marker);
+          this.bytesWritten += markerBytes;
+        }
+        this.capped = true;
+        return;
+      }
+      fs.appendFileSync(this.filePath, line);
+      this.bytesWritten += lineBytes;
     } catch (error: any) {
       Logger.warning(`[branch:${this.options.branchType}:${this.options.branchId}] log write failed: ${error.message}`);
     }
