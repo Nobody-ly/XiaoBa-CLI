@@ -133,6 +133,33 @@ class RepeatedInvalidFinishMemoryBranchAI {
   }
 }
 
+class InvalidFinishWithStrayTextMemoryBranchAI {
+  calls: Message[][] = [];
+
+  isToolCallingSupported(): boolean {
+    return true;
+  }
+
+  async chat(messages: Message[]): Promise<ChatResponse> {
+    this.calls.push(JSON.parse(JSON.stringify(messages)));
+    if (this.calls.length === 3) {
+      return {
+        content: 'I am done.',
+        toolCalls: [],
+        usage,
+      };
+    }
+    return {
+      content: null,
+      toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', {
+        summary: 'No useful memory.',
+        refs: [],
+      })],
+      usage,
+    };
+  }
+}
+
 class PromptInjectionMemoryBranchAI {
   calls: Message[][] = [];
   sawUntrustedEvidenceRule = false;
@@ -316,6 +343,29 @@ describe('memory sidecar branch', () => {
     assert.ok(Buffer.byteLength(logs, 'utf8') < 100_000);
   });
 
+  test('keeps invalid finalization budget across stray-output reminder restarts', async () => {
+    const queue = new InMemorySyntheticObservationQueue();
+    const aiService = new InvalidFinishWithStrayTextMemoryBranchAI();
+    const handle = startMemorySidecarBranch({
+      sessionKey: 'test-session',
+      input: 'bound invalid finalization across reminder restarts',
+      recentMessages: [],
+      workingDirectory: testRoot,
+      aiService: aiService as any,
+      queue,
+    });
+
+    await handle.done;
+
+    assert.equal(aiService.calls.length, 4);
+    assert.deepEqual(aiService.calls.map(messages => messages.length), [2, 4, 6, 8]);
+    assert.equal(queue.drain().length, 0);
+    const logs = readBranchLogs(testRoot);
+    assert.equal(countLogEvents(logs, 'invalid_finalization_exhausted'), 1);
+    assert.equal(countLogEvents(logs, 'suppressed_observation'), 1);
+    assert.equal(countLogEvents(logs, 'cancelled_before_finish'), 0);
+  });
+
   test('treats historical log text as untrusted evidence', async () => {
     const sessionDir = path.join(testRoot, 'logs', 'sessions', 'chat', '2026-06-09');
     fs.mkdirSync(sessionDir, { recursive: true });
@@ -395,6 +445,15 @@ describe('memory sidecar branch', () => {
     assert.equal(queue.drain().length, 0);
   });
 });
+
+function countLogEvents(logs: string, eventType: string): number {
+  return logs
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+    .filter(entry => entry.event_type === eventType)
+    .length;
+}
 
 function readBranchLogs(root: string): string {
   const branchRoot = path.join(root, 'logs', 'branches', 'memory');
