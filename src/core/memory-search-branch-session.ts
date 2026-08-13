@@ -6,6 +6,7 @@ import {
   FinishMemorySearchTool,
   MemoryNeighborsTool,
   MemoryReadTurnTool,
+  MemorySearchFinishAttemptState,
   MemorySearchFinishPayload,
   MemorySearchTool,
   MEMORY_FINISH_MAX_INVALID_ATTEMPTS,
@@ -27,6 +28,7 @@ export interface MemorySearchBranchSessionOptions {
 
 export class MemorySearchBranchSession extends ObservationBranchSession<MemorySearchFinishPayload> {
   private readonly store: MemoryLogStore;
+  private readonly finishAttemptState: MemorySearchFinishAttemptState = { invalidAttempts: 0 };
 
   constructor(private readonly memoryOptions: MemorySearchBranchSessionOptions) {
     super({
@@ -71,7 +73,7 @@ export class MemorySearchBranchSession extends ObservationBranchSession<MemorySe
           });
         }
         this.complete(payload);
-      }),
+      }, this.finishAttemptState),
     ];
   }
 
