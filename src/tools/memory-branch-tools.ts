@@ -12,6 +12,10 @@ export type MemorySearchFinishHandler = (payload: MemorySearchFinishPayload) => 
 
 export const MEMORY_FINISH_MAX_INVALID_ATTEMPTS = 3;
 
+export interface MemorySearchFinishAttemptState {
+  invalidAttempts: number;
+}
+
 const CANONICAL_REF_PATTERN = /^[^/\\#]+\/\d{4}-\d{2}-\d{2}\/[^/\\#]+\.jsonl#\d+$/;
 
 export class MemorySearchTool implements Tool {
@@ -191,16 +195,17 @@ export class FinishMemorySearchTool implements Tool {
     },
   };
 
-  private invalidAttempts = 0;
-
-  constructor(private readonly onFinish: MemorySearchFinishHandler) {}
+  constructor(
+    private readonly onFinish: MemorySearchFinishHandler,
+    private readonly attemptState: MemorySearchFinishAttemptState = { invalidAttempts: 0 },
+  ) {}
 
   async execute(args: any): Promise<ToolExecutionResult> {
     const validation = validateFinishArgs(args);
     if (!validation.ok) {
       return this.invalidResult(validation.error);
     }
-    this.invalidAttempts = 0;
+    this.attemptState.invalidAttempts = 0;
     this.onFinish(validation.payload);
     return {
       ok: true,
@@ -213,8 +218,8 @@ export class FinishMemorySearchTool implements Tool {
   }
 
   private invalidResult(error: string): ToolExecutionResult {
-    this.invalidAttempts += 1;
-    if (this.invalidAttempts >= MEMORY_FINISH_MAX_INVALID_ATTEMPTS) {
+    this.attemptState.invalidAttempts += 1;
+    if (this.attemptState.invalidAttempts >= MEMORY_FINISH_MAX_INVALID_ATTEMPTS) {
       this.onFinish({
         summary: 'Memory search stopped after repeated invalid finalization calls; no observation was injected.',
         refs: [],
@@ -227,7 +232,7 @@ export class FinishMemorySearchTool implements Tool {
           ok: false,
           terminal: true,
           reason: 'invalid_finalization_exhausted',
-          invalid_attempts: this.invalidAttempts,
+          invalid_attempts: this.attemptState.invalidAttempts,
         }),
       };
     }
@@ -236,7 +241,7 @@ export class FinishMemorySearchTool implements Tool {
       errorCode: 'INVALID_TOOL_ARGUMENTS',
       message: jsonToolError([
         error,
-        `Attempt ${this.invalidAttempts}/${MEMORY_FINISH_MAX_INVALID_ATTEMPTS}. Correct format:`,
+        `Attempt ${this.attemptState.invalidAttempts}/${MEMORY_FINISH_MAX_INVALID_ATTEMPTS}. Correct format:`,
         'publish={"summary":"...","refs":["chat/2026-08-13/demo.jsonl#1"],"inject":true}',
         'suppress={"summary":"No useful memory.","refs":[],"inject":false}',
       ].join(' ')),
