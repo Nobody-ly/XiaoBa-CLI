@@ -376,12 +376,15 @@ export class ServiceManager extends EventEmitter {
       this.killProcess(svc.process, true);
     } else {
       svc.expectedExit = 'stop';
-      svc.process.kill('SIGTERM');
+      const stoppingProcess = svc.process;
+      stoppingProcess.kill('SIGTERM');
 
       // 5秒后强制kill
       const forceKillTimer = setTimeout(() => {
-        if (svc.process && !svc.process.killed) {
-          svc.process.kill('SIGKILL');
+        // Never target a replacement child that started while this fallback
+        // timer was pending. This timer belongs to the original process only.
+        if (stoppingProcess.exitCode === null && stoppingProcess.signalCode === null) {
+          stoppingProcess.kill('SIGKILL');
         }
       }, 5000);
       forceKillTimer.unref?.();
