@@ -5,7 +5,7 @@ import {
   type CatsDeviceRpcMessage,
   type CatsThinToolRpcMessage,
 } from './client';
-import { CatsCompanyConfig, ParsedCatsMessage, CatsFileInfo } from './types';
+import { CatsCompanyConfig, ParsedCatsMessage, CatsFileInfo, type CatsCompanyRuntimeRole } from './types';
 import { MessageSender, type ConversationTaskStatusInput } from './message-sender';
 import { extractContentBlocks } from './content-blocks';
 import { createCatsCoMessageEnvelope, createExecutionScope } from './message-envelope';
@@ -171,7 +171,7 @@ const STRUCTURED_TOOL_PROGRESS_UNSUPPORTED_CHANNELS = new Set([
   'wx',
 ]);
 const SUBAGENT_TERMINAL_EVENTS = new Set(['agent_completed', 'agent_failed', 'agent_stopped']);
-export const CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[] = [
+export const CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[] = [
   'read_file',
   'resolve_common_directory',
   'glob',
@@ -180,11 +180,26 @@ export const CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[
   'edit_file',
   'send_file',
   'execute_shell',
+];
+
+export const CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[] = [
+  ...CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES,
   SKILLHUB_THIN_RPC_TOOLS.workspace,
   SKILLHUB_THIN_RPC_TOOLS.share,
   SKILLHUB_THIN_RPC_TOOLS.finalize,
   SKILLHUB_THIN_RPC_TOOLS.switchBot,
 ];
+
+/** @deprecated Prefer capabilitiesForCatsCompanyRuntimeRole. */
+export const CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES = CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES;
+
+export function capabilitiesForCatsCompanyRuntimeRole(
+  runtimeRole: CatsCompanyRuntimeRole,
+): DeviceGrantOperation[] {
+  return runtimeRole === 'desktop'
+    ? [...CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES]
+    : [...CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES];
+}
 
 function currentRuntimeOS(): 'windows' | 'macos' | 'linux' | 'unknown' {
   switch (platform()) {
@@ -453,6 +468,8 @@ export class CatsCompanyBot {
 
   constructor(config: CatsCompanyConfig) {
     this.botUid = String(config.botUid || '').trim() || null;
+    const runtimeRole: CatsCompanyRuntimeRole = config.runtimeRole === 'desktop' ? 'desktop' : 'server';
+    const deviceCapabilities = capabilitiesForCatsCompanyRuntimeRole(runtimeRole);
     const localDeviceId = config.installationId || config.bodyId;
     const deviceRegistration = localDeviceId
       ? {
@@ -463,7 +480,8 @@ export class CatsCompanyBot {
           owner_user_id: config.ownerUserId,
           os: currentRuntimeOS(),
           status: 'online' as const,
-          capabilities: [...CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES],
+          runtime_role: runtimeRole,
+          capabilities: deviceCapabilities,
         }
       : undefined;
 
@@ -482,11 +500,12 @@ export class CatsCompanyBot {
       installationId: config.installationId,
       deviceId: config.installationId || config.bodyId,
       ownerUserId: config.ownerUserId,
-      capabilities: [...CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES],
+      capabilities: deviceCapabilities,
     });
     this.deviceRegistration = deviceRegistration;
     this.skillHubThinRpc = new SkillHubThinRpcHandler({
       isShuttingDown: () => this.shuttingDown,
+      enabled: runtimeRole === 'desktop',
     });
 
     const runtime = createCatsCompanyRuntime(config.sessionTTL);

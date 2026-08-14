@@ -245,6 +245,11 @@ export class ServiceManager extends EventEmitter {
     }
 
     if (name === 'catscompany') {
+      // Electron explicitly marks both development and packaged desktop
+      // launches. A browser-only/server Dashboard remains fail-closed.
+      envVars.XIAOBA_RUNTIME_ROLE = process.env.XIAOBA_RUNTIME_ROLE === 'desktop'
+        ? 'desktop'
+        : 'server';
       const catsCoRuntime = resolveCatsCoRuntimeConfig({
         runtimeRoot: runtimeDataRoot,
         env: envVars,

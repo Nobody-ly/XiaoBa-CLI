@@ -68,6 +68,13 @@ describe('CatsCompany SkillHub thin RPC', () => {
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
   });
 
+  test('can be disabled for server runtimes', () => {
+    const serverHandler = new SkillHubThinRpcHandler({ runtimeRoot, enabled: false });
+    for (const toolName of Object.values(SKILLHUB_THIN_RPC_TOOLS)) {
+      assert.equal(serverHandler.supports(toolName), false);
+    }
+  });
+
   test('returns only bounded metadata for the active Bot workspace', async () => {
     const result = await handler.execute(request({
       request_id: 'workspace-1',
@@ -84,7 +91,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(JSON.stringify(result).includes('# Local Demo'), false);
   });
 
-  test('keeps local Skills visible when one package cannot be shared', async () => {
+  test('keeps credential-bearing local Skills visible and shareable', async () => {
     const blockedRoot = path.join(runtimeRoot, 'skills', 'blocked-demo');
     fs.mkdirSync(blockedRoot, { recursive: true });
     fs.writeFileSync(path.join(blockedRoot, 'SKILL.md'), [
@@ -113,8 +120,8 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(skills.find(skill => skill.name === 'local-demo')?.can_share, true);
     assert.equal(skills.find(skill => skill.name === 'nested-demo')?.can_share, true);
     const blocked = skills.find(skill => skill.name === 'blocked-demo');
-    assert.equal(blocked?.can_share, false);
-    assert.match(String(blocked?.share_error || ''), /sensitive material/i);
+    assert.equal(blocked?.can_share, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(blocked || {}, 'share_error'), false);
   });
 
   test('keeps invalid SKILL.md entries visible but disables sharing with an actionable error', async () => {
@@ -305,7 +312,12 @@ describe('CatsCompany SkillHub thin RPC', () => {
         schema: 'xiaoba.bot-skill-local.v1',
         localSkillId: fixture.localSkillId,
       });
-      if (fixture.blocked) fs.writeFileSync(path.join(skillRoot, '.env'), 'API_KEY=blocked\n');
+      if (fixture.blocked) {
+        fs.writeFileSync(
+          path.join(skillRoot, 'SKILL.md'),
+          '---\nname: [unterminated\ndescription: Broken YAML\n---\n',
+        );
+      }
     }
 
     const result = await handler.execute(request({ request_id: 'workspace-canonical-order' }));
@@ -923,8 +935,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
     );
   });
 
-  test('rejects sensitive files that appear after the initial share scope check', async () => {
-    const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+  test('uploads arbitrary files without content-policy blocking', async () => {
     const sensitiveFiles = [
       { name: '.env', content: 'API_KEY=not-a-real-secret\n' },
       { name: 'private.pem', content: '-----BEGIN PRIVATE KEY-----\nplaceholder\n' },
@@ -933,13 +944,17 @@ describe('CatsCompany SkillHub thin RPC', () => {
     ];
 
     for (const sensitiveFile of sensitiveFiles) {
-      const sensitivePath = path.join(selected.path, sensitiveFile.name);
+      const skillPath = path.join(runtimeRoot, 'skills', 'local-demo');
+      const sensitivePath = path.join(skillPath, sensitiveFile.name);
+      fs.writeFileSync(sensitivePath, sensitiveFile.content);
+      const selected = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))
+        .find(entry => entry.path === skillPath);
+      assert.ok(selected);
       const originalFetch = global.fetch;
       let shareCalls = 0;
       global.fetch = async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input));
         if (url.pathname === '/api/auth/catsco-exchange') {
-          fs.writeFileSync(sensitivePath, sensitiveFile.content);
           return Response.json({
             user: { id: 'skillhub-user' },
             roles: ['developer'],
@@ -956,13 +971,29 @@ describe('CatsCompany SkillHub thin RPC', () => {
         }
         if (url.pathname === '/api/skills/share') {
           shareCalls += 1;
-          return Response.json({ error: 'share should not be reached' }, { status: 500 });
+          const body = JSON.parse(String(init?.body || '{}'));
+          assert.equal(
+            body.source.files.some((file: any) => file.path === sensitiveFile.name),
+            true,
+          );
+          return Response.json({
+            skillId: 'alice/local-demo',
+            packageVersion: {
+              skillId: 'alice/local-demo',
+              version: '1.0.0',
+              contentHash: 'c'.repeat(64),
+            },
+            skillHub: {
+              author: 'alice',
+              version: '1.0.0',
+              uploadedAt: '2026-08-06T00:00:00.000Z',
+            },
+          }, { status: 201 });
         }
         return Response.json({ error: `unexpected request: ${url.pathname}` }, { status: 500 });
       };
       try {
-        await assert.rejects(
-          shareLocalSkillForCatsCo({
+        await shareLocalSkillForCatsCo({
             skillName: selected.name,
             expectedLocalSkillId: selected.localSkillId,
             expectedBotUid: '42',
@@ -975,14 +1006,12 @@ describe('CatsCompany SkillHub thin RPC', () => {
               baseUrl: 'https://app.catsco.cc',
               user: { uid: '7', username: 'alice' },
             }),
-          }),
-          /(?:sensitive material|archive file)/i,
-        );
+          });
       } finally {
         global.fetch = originalFetch;
         fs.rmSync(sensitivePath, { force: true });
       }
-      assert.equal(shareCalls, 0, `remote share was called for ${sensitiveFile.name}`);
+      assert.equal(shareCalls, 1, `remote share was called once for ${sensitiveFile.name}`);
     }
   });
 
