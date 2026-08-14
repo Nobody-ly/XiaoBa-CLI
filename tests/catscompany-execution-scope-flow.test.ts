@@ -1337,4 +1337,40 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(pending.content, '补充读取文件');
     assert.equal(pending.deviceSelection.selectedDeviceId, 'alice-laptop');
   });
+
+  test('ignores legacy Artifact page metadata instead of forwarding it into a turn', async () => {
+    const { bot, handledTurns } = createHarness();
+    const sentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
+    const metadata = {
+      ...canonicalMetadata('usr7', 'p2p_7_43'),
+      artifact_context: {
+        contract_version: 'catsco.artifact-context.v1',
+        id: 'lesson-game',
+        agent_uid: '43',
+        page_context: {
+          contract_version: 'catsco.artifact-page-context.v1',
+          selected_text: sentinel,
+          semantic_context: { note: sentinel },
+        },
+      },
+      artifact_page_context: {
+        contract_version: 'catsco.artifact-page-context.v1',
+        selected_text: sentinel,
+      },
+    };
+
+    await bot.onMessage({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: '分析右边这些',
+      content: '分析右边这些',
+      metadata,
+      isGroup: false,
+      seq: 31,
+    });
+
+    assert.equal(handledTurns.length, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(handledTurns[0].options, 'artifactContext'), false);
+    assert.equal(JSON.stringify(handledTurns[0].options).includes(sentinel), false);
+  });
 });

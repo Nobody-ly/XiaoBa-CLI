@@ -11,6 +11,16 @@ import type {
 } from '../src/types/tool';
 
 const usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 };
+const legacyArtifactSentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
+const legacyArtifactContext = {
+  kind: 'catsco_artifact_context',
+  artifactId: 'lesson-game',
+  title: legacyArtifactSentinel,
+  pageContext: {
+    selectedText: legacyArtifactSentinel,
+    semanticContext: { note: legacyArtifactSentinel },
+  },
+};
 
 test('runner checkpoints only after a complete tool result and resumes the same episode', async () => {
   const events: string[] = [];
@@ -57,6 +67,7 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     compactIfNeeded: async (messages: Message[], request: any) => {
       checkpointRequest = request;
       events.push('checkpoint');
+      assert.equal(JSON.stringify(messages).includes(legacyArtifactSentinel), false);
       assert.ok(messages.some(message =>
         message.role === 'tool' && message.content === 'verified tool evidence'));
       return {
@@ -79,8 +90,10 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     stream: false,
     episodeId: 'episode-main',
     checkpointCompactionCoordinator: coordinator,
+    toolExecutionContext: { artifactContext: legacyArtifactContext } as any,
     onCompactionCheckpoint: async messages => {
       events.push('persist');
+      assert.equal(JSON.stringify(messages).includes(legacyArtifactSentinel), false);
       assert.ok(messages.some(message => message.__checkpointSummary));
     },
   });
@@ -101,6 +114,7 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     'model:second',
   ]);
   assert.ok(modelRequests[1].some(message => message.__checkpointSummary));
+  assert.equal(JSON.stringify(modelRequests).includes(legacyArtifactSentinel), false);
 });
 
 test('runner keeps the original transcript when checkpoint persistence fails', async () => {

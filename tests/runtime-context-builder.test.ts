@@ -150,6 +150,121 @@ describe('runtime context builder', () => {
       fs.rmSync(testRoot, { recursive: true, force: true });
     }
   });
+
+  test('legacy Artifact context cannot change provider prompts or durable history', async () => {
+    const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-no-artifact-injection-'));
+    const originalCwd = process.cwd();
+    process.chdir(testRoot);
+    try {
+      const route = createSessionRoute({
+        source: 'catscompany',
+        topicType: 'p2p',
+        topicId: 'p2p_7_43',
+        actorUserId: 'usr7',
+        agentId: 'usr43',
+        agentBodyId: 'body-main',
+        messageId: 'p2p_7_43:31',
+        channelSeq: 31,
+        identityTrust: 'server_canonical',
+        identitySource: 'metadata.catsco_identity',
+        legacySessionKey: 'cc_user:usr7',
+      });
+      const sentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
+      const legacyArtifactContext = {
+        kind: 'catsco_artifact_context',
+        source: 'catscompany',
+        contractVersion: 'catsco.artifact-context.v1',
+        artifactId: 'lesson-game',
+        title: sentinel,
+        artifactKind: 'mini_app',
+        url: 'https://agent-43.artifacts.catsco.fun/artifacts/lesson-game/latest/',
+        topicId: route.topicId,
+        agentId: route.agentId,
+        currentlyVisible: true,
+        pageContext: {
+          contractVersion: 'catsco.artifact-page-context.v1',
+          observedAt: '2026-08-14T03:00:00Z',
+          selectedText: sentinel,
+          semanticContext: { note: sentinel },
+        },
+        identityTrust: 'server_canonical',
+        observationTrust: 'untrusted_content',
+      };
+
+      const runProbe = async (includeLegacyContext: boolean) => {
+        const capturedRequests: Message[][] = [];
+        let aiCalls = 0;
+        const session = new AgentSession(route.sessionKey, buildMockServices({
+          aiService: {
+            isToolCallingSupported: () => true,
+            async chatStream(messages: Message[]) {
+              capturedRequests.push(messages.map(message => ({ ...message })));
+              aiCalls++;
+              if (aiCalls === 1) {
+                return {
+                  content: null,
+                  toolCalls: [{
+                    id: 'tool-1',
+                    type: 'function',
+                    function: { name: 'noop', arguments: '{}' },
+                  }],
+                  usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+                };
+              }
+              return {
+                content: 'done',
+                toolCalls: [],
+                usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+              };
+            },
+          },
+          toolManager: {
+            getWorkspaceRoot: () => process.cwd(),
+            getToolDefinitions: () => [{
+              name: 'noop',
+              description: 'noop',
+              parameters: { type: 'object', properties: {} },
+            }],
+            executeTool: async (toolCall: any) => ({
+              tool_call_id: toolCall.id,
+              role: 'tool',
+              name: toolCall.function.name,
+              content: 'ok',
+              ok: true,
+            }),
+          },
+        }), 'catscompany', route);
+        session.setSystemPromptProvider(() => 'system prompt');
+        try {
+          const options: any = {
+            sessionRoute: route,
+            executionScope: createExecutionScopeFromRoute(route),
+          };
+          if (includeLegacyContext) options.artifactContext = legacyArtifactContext;
+          const result = await session.handleMessage('分析右边这些', options);
+          assert.equal(result.text, 'done');
+          return {
+            capturedRequests,
+            retainedMessages: ((session as any).messages as Message[]).map(message => ({ ...message })),
+          };
+        } finally {
+          await session.cleanup();
+        }
+      };
+
+      const baseline = await runProbe(false);
+      const legacy = await runProbe(true);
+
+      assert.equal(legacy.capturedRequests.length, 2);
+      assert.equal(JSON.stringify(legacy.capturedRequests).includes(sentinel), false);
+      assert.equal(JSON.stringify(legacy.retainedMessages).includes(sentinel), false);
+      assert.deepEqual(providerPromptShape(legacy.capturedRequests), providerPromptShape(baseline.capturedRequests));
+      assert.deepEqual(providerPromptShape([legacy.retainedMessages]), providerPromptShape([baseline.retainedMessages]));
+    } finally {
+      process.chdir(originalCwd);
+      fs.rmSync(testRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 function emptySkillRuntime(): any {
@@ -163,6 +278,12 @@ function isRuntimeContextMessage(message: Message): boolean {
   return message.role === 'system'
     && typeof message.content === 'string'
     && message.content.startsWith(TRANSIENT_RUNTIME_CONTEXT_PREFIX);
+}
+
+function providerPromptShape(requests: Message[][]): unknown {
+  return requests.map(messages => messages.map(message => Object.fromEntries(
+    Object.entries(message).filter(([key]) => !key.startsWith('__')),
+  )));
 }
 
 function localGrant(filePath: string): ScopedLocalFileGrant {
@@ -239,7 +360,7 @@ function buildMockServices(overrides: any = {}): any {
     aiService: {
       ...(overrides.aiService || {}),
     },
-    toolManager: {
+    toolManager: overrides.toolManager || {
       getWorkspaceRoot: () => process.cwd(),
       getToolDefinitions: () => [],
       executeTool: async () => {
