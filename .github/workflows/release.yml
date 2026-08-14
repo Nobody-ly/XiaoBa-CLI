@@ -320,8 +320,48 @@ jobs:
             release/*.deb
             release/latest-linux.yml
 
+  build-worker:
+    needs: release-preflight
+    runs-on: ubuntu-24.04
+    env:
+      NODE_VERSION: "22.23.1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --fund=false
+
+      - name: Build deterministic worker artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_manifest="$RUNNER_TEMP/worker-build-manifest.json"
+          npm run --silent worker:artifact > "$raw_manifest"
+          artifact="$(jq -r '.artifactPath' "$raw_manifest")"
+          test -f "$artifact"
+          jq --arg artifact_file "$(basename "$artifact")" \
+            'del(.artifactPath) + {artifactFile: $artifact_file}' \
+            "$raw_manifest" > release/worker/manifest.json
+
+      - name: Upload worker artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-release
+          if-no-files-found: error
+          path: |
+            release/worker/*.tar.gz
+            release/worker/*.sha256
+            release/worker/manifest.json
+
   release:
-    needs: [build-mac, build-win, build-linux]
+    needs: [build-mac, build-win, build-linux, build-worker]
     runs-on: ubuntu-latest
     environment: release-prod
     permissions:
@@ -368,6 +408,12 @@ jobs:
         with:
           name: linux-release
           path: release-linux
+
+      - name: Download worker artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: worker-release
+          path: release-worker
 
       - name: Verify collected macOS release artifacts
         shell: bash
@@ -424,6 +470,9 @@ jobs:
               release-mac/arm64/*)
                 printf 'update/macos-arm64/%s\n' "$name"
                 ;;
+              release-worker/*)
+                printf 'update/worker/%s/%s\n' "${GITHUB_REF_NAME#v}" "$name"
+                ;;
               *)
                 printf 'update/%s\n' "$name"
                 ;;
@@ -441,7 +490,7 @@ jobs:
             target_key="$(target_key_for_file "$file")"
             upload_source_file "$file" "$target_key"
             replicated_keys+=("$target_key")
-          done < <(find release-mac release-win release-linux -type f -print0)
+          done < <(find release-mac release-win release-linux release-worker -type f -print0)
 
           printf '%s\n' "${replicated_keys[@]}" > replicated-keys.txt
 
@@ -519,6 +568,7 @@ jobs:
             release-mac/arm64/latest-mac-arm64.yml
             release-win/*
             release-linux/*
+            release-worker/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

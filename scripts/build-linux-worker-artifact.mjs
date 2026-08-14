@@ -82,6 +82,7 @@ try {
       "package-lock.json",
       "package.json",
       "prompts",
+      "scripts/update-worker-artifact.sh",
       "skills",
     ],
     options.archiveSource,
