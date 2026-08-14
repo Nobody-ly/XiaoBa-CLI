@@ -1,6 +1,8 @@
 import type { ExecutionScope, MessageEnvelope, ScopedArtifactContext, ScopedDeviceGrant, ScopedDeviceSelection } from '../types/session-identity';
 import type { TargetRoutes } from '../types/tool';
 
+export type CatsCompanyRuntimeRole = 'desktop' | 'server';
+
 /**
  * CatsCo agent 连接配置
  */
@@ -19,6 +21,8 @@ export interface CatsCompanyConfig {
   ownerUserId?: string;
   /** 用户可见设备名，用于 Dashboard 展示和服务端设备选择 */
   deviceName?: string;
+  /** Runtime placement used to keep desktop-only local workspace APIs off server agents. */
+  runtimeRole?: CatsCompanyRuntimeRole;
   /** HTTP 基础地址（用于文件上传），默认从 serverUrl 推导 */
   httpBaseUrl?: string;
   /** 会话过期时间（毫秒），默认 30 分钟 */

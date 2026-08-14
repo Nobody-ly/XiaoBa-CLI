@@ -54,6 +54,7 @@ export interface SkillHubThinRpcHandlerOptions {
   scheduleBotSwitch?: (botUid: string) => void;
   finalizeCurrentBotSkill?: typeof finalizeCurrentBotPublicSkillNow;
   isShuttingDown?: () => boolean;
+  enabled?: boolean;
 }
 
 export class SkillHubThinRpcHandler {
@@ -61,6 +62,7 @@ export class SkillHubThinRpcHandler {
   private readonly scheduleBotSwitch: (botUid: string) => void;
   private readonly finalizeCurrentBotSkill: typeof finalizeCurrentBotPublicSkillNow;
   private readonly isShuttingDown: () => boolean;
+  private readonly enabled: boolean;
   private readonly completed = new Map<string, {
     fingerprint: string;
     operation: Promise<Record<string, unknown>>;
@@ -73,10 +75,11 @@ export class SkillHubThinRpcHandler {
       ?? ((botUid) => scheduleDashboardBotSwitch(botUid, this.isShuttingDown));
     this.finalizeCurrentBotSkill = options.finalizeCurrentBotSkill
       ?? finalizeCurrentBotPublicSkillNow;
+    this.enabled = options.enabled !== false;
   }
 
   supports(toolName: string): boolean {
-    return Object.values(SKILLHUB_THIN_RPC_TOOLS).includes(toolName as any);
+    return this.enabled && Object.values(SKILLHUB_THIN_RPC_TOOLS).includes(toolName as any);
   }
 
   async execute(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
