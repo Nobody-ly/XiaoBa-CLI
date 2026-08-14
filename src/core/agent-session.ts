@@ -1,7 +1,6 @@
 import { Message } from '../types';
 import type {
   ExecutionScope,
-  ScopedArtifactContext,
   ScopedDeviceGrant,
   ScopedDeviceSelection,
   ScopedLocalDeviceGrant,
@@ -143,8 +142,6 @@ export interface HandleMessageOptions {
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
-  /** 当前 turn 的服务端确认 Artifact 共同焦点。 */
-  artifactContext?: ScopedArtifactContext;
   /** 当前 turn 已授权的本地文件资源。 */
   localFileGrants?: ScopedLocalFileGrant[];
   /** 当前 turn 专属、给 agent 可见的运行时反馈 */
@@ -589,7 +586,6 @@ export class AgentSession {
       let deviceRpc: DeviceRpcTransport | undefined;
       let thinToolRpc: ThinToolRpcTransport | undefined;
       let targetRoutes: TargetRoutes | undefined;
-      let artifactContext: ScopedArtifactContext | undefined;
       let localFileGrants: ScopedLocalFileGrant[] | undefined;
       let runtimeFeedbackInputs: RuntimeFeedbackInput[] = [];
       let pendingUserInputProvider: PendingUserInputProvider | undefined;
@@ -605,7 +601,6 @@ export class AgentSession {
           || 'deviceRpc' in callbacksOrOptions
           || 'thinToolRpc' in callbacksOrOptions
           || 'targetRoutes' in callbacksOrOptions
-          || 'artifactContext' in callbacksOrOptions
           || 'localFileGrants' in callbacksOrOptions
           || 'callbacks' in callbacksOrOptions
           || 'runtimeFeedback' in callbacksOrOptions
@@ -623,7 +618,6 @@ export class AgentSession {
           deviceRpc = opts.deviceRpc;
           thinToolRpc = opts.thinToolRpc;
           targetRoutes = opts.targetRoutes;
-          artifactContext = opts.artifactContext;
           localFileGrants = opts.localFileGrants;
           runtimeFeedbackInputs = opts.runtimeFeedback || [];
           pendingUserInputProvider = opts.pendingUserInputProvider;
@@ -709,7 +703,6 @@ export class AgentSession {
           deviceRpc,
           thinToolRpc,
           targetRoutes,
-          artifactContext,
           localFileGrants,
           pendingUserInputProvider,
           abortSignal: this.activeAbortController.signal,

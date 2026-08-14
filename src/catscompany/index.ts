@@ -14,7 +14,6 @@ import { createCatsCoAttachmentGrant, createCatsCoLocalDeviceGrant } from './loc
 import { extractCatsCoDeviceGrants } from './device-grants';
 import { extractCatsCoDeviceSelection } from './device-selection';
 import { extractCatsCoRuntimeContext } from './runtime-context';
-import { extractCatsCoArtifactContext } from './artifact-context';
 import { MessageSessionManager } from '../core/message-session-manager';
 import {
   AgentServices,
@@ -31,7 +30,7 @@ import { ChannelCallbacks, DeviceRpcTransport, TargetRoutes, ThinToolRpcTranspor
 import { ContentBlock } from '../types';
 import type { PendingUserInput } from '../core/conversation-runner';
 import type { StreamRetryInfo } from '../providers/provider';
-import type { DeviceGrantOperation, ExecutionScope, ScopedArtifactContext, ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalDeviceGrant, ScopedLocalFileGrant } from '../types/session-identity';
+import type { DeviceGrantOperation, ExecutionScope, ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalDeviceGrant, ScopedLocalFileGrant } from '../types/session-identity';
 import { AdapterRuntimeBundle, createAdapterRuntime } from '../runtime/adapter-runtime';
 import { randomUUID } from 'crypto';
 import { hostname, platform } from 'os';
@@ -104,7 +103,6 @@ interface QueuedMessage {
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   targetRoutes?: TargetRoutes;
-  artifactContext?: ScopedArtifactContext;
   localFileGrants?: ScopedLocalFileGrant[];
   receivedAt: number;
   source?: 'user' | 'subagent_feedback';
@@ -1606,7 +1604,6 @@ export class CatsCompanyBot {
         deviceGrants: msg.deviceGrants,
         deviceSelection: msg.deviceSelection,
         targetRoutes: msg.targetRoutes,
-        artifactContext: msg.artifactContext,
         localFileGrants,
         receivedAt: Date.now(),
         source: 'user',
@@ -1655,17 +1652,11 @@ export class CatsCompanyBot {
           deviceGrants: msg.deviceGrants,
           deviceSelection: msg.deviceSelection,
           targetRoutes: msg.targetRoutes,
-          artifactContext: msg.artifactContext,
           deviceRpc: this.buildDeviceRpcTransport(),
           thinToolRpc: this.maybeBuildThinToolRpcTransport(),
           localFileGrants,
           runtimeFeedback,
-          pendingUserInputProvider: () => this.consumeQueuedUserInput(
-            key,
-            msg.executionScope,
-            entryClearGeneration,
-            msg.artifactContext,
-          ),
+          pendingUserInputProvider: () => this.consumeQueuedUserInput(key, msg.executionScope, entryClearGeneration),
           callbacks: this.buildSessionCallbacks(msg.topic, {
             sessionKey: key,
             senderId: msg.senderId,
@@ -2121,7 +2112,6 @@ export class CatsCompanyBot {
       botUid: this.botUid,
     });
     const executionScope = createExecutionScope(envelope);
-    const artifactContext = extractCatsCoArtifactContext(ctx.metadata, envelope, this.botUid);
     const targetRoutes = extractCatsCoRuntimeContext(ctx.metadata);
     if (targetRoutes?.routes?.length) {
       Logger.info(`[CatsCompany][xiaoba_runtime] parsed target routes: topic=${ctx.topic}, sender=${ctx.senderId}, routes=${targetRoutes.routes.map(route => `${route.userName || route.userId || '?'}:${route.ownerUserId}/${route.deviceId}/${route.os}`).join(', ')}`);
@@ -2141,7 +2131,6 @@ export class CatsCompanyBot {
       metadata: ctx.metadata,
       envelope,
       executionScope,
-      artifactContext,
       deviceGrants: extractCatsCoDeviceGrants(ctx.metadata, executionScope),
       deviceSelection: extractCatsCoDeviceSelection(ctx.metadata, executionScope),
       targetRoutes,
@@ -2958,7 +2947,6 @@ export class CatsCompanyBot {
             localDeviceGrant: this.localDeviceGrant,
             deviceSelection: msg.deviceSelection,
             targetRoutes: msg.targetRoutes,
-            artifactContext: msg.artifactContext,
             deviceRpc: this.buildDeviceRpcTransport(),
             thinToolRpc: this.maybeBuildThinToolRpcTransport(),
           })
@@ -2969,17 +2957,11 @@ export class CatsCompanyBot {
             deviceGrants: msg.deviceGrants,
             deviceSelection: msg.deviceSelection,
             targetRoutes: msg.targetRoutes,
-            artifactContext: msg.artifactContext,
             deviceRpc: this.buildDeviceRpcTransport(),
             thinToolRpc: this.maybeBuildThinToolRpcTransport(),
             runtimeFeedback: msg.runtimeFeedback,
             localFileGrants: msg.localFileGrants,
-            pendingUserInputProvider: () => this.consumeQueuedUserInput(
-              sessionKey,
-              msg.executionScope,
-              clearGeneration,
-              msg.artifactContext,
-            ),
+            pendingUserInputProvider: () => this.consumeQueuedUserInput(sessionKey, msg.executionScope, clearGeneration),
             callbacks: this.buildSessionCallbacks(msg.topic, {
               sessionKey,
               senderId: msg.senderId,
@@ -3070,7 +3052,6 @@ export class CatsCompanyBot {
     sessionKey: string,
     currentScope?: ParsedCatsMessage['executionScope'],
     expectedClearGeneration = this.getSessionClearGeneration(sessionKey),
-    currentArtifactContext?: ScopedArtifactContext,
   ): string | ContentBlock[] | PendingUserInput | null {
     const queue = this.messageQueue.get(sessionKey);
     if (!queue || queue.length === 0) return null;
@@ -3105,19 +3086,9 @@ export class CatsCompanyBot {
     const deviceGrants = messages.flatMap(item => item.deviceGrants || []);
     const deviceSelection = [...messages].reverse().find(item => item.deviceSelection)?.deviceSelection;
     const targetRoutes = [...messages].reverse().find(item => item.targetRoutes)?.targetRoutes;
-    const latestArtifactContext = messages[messages.length - 1]?.artifactContext;
-    const shouldUpdateArtifactFocus = Boolean(currentArtifactContext)
-      || messages.some(item => item.artifactContext !== undefined);
-    if (
-      localFileGrants.length === 0
-      && deviceGrants.length === 0
-      && !deviceSelection
-      && !targetRoutes
-      && !shouldUpdateArtifactFocus
-    ) return content;
+    if (localFileGrants.length === 0 && deviceGrants.length === 0 && !deviceSelection && !targetRoutes) return content;
     return {
       content,
-      artifactContext: shouldUpdateArtifactFocus ? latestArtifactContext ?? null : undefined,
       localFileGrants: localFileGrants.length > 0 ? localFileGrants : undefined,
       deviceGrants: deviceGrants.length > 0 ? deviceGrants : undefined,
       deviceSelection,
