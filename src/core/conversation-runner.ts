@@ -28,6 +28,7 @@ import {
 import {
   TRANSIENT_RUNTIME_CONTEXT_PREFIX,
   buildRuntimeContextMessage,
+  isLegacyArtifactObservationMessage,
 } from './runtime-context-builder';
 import { buildPendingUserInputBoundaryMessage } from './pending-user-input-boundary';
 import {
@@ -298,6 +299,7 @@ export class ConversationRunner {
    * @returns 最终文本回复和完整消息列表
    */
   async run(messages: Message[], callbacks?: RunnerCallbacks): Promise<RunResult> {
+    this.removeLegacyArtifactObservations(messages);
     const allTools = this.toolExecutor.getToolDefinitions();
     const supportsToolCalling = (this.aiService as any).isToolCallingSupported?.() !== false;
     const activeTools = supportsToolCalling ? allTools : [];
@@ -839,9 +841,12 @@ export class ConversationRunner {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (
-        message.role === 'system'
-        && typeof message.content === 'string'
-        && message.content.startsWith(TRANSIENT_RUNTIME_CONTEXT_PREFIX)
+        isLegacyArtifactObservationMessage(message)
+        || (
+          message.role === 'system'
+          && typeof message.content === 'string'
+          && message.content.startsWith(TRANSIENT_RUNTIME_CONTEXT_PREFIX)
+        )
       ) {
         messages.splice(i, 1);
       }
@@ -857,6 +862,12 @@ export class ConversationRunner {
       localFileGrants: this.toolExecutionContext?.localFileGrants,
     });
     if (runtimeContext) messages.push(runtimeContext);
+  }
+
+  private removeLegacyArtifactObservations(messages: Message[]): void {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (isLegacyArtifactObservationMessage(messages[index])) messages.splice(index, 1);
+    }
   }
 
   private injectSyntheticObservations(messages: Message[], turn: number): void {

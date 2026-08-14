@@ -1347,14 +1347,23 @@ describe('CatsCompany execution scope flow', () => {
         contract_version: 'catsco.artifact-context.v1',
         id: 'lesson-game',
         agent_uid: '43',
+        title: 'Lesson game',
+        kind: 'mini_app',
+        url: 'https://agent-43.artifacts.catsco.fun/artifacts/lesson-game/latest/',
+        topic_id: 'p2p_7_43',
+        currently_visible: true,
+        displayed_version: 2,
+        latest_version: 3,
         page_context: {
           contract_version: 'catsco.artifact-page-context.v1',
+          observed_at: '2026-08-14T03:00:00Z',
           selected_text: sentinel,
           semantic_context: { note: sentinel },
         },
       },
       artifact_page_context: {
         contract_version: 'catsco.artifact-page-context.v1',
+        observed_at: '2026-08-14T03:00:00Z',
         selected_text: sentinel,
       },
     };

@@ -23,6 +23,7 @@ import {
   TRANSIENT_RUNTIME_CONTEXT_PREFIX,
   buildRuntimeContextMessage,
   buildRuntimeContextSnapshot,
+  isLegacyArtifactObservationMessage,
 } from './runtime-context-builder';
 import { stripAssistantArtifactsFromMessages } from '../utils/transcript-artifacts';
 import { resolveTurnContextTransientPolicy } from './transient-injection-policy';
@@ -62,7 +63,9 @@ export interface BuildTurnContextResult {
  */
 export class TurnContextBuilder {
   async build(params: BuildTurnContextParams): Promise<BuildTurnContextResult> {
-    const contextMessages = stripAssistantArtifactsFromMessages(params.durableMessages);
+    const contextMessages = this.removeTransientMessages(
+      stripAssistantArtifactsFromMessages(params.durableMessages),
+    );
     this.injectRuntimeContext(contextMessages, params);
     this.injectRuntimeObservationRules(contextMessages);
     this.injectRuntimeFeedback(contextMessages, params.runtimeFeedback);
@@ -88,6 +91,7 @@ export class TurnContextBuilder {
     return messages.filter(msg => {
       if (msg.__syntheticObservation) return false;
       if (msg.__runtimeFeedback) return false;
+      if (isLegacyArtifactObservationMessage(msg)) return false;
       if (msg.role !== 'system' || typeof msg.content !== 'string') return true;
       if (msg.content.startsWith(TRANSIENT_SUBAGENT_STATUS_PREFIX)) return false;
       if (msg.content.startsWith(TRANSIENT_PLAN_STATUS_PREFIX)) return false;

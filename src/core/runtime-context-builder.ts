@@ -15,6 +15,16 @@ import { getCatsCoAttachmentCacheSessionRoot } from '../catscompany/attachment-c
 
 export const TRANSIENT_RUNTIME_CONTEXT_PREFIX = '[transient_runtime_context]';
 
+// Cleanup-only compatibility for transcripts created before automatic
+// Artifact observations were removed. No current code emits this prefix.
+const LEGACY_TRANSIENT_ARTIFACT_OBSERVATION_PREFIX = '[transient_artifact_observation]';
+
+export function isLegacyArtifactObservationMessage(message: Message): boolean {
+  return message.__injected === true
+    && typeof message.content === 'string'
+    && message.content.startsWith(LEGACY_TRANSIENT_ARTIFACT_OBSERVATION_PREFIX);
+}
+
 export interface BuildRuntimeContextParams {
   sessionKey: string;
   sessionType?: string;

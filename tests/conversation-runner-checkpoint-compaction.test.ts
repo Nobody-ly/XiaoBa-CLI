@@ -12,14 +12,12 @@ import type {
 
 const usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 };
 const legacyArtifactSentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
-const legacyArtifactContext = {
-  kind: 'catsco_artifact_context',
-  artifactId: 'lesson-game',
-  title: legacyArtifactSentinel,
-  pageContext: {
-    selectedText: legacyArtifactSentinel,
-    semanticContext: { note: legacyArtifactSentinel },
-  },
+const legacyArtifactObservation: Message = {
+  role: 'user',
+  content: `[transient_artifact_observation]\n${legacyArtifactSentinel}`,
+  __injected: true,
+  __runtimeObservation: true,
+  runtimeObservationSource: 'catsco_artifact',
 };
 
 test('runner checkpoints only after a complete tool result and resumes the same episode', async () => {
@@ -90,7 +88,6 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     stream: false,
     episodeId: 'episode-main',
     checkpointCompactionCoordinator: coordinator,
-    toolExecutionContext: { artifactContext: legacyArtifactContext } as any,
     onCompactionCheckpoint: async messages => {
       events.push('persist');
       assert.equal(JSON.stringify(messages).includes(legacyArtifactSentinel), false);
@@ -98,11 +95,14 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     },
   });
 
-  const result = await runner.run([{
-    role: 'user',
-    content: 'inspect and continue',
-    __episodeId: 'episode-main',
-  }]);
+  const result = await runner.run([
+    legacyArtifactObservation,
+    {
+      role: 'user',
+      content: 'inspect and continue',
+      __episodeId: 'episode-main',
+    },
+  ]);
 
   assert.equal(result.response, 'continued successfully');
   assert.equal(checkpointRequest.phase, 'mid_turn');
