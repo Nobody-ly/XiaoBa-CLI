@@ -97,6 +97,69 @@ function deviceGrant(deviceId: string): ScopedDeviceGrant {
 }
 
 describe('ConversationRunner pending input', () => {
+  test('replaces or clears the Artifact context ref for later tools without exposing it to model messages', async t => {
+    for (const [name, pendingRef] of [
+      ['replace', `acr_${'b'.repeat(43)}`],
+      ['clear', undefined],
+    ] as const) {
+      await t.test(name, async () => {
+        const initialRef = `acr_${'a'.repeat(43)}`;
+        const requests: Message[][] = [];
+        const contexts: Array<Partial<ToolExecutionContext> | undefined> = [];
+        const aiService = {
+          chat: async (messages: Message[]) => {
+            requests.push(messages.map(message => ({ ...message })));
+            if (requests.length <= 2) {
+              return {
+                content: null,
+                toolCalls: [{
+                  id: `call_${requests.length}`,
+                  type: 'function',
+                  function: { name: 'noop', arguments: '{}' },
+                }],
+                usage,
+              };
+            }
+            return { content: 'done', toolCalls: [], usage };
+          },
+        } as any;
+        const executor: ToolExecutor = {
+          getToolDefinitions: () => [{
+            name: 'noop',
+            description: 'noop',
+            parameters: { type: 'object', properties: {} },
+          }],
+          executeTool: async (toolCall, _history, contextOverrides) => {
+            contexts.push(contextOverrides);
+            return {
+              tool_call_id: toolCall.id,
+              role: 'tool',
+              name: toolCall.function.name,
+              content: 'ok',
+              ok: true,
+            };
+          },
+        };
+        let pendingUsed = false;
+        const runner = new ConversationRunner(aiService, executor, {
+          stream: false,
+          toolExecutionContext: { artifactContextRef: initialRef },
+          pendingUserInputProvider: () => {
+            if (pendingUsed) return null;
+            pendingUsed = true;
+            return { content: '页面状态变了', artifactContextRef: pendingRef };
+          },
+        });
+
+        await runner.run([{ role: 'user', content: '先分析页面' }]);
+
+        assert.equal(contexts[0]?.artifactContextRef, initialRef);
+        assert.equal(contexts[1]?.artifactContextRef, pendingRef);
+        assert.doesNotMatch(JSON.stringify(requests), /acr_[A-Za-z0-9_-]{43}/);
+      });
+    }
+  });
+
   test('continues into the next turn when pending input arrives before final reply is returned', async () => {
     const requests: Message[][] = [];
     const aiService = {

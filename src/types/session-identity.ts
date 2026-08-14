@@ -29,6 +29,8 @@ export interface MessageEnvelope {
   identityTrust: IdentityTrustLevel;
   identitySource?: string;
   warnings?: string[];
+  /** Opaque, short-lived Artifact context reference from a trusted live envelope. */
+  artifactContextRef?: string;
 }
 
 export interface ExecutionScope {

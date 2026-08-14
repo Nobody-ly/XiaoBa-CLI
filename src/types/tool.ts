@@ -262,6 +262,8 @@ export interface ToolExecutionContext {
   deviceRpcReceiver?: boolean;
   /** 当前 turn 已授权的本地文件资源，例如用户本轮上传的 CatsCo 附件缓存。 */
   localFileGrants?: ScopedLocalFileGrant[];
+  /** 当前 turn 的短期 Artifact context ref；只供本机工具子进程临时读取。 */
+  artifactContextRef?: string;
 }
 
 /**

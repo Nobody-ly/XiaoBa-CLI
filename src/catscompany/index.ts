@@ -100,6 +100,7 @@ interface QueuedMessage {
   senderId: string;
   seq: number;
   executionScope: ParsedCatsMessage['executionScope'];
+  artifactContextRef?: string;
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   targetRoutes?: TargetRoutes;
@@ -1601,6 +1602,7 @@ export class CatsCompanyBot {
         senderId: msg.senderId,
         seq: msg.seq,
         executionScope: msg.executionScope,
+        artifactContextRef: msg.artifactContextRef,
         deviceGrants: msg.deviceGrants,
         deviceSelection: msg.deviceSelection,
         targetRoutes: msg.targetRoutes,
@@ -1648,6 +1650,7 @@ export class CatsCompanyBot {
           channel,
           sessionRoute,
           executionScope: msg.executionScope,
+          artifactContextRef: msg.artifactContextRef,
           localDeviceGrant: this.localDeviceGrant,
           deviceGrants: msg.deviceGrants,
           deviceSelection: msg.deviceSelection,
@@ -2131,6 +2134,7 @@ export class CatsCompanyBot {
       metadata: ctx.metadata,
       envelope,
       executionScope,
+      artifactContextRef: envelope.artifactContextRef,
       deviceGrants: extractCatsCoDeviceGrants(ctx.metadata, executionScope),
       deviceSelection: extractCatsCoDeviceSelection(ctx.metadata, executionScope),
       targetRoutes,
@@ -2953,6 +2957,7 @@ export class CatsCompanyBot {
           : await session.handleMessage(msg.userMessage, {
             channel,
             executionScope: msg.executionScope,
+            artifactContextRef: msg.artifactContextRef,
             localDeviceGrant: this.localDeviceGrant,
             deviceGrants: msg.deviceGrants,
             deviceSelection: msg.deviceSelection,
@@ -3086,13 +3091,17 @@ export class CatsCompanyBot {
     const deviceGrants = messages.flatMap(item => item.deviceGrants || []);
     const deviceSelection = [...messages].reverse().find(item => item.deviceSelection)?.deviceSelection;
     const targetRoutes = [...messages].reverse().find(item => item.targetRoutes)?.targetRoutes;
-    if (localFileGrants.length === 0 && deviceGrants.length === 0 && !deviceSelection && !targetRoutes) return content;
+    const artifactContextMessage = [...messages]
+      .reverse()
+      .find(item => Object.prototype.hasOwnProperty.call(item, 'artifactContextRef'));
+    if (localFileGrants.length === 0 && deviceGrants.length === 0 && !deviceSelection && !targetRoutes && !artifactContextMessage) return content;
     return {
       content,
       localFileGrants: localFileGrants.length > 0 ? localFileGrants : undefined,
       deviceGrants: deviceGrants.length > 0 ? deviceGrants : undefined,
       deviceSelection,
       targetRoutes,
+      artifactContextRef: artifactContextMessage?.artifactContextRef,
     };
   }
 

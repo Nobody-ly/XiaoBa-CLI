@@ -482,13 +482,17 @@ describe('CatsCompany execution scope flow', () => {
 
   test('keeps execution scope when a busy CatsCompany turn is queued then drained', async () => {
     const { bot, handledTurns, sessionKeys, session } = createHarness({ busy: true });
+    const ref = `acr_${'c'.repeat(43)}`;
 
     await (bot as any).onMessage({
       topic: 'p2p_8_43',
       senderId: 'usr8',
       text: '继续查',
       content: '继续查',
-      metadata: canonicalMetadata('usr8', 'p2p_8_43'),
+      metadata: {
+        ...canonicalMetadata('usr8', 'p2p_8_43'),
+        artifact_context_ref: ref,
+      },
       isGroup: false,
       seq: 12,
     });
@@ -505,6 +509,7 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(handledTurns[0].options.executionScope.actorUserId, 'usr8');
     assert.equal(handledTurns[0].options.executionScope.topicId, 'p2p_8_43');
     assert.equal(handledTurns[0].options.executionScope.isTrusted, true);
+    assert.equal(handledTurns[0].options.artifactContextRef, ref);
   });
 
   test('keeps a drained user message queued when the session call rejects once', async () => {
@@ -1230,6 +1235,30 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(handledTurns[0].options.deviceGrants, undefined);
   });
 
+  test('forwards a trusted Artifact context ref only through current turn options', async () => {
+    const { bot, handledTurns } = createHarness();
+    const ref = `acr_${'a'.repeat(43)}`;
+    const metadata = {
+      ...canonicalMetadata('usr7', 'p2p_7_43'),
+      artifact_context_ref: ref,
+    };
+
+    await (bot as any).onMessage({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: '分析这些',
+      content: '分析这些',
+      metadata,
+      isGroup: false,
+      seq: 12,
+    });
+
+    assert.equal(handledTurns.length, 1);
+    assert.equal(handledTurns[0].options.artifactContextRef, ref);
+    assert.equal('artifactContextRef' in handledTurns[0].options.executionScope, false);
+    assert.doesNotMatch(JSON.stringify(handledTurns[0].userMessage), /acr_[A-Za-z0-9_-]{43}/);
+  });
+
   test('does not merge queued CatsCo group input from another actor into the current actor scope', () => {
     const { bot } = createHarness();
     const aliceScope = createExecutionScope(createCatsCoMessageEnvelope({
@@ -1295,6 +1324,57 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(pending.content, '补充读取文件');
     assert.equal(pending.deviceGrants.length, 1);
     assert.equal(pending.deviceGrants[0].deviceId, 'alice-laptop');
+  });
+
+  test('uses the latest queued Artifact context ref and can explicitly clear the previous one', () => {
+    const { bot } = createHarness();
+    const scope = createExecutionScope(createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: 'first',
+      metadata: canonicalMetadata('usr7', 'p2p_7_43'),
+      botUid: 'usr43',
+    }));
+    const firstRef = `acr_${'a'.repeat(43)}`;
+    const secondRef = `acr_${'b'.repeat(43)}`;
+
+    bot.messageQueue.set(scope.sessionKey, [{
+      userMessage: '先看第一版',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 13,
+      executionScope: scope,
+      artifactContextRef: firstRef,
+      receivedAt: Date.now(),
+      source: 'user',
+    }, {
+      userMessage: '以现在页面为准',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 14,
+      executionScope: scope,
+      artifactContextRef: secondRef,
+      receivedAt: Date.now() + 1,
+      source: 'user',
+    }]);
+
+    const replaced = (bot as any).consumeQueuedUserInput(scope.sessionKey, scope);
+    assert.equal(replaced.artifactContextRef, secondRef);
+    assert.doesNotMatch(JSON.stringify(replaced.content), /acr_[A-Za-z0-9_-]{43}/);
+
+    bot.messageQueue.set(scope.sessionKey, [{
+      userMessage: '页面已经关掉了',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 15,
+      executionScope: scope,
+      artifactContextRef: undefined,
+      receivedAt: Date.now() + 2,
+      source: 'user',
+    }]);
+    const cleared = (bot as any).consumeQueuedUserInput(scope.sessionKey, scope);
+    assert.equal(Object.prototype.hasOwnProperty.call(cleared, 'artifactContextRef'), true);
+    assert.equal(cleared.artifactContextRef, undefined);
   });
 
   test('preserves latest device selection when queued CatsCompany user input is merged', () => {

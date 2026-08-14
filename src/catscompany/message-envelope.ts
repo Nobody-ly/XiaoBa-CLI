@@ -4,6 +4,7 @@ import {
   buildLegacyCatsCoSessionKey,
   createSessionRoute,
 } from '../core/session-router';
+import { normalizeArtifactContextRef } from '../utils/artifact-context-ref';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -31,6 +32,7 @@ export function createCatsCoMessageEnvelope(input: CatsCoEnvelopeInput): Message
   const permissions = asRecord(catscoIdentity?.permissions);
 
   const canonicalActorId = stringField(actor, 'user_id');
+  const canonicalAgentId = stringField(agent, 'agent_id');
   const canonicalTopicId = stringField(identityTopic, 'topic_id');
   const canonicalTopicType = normalizeTopicType(stringField(identityTopic, 'type'));
   const permissionsSource = stringField(permissions, 'source');
@@ -63,7 +65,7 @@ export function createCatsCoMessageEnvelope(input: CatsCoEnvelopeInput): Message
     ? canonicalTopicType
     : topicType;
   const agentId = isCanonicalTrusted
-    ? firstNonEmpty(stringField(agent, 'agent_id'), safeString(input.botUid))
+    ? firstNonEmpty(canonicalAgentId, safeString(input.botUid))
     : safeString(input.botUid);
   const agentBodyId = isCanonicalTrusted ? stringField(agent, 'body_id') : undefined;
   const deviceOwnerUserId = isCanonicalTrusted
@@ -87,6 +89,10 @@ export function createCatsCoMessageEnvelope(input: CatsCoEnvelopeInput): Message
     : catscoIdentity
       ? 'untrusted'
       : 'legacy_context';
+  const artifactContextRef = isCanonicalTrusted
+    && sameCatsCoUserId(canonicalAgentId, safeString(input.botUid))
+    ? normalizeArtifactContextRef(metadata?.artifact_context_ref)
+    : undefined;
   const legacyCleanupKey = buildCatsCoSessionKey(resolvedTopicType, topicId, actorUserId);
   const legacyRestoreKey = legacyCleanupKey;
   const route = createSessionRoute({
@@ -130,6 +136,7 @@ export function createCatsCoMessageEnvelope(input: CatsCoEnvelopeInput): Message
     identityTrust,
     identitySource: isCanonicalTrusted ? 'metadata.catsco_identity' : undefined,
     warnings: warnings.length > 0 ? warnings : undefined,
+    artifactContextRef,
   };
 }
 

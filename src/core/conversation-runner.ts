@@ -141,6 +141,8 @@ export interface RunResult {
 
 export interface PendingUserInput {
   content: string | ContentBlock[];
+  /** Replaces the current turn's short-lived Artifact context ref when present, including explicit undefined. */
+  artifactContextRef?: string;
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   targetRoutes?: TargetRoutes;
@@ -728,6 +730,12 @@ export class ConversationRunner {
 
     const content = isPendingUserInput(pending) ? pending.content : pending;
     let shouldRefreshRuntimeContext = false;
+    if (isPendingUserInput(pending) && Object.prototype.hasOwnProperty.call(pending, 'artifactContextRef')) {
+      this.toolExecutionContext = {
+        ...(this.toolExecutionContext || {}),
+        artifactContextRef: pending.artifactContextRef,
+      };
+    }
     if (isPendingUserInput(pending) && pending.deviceGrants?.length) {
       this.toolExecutionContext = {
         ...(this.toolExecutionContext || {}),
