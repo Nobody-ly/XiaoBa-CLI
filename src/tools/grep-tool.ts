@@ -4,6 +4,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { isReadPathAllowed } from '../utils/safety';
+import {
+  checkFormalBotSkillPathAccess,
+  requiresFormalBotSkillSearchFiltering,
+} from '../bot-skills/formal-workspace-policy';
 import { formatCatsCoVisiblePath, redactCatsCoVisiblePath } from './tool-gateway';
 import { executeRouteIfRemote, resolveExecutionRoute, targetParameterDescription } from './execution-router';
 
@@ -125,6 +129,11 @@ export class GrepTool implements Tool {
       ? (path.isAbsolute(searchPath) ? searchPath : path.join(context.workingDirectory, searchPath))
       : context.workingDirectory;
 
+    const formalRootAccess = checkFormalBotSkillPathAccess(context, resolvedSearchPath, 'read');
+    if (!formalRootAccess.ok) {
+      return { ok: false, errorCode: 'PERMISSION_DENIED', message: formalRootAccess.reason };
+    }
+
     const pathPermission = isReadPathAllowed(resolvedSearchPath, context.workingDirectory);
     if (!pathPermission.allowed) {
       return { ok: false, errorCode: 'PERMISSION_DENIED', message: `执行被阻止: ${pathPermission.reason}` };
@@ -132,11 +141,17 @@ export class GrepTool implements Tool {
     const visibleSearchPath = formatCatsCoVisiblePath(context, searchPath || '.', { preserveRelative: true });
 
     // 按优先级尝试各个 fallback
-    const fallbacks = [
-      { name: 'ripgrep (rg)', fn: () => this.executeWithRipgrep(args, resolvedSearchPath, context, visibleSearchPath) },
-      { name: 'system grep', fn: () => this.executeWithSystemGrep(args, resolvedSearchPath, context, visibleSearchPath) },
-      { name: 'Node.js glob', fn: () => this.executeWithNodeJS(args, resolvedSearchPath, context, visibleSearchPath) },
-    ];
+    const nodeFallback = {
+      name: 'Node.js glob',
+      fn: () => this.executeWithNodeJS(args, resolvedSearchPath, context, visibleSearchPath),
+    };
+    const fallbacks = requiresFormalBotSkillSearchFiltering(context, resolvedSearchPath)
+      ? [nodeFallback]
+      : [
+          { name: 'ripgrep (rg)', fn: () => this.executeWithRipgrep(args, resolvedSearchPath, context, visibleSearchPath) },
+          { name: 'system grep', fn: () => this.executeWithSystemGrep(args, resolvedSearchPath, context, visibleSearchPath) },
+          nodeFallback,
+        ];
 
     let lastError: Error | null = null;
 
@@ -242,6 +257,7 @@ export class GrepTool implements Tool {
 
   private async executeWithNodeJS(args: any, searchPath: string, context: ToolExecutionContext, visibleSearchPath?: string): Promise<FallbackResult> {
     const { pattern, glob: globPattern, case_insensitive = false, output_mode = 'files' } = args;
+    const filterFormalPaths = requiresFormalBotSkillSearchFiltering(context, searchPath);
     const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(escapeRegex(pattern), case_insensitive ? 'i' : '');
     const globRegex = globPattern
@@ -255,6 +271,7 @@ export class GrepTool implements Tool {
 
     const searchFile = async (fullPath: string, fileName: string): Promise<void> => {
       ensureNotAborted();
+      if (filterFormalPaths && !checkFormalBotSkillPathAccess(context, fullPath, 'read').ok) return;
       if (globRegex && !globRegex.test(fileName)) return;
       try {
         const lines = (await fs.promises.readFile(fullPath, {
@@ -275,6 +292,7 @@ export class GrepTool implements Tool {
 
     const walkDir = async (dir: string): Promise<void> => {
       ensureNotAborted();
+      if (filterFormalPaths && !checkFormalBotSkillPathAccess(context, dir, 'read').ok) return;
       let entries: fs.Dirent[];
       try {
         entries = await fs.promises.readdir(dir, { withFileTypes: true });

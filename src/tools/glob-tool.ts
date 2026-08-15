@@ -3,6 +3,7 @@ import * as path from 'path';
 import { glob } from 'glob';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { isReadPathAllowed } from '../utils/safety';
+import { checkFormalBotSkillPathAccess } from '../bot-skills/formal-workspace-policy';
 import { formatCatsCoVisiblePath, isCatsCoToolGatewayContext } from './tool-gateway';
 import { executeRouteIfRemote, resolveExecutionRoute, targetParameterDescription } from './execution-router';
 
@@ -148,6 +149,11 @@ export class GlobTool implements Tool {
       ? (path.isAbsolute(searchPath) ? searchPath : path.join(context.workingDirectory, searchPath))
       : context.workingDirectory;
 
+    const formalRootAccess = checkFormalBotSkillPathAccess(context, cwd, 'read');
+    if (!formalRootAccess.ok) {
+      return { ok: false, errorCode: 'PERMISSION_DENIED', message: formalRootAccess.reason };
+    }
+
     const pathPermission = isReadPathAllowed(cwd, context.workingDirectory);
     if (!pathPermission.allowed) {
       return { ok: false, errorCode: 'PERMISSION_DENIED', message: `Execution blocked: ${pathPermission.reason}` };
@@ -174,6 +180,12 @@ export class GlobTool implements Tool {
         windowsPathsNoEscape: process.platform === 'win32',
       });
       for (const match of matches) {
+        const formalAccess = checkFormalBotSkillPathAccess(
+          context,
+          path.join(cwd, String(match)),
+          'read',
+        );
+        if (!formalAccess.ok) continue;
         const normalized = normalizeRelativePath(String(match));
         if (!matchedPaths.has(normalized)) matchedPaths.set(normalized, new Set());
         matchedPaths.get(normalized)!.add(candidatePattern);

@@ -3,6 +3,7 @@ import type { TargetRoute, ToolExecutionContext, ToolExecutionResult } from '../
 import { normalizeTargetText } from '../catscompany/runtime-context';
 import { executeRemoteDeviceRpcTool } from './device-rpc-tool';
 import { TOOL_TARGET_CONTEXT_PREFIX, TOOL_TARGET_CONTEXT_SUFFIX } from './tool-target-context';
+import { isChatTriggeredContext } from '../bot-skills/formal-workspace-policy';
 
 export type ExecutionTargetId = 'agent_self' | string;
 
@@ -48,6 +49,14 @@ export function resolveExecutionRoute(
     target?: unknown;
   },
 ): ExecutionRoute {
+  if (options.operation === 'execute_shell' && isChatTriggeredContext(context)) {
+    return {
+      ok: false,
+      errorCode: 'PERMISSION_DENIED',
+      message: 'Chat-triggered shell execution is disabled until an isolated Skill candidate workspace is available.',
+    };
+  }
+
   if (context.deviceRpcReceiver) {
     return { ok: true, mode: 'local', target: 'speaker_default', label: 'current Device RPC receiver' };
   }

@@ -450,7 +450,7 @@ describe('CatsCompany Device RPC file tools', () => {
     assert.equal(fs.readFileSync(filePath, 'utf8'), 'nope');
   });
 
-  test('executes shell Device RPC operations on the selected local device', async () => {
+  test('rejects shell Device RPC operations on the selected local device', async () => {
     const captured: { result?: any } = {};
     const bot = botWithDevice(captured);
     const command = process.platform === 'win32'
@@ -465,9 +465,9 @@ describe('CatsCompany Device RPC file tools', () => {
     }));
 
     assert.ok(captured.result);
-    assert.equal(captured.result.error, undefined);
-    assert.equal(captured.result.result.ok, true);
-    assert.match(String(captured.result.result.content), /rpc-shell-ok/);
+    assert.equal(captured.result.result, undefined);
+    assert.equal(captured.result.error.code, 'PERMISSION_DENIED');
+    assert.match(String(captured.result.error.message), /isolated Skill candidate workspace/);
   });
 
   test('rejects Device RPC requests for another target device', async () => {
