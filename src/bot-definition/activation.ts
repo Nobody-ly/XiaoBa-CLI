@@ -224,7 +224,6 @@ export async function prepareBoundBotDefinition(
         if (
           options.acknowledgeCloudSelection !== false
           && cloudSnapshot.configured
-          && !skillSync?.localPreservedAfterError
         ) {
           try {
             await acknowledgeCloudBotDefinition(

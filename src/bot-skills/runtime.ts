@@ -33,7 +33,6 @@ export interface PrepareBoundBotSkillsOptions {
 export interface PreparedBoundBotSkills {
   sync?: BotSkillSyncResult;
   workspaceExisted: boolean;
-  localPreservedAfterError?: string;
   activation: BotSkillWorkspaceActivation;
 }
 
@@ -89,16 +88,18 @@ export async function prepareBoundBotSkills(
 ): Promise<PreparedBoundBotSkills> {
   const runtimeRoot = path.resolve(options.runtimeRoot);
   return withBotSkillWorkspaceLock(runtimeRoot, async () => {
-    const activeRoot = PathResolver.getRuntimeDataRoot() === runtimeRoot
-      ? PathResolver.getSkillsPath()
-      : path.join(runtimeRoot, 'skills');
-    const workspace = new BotSkillWorkspaceService(runtimeRoot, activeRoot);
-    const activeBotId = workspace.getActiveBotId();
-    if (activeBotId) {
-      BotSkillSyncService.recoverInterruptedRestore(runtimeRoot, activeBotId, activeRoot);
-    }
-    const activation = workspace.activate(options.botId);
+    let workspace: BotSkillWorkspaceService | undefined;
+    let activation: BotSkillWorkspaceActivation | undefined;
     try {
+      const activeRoot = PathResolver.getRuntimeDataRoot() === runtimeRoot
+        ? PathResolver.getSkillsPath()
+        : path.join(runtimeRoot, 'skills');
+      workspace = new BotSkillWorkspaceService(runtimeRoot, activeRoot);
+      const activeBotId = workspace.getActiveBotId();
+      if (activeBotId) {
+        BotSkillSyncService.recoverInterruptedRestore(runtimeRoot, activeBotId, activeRoot);
+      }
+      activation = workspace.activate(options.botId);
       const sync = await new BotSkillSyncService({
         runtimeRoot,
         botId: options.botId,
@@ -107,26 +108,26 @@ export async function prepareBoundBotSkills(
         workspaceExisted: activation.existed,
         fetchImpl: options.fetchImpl,
         definitionService: options.definitionService,
-      }).sync();
+      }).reconcileActivationFromCloudOnly();
       return { sync, workspaceExisted: activation.existed, activation };
     } catch (error) {
-      const message = errorMessage(error);
-      if (activation.existed && !(error instanceof BotSkillCloudRestoreError)) {
-        Logger.warning(`Bot Skill 云同步暂时失败，继续使用本地工作区: ${message}`);
-        return {
-          workspaceExisted: true,
-          localPreservedAfterError: message,
-          activation,
-        };
-      }
-      try {
-        workspace.rollback(activation);
-      } catch (rollbackError) {
-        throw new Error(
-          `Bot Skill 云端恢复失败，且工作区回滚失败: ${message}; ${errorMessage(rollbackError)}`,
+      const failure = error instanceof BotSkillCloudRestoreError
+        ? error
+        : new BotSkillCloudRestoreError(
+          `Bot Skill activation failed closed: ${errorMessage(error)}`,
+          { cause: error },
         );
+      if (workspace && activation) {
+        try {
+          workspace.rollback(activation);
+        } catch (rollbackError) {
+          throw new BotSkillCloudRestoreError(
+            `Bot Skill cloud restore failed and workspace rollback also failed: ${errorMessage(failure)}; ${errorMessage(rollbackError)}`,
+            { cause: rollbackError },
+          );
+        }
       }
-      throw error;
+      throw failure;
     }
   });
 }

@@ -35,6 +35,7 @@ import type {
   LocalBotSkillManifestEntry,
 } from './types';
 import { applySkillHubLocalMetadata } from '../skillhub/local-skill-metadata';
+import { snapshotPendingBotSkillWorkspace } from './pending-snapshot';
 
 export type BotSkillSyncDirection =
   | 'none'
@@ -47,6 +48,11 @@ export interface BotSkillSyncResult {
   direction: BotSkillSyncDirection;
   cloudRevision?: number;
   skills: BotSkillRef[];
+  localPendingEvidence?: {
+    path: string;
+    fingerprint: string;
+    fileCount: number;
+  };
 }
 
 export interface BotSkillSyncServiceOptions {
@@ -260,6 +266,97 @@ export class BotSkillSyncService {
       cloudRevision: cloud.revision,
       skills: cloud.skills,
     };
+  }
+
+  /**
+   * Reconciles the formal Skill workspace while a Bot is being activated.
+   * Cloud BotDefinition is the only authority in this path: local changes are
+   * preserved as evidence and are never uploaded or written back to Cloud.
+   */
+  async reconcileActivationFromCloudOnly(): Promise<BotSkillSyncResult> {
+    try {
+      BotSkillSyncService.recoverInterruptedRestore(
+        this.runtimeRoot,
+        this.botId,
+        this.skillsRoot,
+      );
+      const base = this.baseStore.read(this.botId);
+      let local: LocalBotSkillManifestEntry[] = [];
+      let localReadable = true;
+      try {
+        local = this.readLocalManifest();
+      } catch {
+        localReadable = false;
+      }
+      const verifiedExisting = Boolean(
+        localReadable
+        && this.workspaceExisted
+        && fs.existsSync(this.skillsRoot)
+        && base
+        && localMatchesBase(local, base),
+      );
+
+      let cloud: CloudBotSkills | undefined;
+      try {
+        cloud = await pullCloudBotSkills(this.cloudOptions);
+      } catch (error) {
+        if (verifiedExisting) return this.featureUnavailable();
+        throw new BotSkillCloudRestoreError(
+          `Bot Skill activation requires Cloud or a verified local workspace: ${errorMessage(error)}`,
+          { cause: error },
+        );
+      }
+      if (!cloud?.definition) {
+        if (verifiedExisting) return this.featureUnavailable();
+        throw new BotSkillCloudRestoreError(
+          'Bot Skill activation requires a canonical Cloud BotDefinition.',
+        );
+      }
+
+      if (localReadable) {
+        try {
+          this.recoverInterruptedFinalizes(cloud);
+          local = this.readLocalManifest();
+        } catch {
+          localReadable = false;
+        }
+      }
+      const localChanged = !localReadable || (base
+        ? !localMatchesBase(local, base)
+        : this.workspaceExisted && fs.existsSync(this.skillsRoot));
+
+      if (
+        verifiedExisting
+        && !localChanged
+        && base
+        && botSkillRefsEqual(cloud.skills, base.skills.map(entry => entry.reference))
+      ) {
+        this.acceptCloudDefinition(cloud);
+        if (cloud.revision !== base.definitionRevision) this.writeBase(cloud, base.skills);
+        return {
+          botId: this.botId,
+          direction: 'none',
+          cloudRevision: cloud.revision,
+          skills: cloud.skills,
+        };
+      }
+
+      return this.restoreCloud(cloud, {
+        preserveUnmanaged: false,
+        pendingSnapshot: {
+          reason: localChanged
+            ? base ? 'activation_local_changed' : 'activation_without_base'
+            : 'activation_cloud_reconcile',
+          ...(base ? { baseRevision: base.definitionRevision } : {}),
+        },
+      });
+    } catch (error) {
+      if (error instanceof BotSkillCloudRestoreError) throw error;
+      throw new BotSkillCloudRestoreError(
+        `Bot Skill Cloud-only activation failed: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
   }
 
   /**
@@ -704,9 +801,21 @@ export class BotSkillSyncService {
     throw error;
   }
 
-  private async restoreCloud(cloud: CloudBotSkills): Promise<BotSkillSyncResult> {
+  private async restoreCloud(
+    cloud: CloudBotSkills,
+    options: {
+      preserveUnmanaged?: boolean;
+      validateScope?: () => Promise<void> | void;
+      pendingSnapshot?: {
+        reason: 'activation_local_changed'
+          | 'activation_without_base'
+          | 'activation_cloud_reconcile';
+        baseRevision?: number;
+      };
+    } = {},
+  ): Promise<BotSkillSyncResult> {
     try {
-      return await this.restoreCloudUnchecked(cloud);
+      return await this.restoreCloudUnchecked(cloud, options);
     } catch (error) {
       if (error instanceof BotSkillCloudRestoreError) throw error;
       throw new BotSkillCloudRestoreError(
@@ -716,17 +825,30 @@ export class BotSkillSyncService {
     }
   }
 
-  private async restoreCloudUnchecked(cloud: CloudBotSkills): Promise<BotSkillSyncResult> {
+  private async restoreCloudUnchecked(
+    cloud: CloudBotSkills,
+    options: {
+      preserveUnmanaged?: boolean;
+      validateScope?: () => Promise<void> | void;
+      pendingSnapshot?: {
+        reason: 'activation_local_changed'
+          | 'activation_without_base'
+          | 'activation_cloud_reconcile';
+        baseRevision?: number;
+      };
+    },
+  ): Promise<BotSkillSyncResult> {
     const parent = path.dirname(this.skillsRoot);
     const operationID = `${process.pid}-${Date.now()}-${crypto.randomBytes(5).toString('hex')}`;
     const stage = path.join(parent, `.bot-skills-stage-${operationID}`);
     const backup = path.join(parent, `.bot-skills-backup-${operationID}`);
     const packages: BotSkillPackage[] = [];
-    const previousManagedRoots = fs.existsSync(this.skillsRoot)
+    const previousManagedRoots = fs.existsSync(this.skillsRoot) && options.preserveUnmanaged !== false
       ? scanBotSkillWorkspace(this.skillsRoot).map(entry => path.resolve(entry.path))
       : [];
     const previousDefinition = this.definitionService.read(this.botId);
     let entries: BotSkillSyncBaseEntry[] = [];
+    let localPendingEvidence: BotSkillSyncResult['localPendingEvidence'];
     let backedUp = false;
     let activatedStage = false;
     fs.mkdirSync(stage, { recursive: true });
@@ -739,6 +861,7 @@ export class BotSkillSyncService {
         ]),
       );
       for (const reference of cloud.skills) {
+        await options.validateScope?.();
         const packageValue = await this.privateClient.download(reference);
         await this.privateClient.materialize(
           packageValue,
@@ -767,7 +890,7 @@ export class BotSkillSyncService {
       if (!botSkillRefsEqual(restoredRefs, cloud.skills)) {
         throw new Error('Restored Bot Skill workspace does not match its cloud Definition.');
       }
-      if (fs.existsSync(this.skillsRoot)) {
+      if (fs.existsSync(this.skillsRoot) && options.preserveUnmanaged !== false) {
         copyUnmanagedWorkspaceContent(
           this.skillsRoot,
           stage,
@@ -778,9 +901,25 @@ export class BotSkillSyncService {
       }
 
       if (fs.existsSync(this.skillsRoot)) {
+        await options.validateScope?.();
         this.writeRestoreJournal({ stage, backup, phase: 'backup_pending' });
         fs.renameSync(this.skillsRoot, backup);
         backedUp = true;
+        if (options.pendingSnapshot) {
+          const snapshot = snapshotPendingBotSkillWorkspace({
+            runtimeRoot: this.runtimeRoot,
+            botId: this.botId,
+            sourcePath: backup,
+            recordedSourcePath: this.skillsRoot,
+            ...options.pendingSnapshot,
+            cloudRevision: cloud.revision,
+          });
+          localPendingEvidence = {
+            path: snapshot.path,
+            fingerprint: snapshot.fingerprint,
+            fileCount: snapshot.fileCount,
+          };
+        }
       }
       this.writeRestoreJournal({ stage, backup, phase: 'backed_up' });
       this.writeRestoreJournal({ stage, backup, phase: 'activation_pending' });
@@ -831,6 +970,7 @@ export class BotSkillSyncService {
       direction: 'cloud_to_local',
       cloudRevision: cloud.revision,
       skills: cloud.skills,
+      ...(localPendingEvidence ? { localPendingEvidence } : {}),
     };
   }
 

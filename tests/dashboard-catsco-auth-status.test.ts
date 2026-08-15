@@ -12,6 +12,7 @@ import { FileBotCatalogModelRuntimeRepository, FileBotDefinitionRepository } fro
 import { createBotDefinitionSyncService } from '../src/bot-definition/service';
 import { resolveActiveBotLLMConfig } from '../src/bot-definition/llm-config-resolver';
 import { BOT_CATALOG_MODEL_RUNTIME_SCHEMA, BOT_DEFINITION_SCHEMA } from '../src/bot-definition/types';
+import { BotSkillBaseStore } from '../src/bot-skills/base-store';
 
 describe('dashboard CatsCo account status', () => {
   let testRoot: string;
@@ -353,7 +354,7 @@ describe('dashboard CatsCo account status', () => {
         contextWindowTokens: 256_000,
       },
     });
-    fs.mkdirSync(path.join(testRoot, 'skills'), { recursive: true });
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '320');
 
     const service = {
       name: 'catscompany',
@@ -830,6 +831,7 @@ describe('dashboard CatsCo account status', () => {
       'CATSCO_USER_NAME=fresh',
       'CATSCO_USER_DISPLAY_NAME=Fresh User',
     ]);
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '188');
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/setup`, {
       method: 'POST',
@@ -932,6 +934,7 @@ describe('dashboard CatsCo account status', () => {
       'GAUZ_LLM_API_KEY=sk-test',
       'GAUZ_LLM_MODEL=test-model',
     ]);
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '188');
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/setup`, {
       method: 'POST',
@@ -1021,6 +1024,7 @@ describe('dashboard CatsCo account status', () => {
       'GAUZ_LLM_API_KEY=sk-test',
       'GAUZ_LLM_MODEL=test-model',
     ]);
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '199');
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/setup`, {
       method: 'POST',
@@ -1115,6 +1119,7 @@ describe('dashboard CatsCo account status', () => {
       contextWindowTokens: 200000,
       reasoningEffort: 'high',
     });
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '199');
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/bind-bot`, {
       method: 'POST',
@@ -1276,6 +1281,7 @@ describe('dashboard CatsCo account status', () => {
       botId: '188',
       model: { kind: 'catalog', modelId: 'minimax-m2.7' },
     });
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '188');
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/bind-bot`, {
       method: 'POST',
@@ -1408,6 +1414,7 @@ describe('dashboard CatsCo account status', () => {
       botId: '188',
       model: { kind: 'catalog', modelId: 'minimax-m2.7' },
     });
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '188');
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/setup`, {
       method: 'POST',
@@ -1583,6 +1590,17 @@ describe('dashboard CatsCo account status', () => {
     fs.writeFileSync(path.join(testRoot, '.env'), `${lines.join('\n')}\n`);
   }
 });
+
+function seedVerifiedEmptyBotSkillWorkspace(runtimeRoot: string, botId: string): void {
+  fs.mkdirSync(path.join(runtimeRoot, 'skills'), { recursive: true });
+  new BotSkillBaseStore(runtimeRoot).write({
+    schema: 'xiaoba.bot-skill-sync-base.v2',
+    botId,
+    definitionRevision: 0,
+    skills: [],
+    updatedAt: new Date(0).toISOString(),
+  });
+}
 
 function listen(app: express.Express): Promise<Server> {
   return new Promise(resolve => {
