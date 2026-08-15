@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AgentSession } from '../src/core/agent-session';
 
-test('AgentSession schedules Bot Skill workspace sync after a completed turn', async () => {
+test('AgentSession does not implicitly sync the Bot Skill workspace after a completed turn', async () => {
   let scheduledSyncs = 0;
   const session = new AgentSession('user:after-turn-skill-sync', buildMockServices({
     afterTurnSkillSyncScheduler() {
@@ -19,7 +19,7 @@ test('AgentSession schedules Bot Skill workspace sync after a completed turn', a
   const result = await session.handleMessage('update the current Skill');
 
   assert.equal(result.text, 'done');
-  assert.equal(scheduledSyncs, 1);
+  assert.equal(scheduledSyncs, 0);
 });
 
 test('AgentSession requestInterrupt aborts an in-flight model request', async () => {
