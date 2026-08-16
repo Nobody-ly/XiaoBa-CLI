@@ -12,8 +12,11 @@ import {
   scanBotSkillWorkspace,
   scanLocalBotSkill,
 } from '../src/bot-skills/local-manifest';
-import { BotSkillSyncService } from '../src/bot-skills/sync-service';
+import { prepareBoundBotSkills } from '../src/bot-skills/runtime';
+import { BotSkillCloudRestoreError, BotSkillSyncService } from '../src/bot-skills/sync-service';
+import { snapshotPendingBotSkillWorkspace } from '../src/bot-skills/pending-snapshot';
 import type { BotSkillPackage, LocalBotSkillManifestEntry } from '../src/bot-skills/types';
+import { BotSkillWorkspaceService } from '../src/bot-skills/workspace';
 import { readSkillHubInstallMarker } from '../src/skillhub/install-marker';
 import {
   applySkillHubLocalMetadata,
@@ -25,6 +28,36 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
 
   afterEach(() => {
     for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test('fails closed when activation service construction rejects an existing workspace', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-skill-runtime-fail-closed-'));
+    roots.push(runtimeRoot);
+    const botId = 'bot-active';
+    const skillsRoot = path.join(runtimeRoot, 'skills');
+    const dirtyFile = path.join(skillsRoot, 'dirty', 'SKILL.md');
+    fs.mkdirSync(path.dirname(dirtyFile), { recursive: true });
+    fs.writeFileSync(dirtyFile, 'dirty local workspace');
+    new BotSkillWorkspaceService(runtimeRoot, skillsRoot).activate(botId);
+
+    await assert.rejects(
+      prepareBoundBotSkills({
+        runtimeRoot,
+        botId,
+        auth: {
+          httpBaseUrl: 'https://app.catsco.cc',
+          serverUrl: 'wss://app.catsco.cc/v0/channels',
+          botUid: 'bot-other',
+          apiKey: 'bot-api-key',
+        },
+        definitionService: createBotDefinitionSyncService({ runtimeRoot }),
+      }),
+      (error: unknown) => (
+        error instanceof BotSkillCloudRestoreError
+        && /failed closed/.test(error.message)
+      ),
+    );
+    assert.equal(fs.readFileSync(dirtyFile, 'utf8'), 'dirty local workspace');
   });
 
   test('uploads local edits, keeps the Base stable, and restores cloud-only changes atomically', async () => {
@@ -1652,6 +1685,289 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       previousBase,
     );
   });
+  test('activation snapshots dirty Local and restores Cloud without uploading', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
+    await fixture.sync();
+    fixture.uploads = 0;
+    fixture.patches = 0;
+    fs.writeFileSync(
+      path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'),
+      '---\nname: local-a\ndescription: unapproved local edit\n---\n',
+    );
+
+    const result = await fixture.activate();
+
+    assert.equal(result.direction, 'cloud_to_local');
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'), 'utf8'),
+      /approved local/,
+    );
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.equal(result.localPendingEvidence?.path, snapshot.path);
+    assert.equal(result.localPendingEvidence?.fileCount, snapshot.manifest.files.length);
+    assert.equal(snapshot.manifest.reason, 'activation_local_changed');
+    assert.match(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'local-a', 'SKILL.md'), 'utf8'),
+      /unapproved local edit/,
+    );
+  });
+
+  test('activation preserves a no-Base legacy workspace before materializing Cloud', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'legacy', 'legacy', 'legacy local only');
+    const cloudPackage = createPackage(roots, 'cloud-a', 'cloud-a', 'canonical cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
+
+    await fixture.activate();
+
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'legacy')), false);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-a', 'SKILL.md'), 'utf8'),
+      /canonical cloud/,
+    );
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.equal(snapshot.manifest.reason, 'activation_without_base');
+    assert.equal(snapshot.manifest.baseRevision, undefined);
+  });
+
+  test('activation can use a verified workspace while Cloud is unavailable', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
+    await fixture.sync();
+    fixture.cloudReadStatus = 503;
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    const result = await fixture.activate();
+
+    assert.equal(result.direction, 'feature_unavailable');
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'), 'utf8'),
+      /approved local/,
+    );
+  });
+
+  test('activation fails closed for an unverified workspace while Cloud is unavailable', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-only', 'local-only', 'not canonical');
+    fixture.cloudReadStatus = 503;
+
+    await assert.rejects(
+      fixture.activate(false),
+      /requires Cloud or a verified local workspace/i,
+    );
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'local-only', 'SKILL.md'), 'utf8'),
+      /not canonical/,
+    );
+  });
+
+  test('activation preserves malformed Local evidence before restoring canonical Cloud', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'broken', 'broken', 'will become malformed');
+    fs.writeFileSync(path.join(fixture.skillsRoot, 'broken', 'SKILL.md'), 'not valid frontmatter');
+    const cloudPackage = createPackage(roots, 'cloud-a', 'cloud-a', 'canonical cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
+
+    await fixture.activate();
+
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.match(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'broken', 'SKILL.md'), 'utf8'),
+      /not valid frontmatter/,
+    );
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-a', 'SKILL.md'), 'utf8'),
+      /canonical cloud/,
+    );
+  });
+
+  test('activation snapshots Local when both Local and Cloud changed, then uses Cloud', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
+    await fixture.sync();
+    fs.writeFileSync(
+      path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'),
+      '---\nname: local-a\ndescription: unapproved local edit\n---\n',
+    );
+    const cloudPackage = createPackage(roots, 'cloud-b', 'cloud-b', 'owner approved cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    await fixture.activate();
+
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'local-a')), false);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-b', 'SKILL.md'), 'utf8'),
+      /owner approved cloud/,
+    );
+    assert.equal(readPendingSnapshot(fixture.runtimeRoot, fixture.botId).manifest.cloudRevision, 2);
+  });
+
+  test('activation snapshots a dirty parked workspace when switching back to its Bot', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
+    await fixture.sync();
+    const workspace = new BotSkillWorkspaceService(fixture.runtimeRoot, fixture.skillsRoot);
+    workspace.activate(fixture.botId);
+    fs.writeFileSync(
+      path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'),
+      '---\nname: local-a\ndescription: parked unapproved edit\n---\n',
+    );
+    workspace.activate('bot-b');
+    const returning = workspace.activate(fixture.botId);
+    assert.equal(returning.existed, true);
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    await fixture.activate(returning.existed);
+
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'local-a', 'SKILL.md'), 'utf8'),
+      /approved local/,
+    );
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.match(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'local-a', 'SKILL.md'), 'utf8'),
+      /parked unapproved edit/,
+    );
+  });
+
+  test('activation snapshots unscanned workspace files before a Cloud change removes them', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
+    await fixture.sync();
+    fs.writeFileSync(path.join(fixture.skillsRoot, 'README.md'), 'local operator notes');
+    fs.mkdirSync(path.join(fixture.skillsRoot, '.drafts'), { recursive: true });
+    fs.writeFileSync(path.join(fixture.skillsRoot, '.drafts', 'idea.md'), 'recoverable draft');
+    const cloudPackage = createPackage(roots, 'cloud-b', 'cloud-b', 'canonical cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+
+    await fixture.activate();
+
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'README.md')), false);
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.equal(snapshot.manifest.reason, 'activation_cloud_reconcile');
+    assert.equal(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'README.md'), 'utf8'),
+      'local operator notes',
+    );
+    assert.equal(
+      fs.readFileSync(path.join(snapshot.path, 'package', '.drafts', 'idea.md'), 'utf8'),
+      'recoverable draft',
+    );
+  });
+
+  test('activation snapshots files created while Cloud packages are downloading', async () => {
+    const fixture = createFixture(roots);
+    fs.rmSync(fixture.skillsRoot, { recursive: true, force: true });
+    const cloudPackage = createPackage(roots, 'cloud-a', 'cloud-a', 'canonical cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
+    fixture.onPackageDownload = () => {
+      fs.mkdirSync(fixture.skillsRoot, { recursive: true });
+      fs.writeFileSync(path.join(fixture.skillsRoot, 'late-draft.md'), 'created during download');
+      fixture.onPackageDownload = undefined;
+    };
+
+    await fixture.activate(false);
+
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'late-draft.md')), false);
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.equal(snapshot.manifest.sourcePath, fixture.skillsRoot);
+    assert.equal(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'late-draft.md'), 'utf8'),
+      'created during download',
+    );
+  });
+
+  test('activation fails closed for malformed Local while Cloud is unavailable', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'broken', 'broken', 'will become malformed');
+    fs.writeFileSync(path.join(fixture.skillsRoot, 'broken', 'SKILL.md'), 'not valid frontmatter');
+    fixture.cloudReadStatus = 503;
+
+    await assert.rejects(
+      fixture.activate(),
+      /requires Cloud or a verified local workspace/i,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'broken', 'SKILL.md'), 'utf8'),
+      'not valid frontmatter',
+    );
+  });
+
+  test('pending evidence dedupe rejects a snapshot whose package was corrupted', () => {
+    const fixture = createFixture(roots);
+    fs.writeFileSync(path.join(fixture.skillsRoot, 'README.md'), 'original evidence');
+    const first = snapshotPendingBotSkillWorkspace({
+      runtimeRoot: fixture.runtimeRoot,
+      botId: fixture.botId,
+      sourcePath: fixture.skillsRoot,
+      reason: 'activation_cloud_reconcile',
+      cloudRevision: 1,
+      now: () => new Date('2026-08-11T01:00:00.000Z'),
+    });
+    fs.writeFileSync(path.join(first.path, 'package', 'README.md'), 'corrupted evidence');
+
+    const second = snapshotPendingBotSkillWorkspace({
+      runtimeRoot: fixture.runtimeRoot,
+      botId: fixture.botId,
+      sourcePath: fixture.skillsRoot,
+      reason: 'activation_cloud_reconcile',
+      cloudRevision: 1,
+      now: () => new Date('2026-08-11T01:00:01.000Z'),
+    });
+
+    assert.equal(second.deduplicated, false);
+    assert.notEqual(second.path, first.path);
+    assert.equal(
+      fs.readFileSync(path.join(second.path, 'package', 'README.md'), 'utf8'),
+      'original evidence',
+    );
+  });
+
+  test('pending evidence refuses a workspace root symbolic link', () => {
+    const fixture = createFixture(roots);
+    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-bot-skills-external-'));
+    roots.push(external);
+    fs.writeFileSync(path.join(external, 'secret.txt'), 'must not be copied');
+    fs.rmSync(fixture.skillsRoot, { recursive: true, force: true });
+    fs.symlinkSync(external, fixture.skillsRoot, process.platform === 'win32' ? 'junction' : 'dir');
+
+    assert.throws(
+      () => snapshotPendingBotSkillWorkspace({
+        runtimeRoot: fixture.runtimeRoot,
+        botId: fixture.botId,
+        sourcePath: fixture.skillsRoot,
+        reason: 'activation_cloud_reconcile',
+        cloudRevision: 1,
+      }),
+      /symbolic link at its root/i,
+    );
+    assert.equal(
+      fs.existsSync(path.join(fixture.runtimeRoot, 'data', 'bot-skills', 'local-pending')),
+      false,
+    );
+  });
 });
 
 function createFixture(
@@ -1688,6 +2004,7 @@ function createFixture(
     patchStatus: 200,
     publicDownloadMisses: 0,
     packageDownloads: 0,
+    onPackageDownload: undefined as undefined | (() => Promise<void> | void),
     omitSkillsField: false,
     cloudModel: { kind: 'catalog', modelId: 'minimax-m3' } as BotDefinition['model'],
     cloudPrompt: { selected: 'default' } as NonNullable<BotDefinition['prompt']>,
@@ -1705,6 +2022,20 @@ function createFixture(
       skillHubBaseUrl: 'https://hub.test',
       definitionService,
     }).sync(),
+    activate: async (workspaceExisted = true) => new BotSkillSyncService({
+      runtimeRoot,
+      skillsRoot,
+      botId,
+      workspaceExisted,
+      auth: {
+        apiKey: 'bot-key',
+        httpBaseUrl: 'https://cats.test',
+        serverUrl: 'wss://cats.test',
+      },
+      fetchImpl,
+      skillHubBaseUrl: 'https://hub.test',
+      definitionService,
+    }).reconcileActivationFromCloudOnly(),
     finalize: async (input: {
       localSkillId: string;
       skillName: string;
@@ -1813,6 +2144,7 @@ function createFixture(
     if (url.hostname === 'hub.test' && method === 'GET') {
       assert.equal(new Headers(init?.headers).get('X-CatsCo-Bot-Id'), botId);
       fixture.packageDownloads += 1;
+      await fixture.onPackageDownload?.();
       const packageValue = [...fixture.packages.values()].find(item => (
         url.pathname.includes(item.reference.version)
         && url.pathname.includes(item.reference.skillId.split('/').at(-1) || '')
@@ -1829,6 +2161,21 @@ function createFixture(
   }
 
   return fixture;
+}
+
+function readPendingSnapshot(runtimeRoot: string, botId: string): {
+  path: string;
+  manifest: any;
+} {
+  const root = path.join(runtimeRoot, 'data', 'bot-skills', 'local-pending', botId);
+  const directories = fs.readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.tmp-'));
+  assert.equal(directories.length, 1);
+  const snapshotPath = path.join(root, directories[0].name);
+  return {
+    path: snapshotPath,
+    manifest: JSON.parse(fs.readFileSync(path.join(snapshotPath, 'manifest.json'), 'utf8')),
+  };
 }
 
 function writeFinalizeJournalFixture(input: {

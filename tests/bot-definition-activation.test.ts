@@ -96,6 +96,7 @@ describe('BotDefinition activation', () => {
       simulatedCloudRoot,
       env,
       fetchImpl,
+      prepareSkills: false,
     });
 
     assert.equal(prepared?.botId, 'bot-bravo');
@@ -117,7 +118,6 @@ describe('BotDefinition activation', () => {
       'GET /api.json',
       'GET /v1/models',
       'PUT /api/bot/definition/default-prompt',
-      'GET /api/bot/definition',
     ]);
   });
 
@@ -283,6 +283,7 @@ describe('BotDefinition activation', () => {
       simulatedCloudRoot,
       env,
       fetchImpl,
+      prepareSkills: false,
     });
 
     assert.equal(prepared?.cloudRevision, 2);
@@ -911,7 +912,13 @@ describe('BotDefinition activation', () => {
       return Response.json({ error: 'unexpected request' }, { status: 500 });
     }) as typeof fetch;
 
-    const prepared = await prepareBoundBotDefinition({ runtimeRoot, simulatedCloudRoot, env, fetchImpl });
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      prepareSkills: false,
+    });
     assert.deepStrictEqual(prepared?.definition.model, previous);
     assert.equal(prepared?.cloudRevision, undefined);
   });
@@ -959,7 +966,13 @@ describe('BotDefinition activation', () => {
       return Response.json({ error: 'unexpected request' }, { status: 500 });
     }) as typeof fetch;
 
-    const prepared = await prepareBoundBotDefinition({ runtimeRoot, simulatedCloudRoot, env, fetchImpl });
+    const prepared = await prepareBoundBotDefinition({
+      runtimeRoot,
+      simulatedCloudRoot,
+      env,
+      fetchImpl,
+      prepareSkills: false,
+    });
 
     assert.deepStrictEqual(prepared?.definition.model, customModel);
     assert.equal(prepared?.cloudRevision, undefined);
