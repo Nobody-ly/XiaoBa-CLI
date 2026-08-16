@@ -90,7 +90,20 @@ function existingRestoreWorkingPaths(): string[] {
 
 function isRestoreWorkingPath(candidatePath: string): boolean {
   const parent = path.dirname(PathResolver.getSkillsPath());
-  const relative = path.relative(parent, path.resolve(candidatePath));
+  if (isRestoreWorkingPathWithin(parent, candidatePath)) return true;
+
+  // A generic tool may reach a restore directory through a symlink/junction
+  // whose lexical path no longer carries the protected prefix. Resolve the
+  // longest existing prefix on both sides so aliases and not-yet-created
+  // children remain inside the same fail-closed boundary.
+  return isRestoreWorkingPathWithin(
+    realPathWithMissingTail(parent),
+    realPathWithMissingTail(candidatePath),
+  );
+}
+
+function isRestoreWorkingPathWithin(parentPath: string, candidatePath: string): boolean {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(candidatePath));
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
   const first = relative.split(path.sep)[0];
   return first.startsWith('.bot-skills-stage-') || first.startsWith('.bot-skills-backup-');
