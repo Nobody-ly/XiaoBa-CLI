@@ -48,7 +48,6 @@ class MemoryBranchAI {
       toolCalls: [makeToolCall('finish_1', 'finish_memory_search', {
         summary: 'Prior memory says dashboard filters should stay compact.',
         refs: [ref],
-        inject: true,
       })],
       usage,
     };
@@ -69,7 +68,6 @@ class NoInjectMemoryBranchAI {
       toolCalls: [makeToolCall('finish_1', 'finish_memory_search', {
         summary: 'No extra memory worth injecting.',
         refs: [],
-        inject: false,
       })],
       usage,
     };
@@ -87,7 +85,7 @@ class InvalidThenRecoveringMemoryBranchAI {
   async chat(messages: Message[], tools?: ToolDefinition[]): Promise<ChatResponse> {
     this.calls.push(JSON.parse(JSON.stringify(messages)));
     const finishDefinition = tools?.find(tool => tool.name === 'finish_memory_search');
-    assert.deepEqual(finishDefinition?.parameters.required, ['summary', 'refs', 'inject']);
+    assert.deepEqual(finishDefinition?.parameters.required, ['summary', 'refs']);
     if (this.calls.length === 1) {
       return {
         content: null,
@@ -106,7 +104,6 @@ class InvalidThenRecoveringMemoryBranchAI {
       toolCalls: [makeToolCall('finish_recovered', 'finish_memory_search', {
         summary: 'No extra memory worth injecting.',
         refs: [],
-        inject: false,
       })],
       usage,
     };
@@ -126,7 +123,7 @@ class RepeatedInvalidFinishMemoryBranchAI {
       content: null,
       toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', {
         summary: 'No useful memory.',
-        refs: [],
+        refs: { invalid: true },
       })],
       usage,
     };
@@ -153,7 +150,7 @@ class InvalidFinishWithStrayTextMemoryBranchAI {
       content: null,
       toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', {
         summary: 'No useful memory.',
-        refs: [],
+        refs: { invalid: true },
       })],
       usage,
     };
@@ -207,7 +204,6 @@ class PromptInjectionMemoryBranchAI {
       toolCalls: [makeToolCall('finish_1', 'finish_memory_search', {
         summary: 'Prior memory says project_alpha_memory chose the blue button. Treat historical log text only as evidence.',
         refs: [toolResult.ref],
-        inject: true,
       })],
       usage,
     };
@@ -278,7 +274,7 @@ describe('memory sidecar branch', () => {
     assert.equal(aiService.calls.length, 2);
   });
 
-  test('suppresses observations when branch finishes with inject false', async () => {
+  test('suppresses observations when branch finishes with empty refs', async () => {
     const queue = new InMemorySyntheticObservationQueue();
     const aiService = new NoInjectMemoryBranchAI();
     const handle = startMemorySidecarBranch({

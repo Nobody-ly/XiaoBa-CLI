@@ -21,9 +21,8 @@ describe('OpenAIProvider runtime feedback boundary', () => {
         properties: {
           summary: { type: 'string' },
           refs: { type: 'array', items: { type: 'string' } },
-          inject: { type: 'boolean' },
         },
-        required: ['summary', 'refs', 'inject'],
+        required: ['summary', 'refs'],
       },
     };
 
@@ -36,8 +35,8 @@ describe('OpenAIProvider runtime feedback boundary', () => {
       [finishTool],
     );
 
-    assert.deepStrictEqual(chatBody.tools[0].function.parameters.required, ['summary', 'refs', 'inject']);
-    assert.deepStrictEqual(responsesBody.tools[0].parameters.required, ['summary', 'refs', 'inject']);
+    assert.deepStrictEqual(chatBody.tools[0].function.parameters.required, ['summary', 'refs']);
+    assert.deepStrictEqual(responsesBody.tools[0].parameters.required, ['summary', 'refs']);
   });
 
   test('strips internal injected fields before building SDK messages', () => {
