@@ -15,7 +15,11 @@ const artifactBuilder = fs.readFileSync(
 
 test('stable releases publish a versioned worker artifact and manifest', () => {
   assert.match(releaseWorkflow, /build-worker:/);
-  assert.match(releaseWorkflow, /npm run --silent worker:artifact/);
+  assert.match(releaseWorkflow, /npm run --silent worker:artifact -- --manifest-output "\$raw_manifest"/);
+  assert.doesNotMatch(releaseWorkflow, /worker:artifact > "\$raw_manifest"/);
+  assert.match(artifactBuilder, /"--manifest-output": "manifestOutput"/);
+  assert.match(artifactBuilder, /fs\.writeFileSync\(manifestOutputPath, buildManifest/);
+  assert.match(artifactBuilder, /process\.stdout\.write\(buildManifest\)/);
   assert.match(releaseWorkflow, /release\/worker\/manifest\.json/);
   assert.match(releaseWorkflow, /path: release-worker/);
   assert.match(releaseWorkflow, /find release-worker -maxdepth 1 -type f ! -name manifest\.json -print0/);

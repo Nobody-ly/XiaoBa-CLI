@@ -347,7 +347,10 @@ jobs:
         run: |
           set -euo pipefail
           raw_manifest="$RUNNER_TEMP/worker-build-manifest.json"
-          npm run --silent worker:artifact > "$raw_manifest"
+          npm run --silent worker:artifact -- --manifest-output "$raw_manifest"
+          jq -e '
+            .artifactPath | type == "string" and length > 0
+          ' "$raw_manifest" >/dev/null
           artifact="$(jq -r '.artifactPath' "$raw_manifest")"
           test -f "$artifact"
           jq --arg artifact_file "$(basename "$artifact")" \
