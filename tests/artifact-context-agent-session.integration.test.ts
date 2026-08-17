@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { AgentSession, type AgentServices } from '../src/core/agent-session';
-import { createCatsCoMessageEnvelope, createExecutionScope } from '../src/catscompany/message-envelope';
+import { createCatsCoMessageEnvelope } from '../src/catscompany/message-envelope';
 import { buildTargetRoutes } from '../src/catscompany/runtime-context';
 import { createSessionRoute } from '../src/core/session-router';
 import { ToolManager } from '../src/tools/tool-manager';
@@ -15,7 +15,7 @@ const ARTIFACT_REF = `acr_${'a'.repeat(43)}`;
 const ARTIFACT_REF_PATTERN = /acr_[A-Za-z0-9_-]{43}/;
 
 describe('Artifact context ref AgentSession integration', { concurrency: false }, () => {
-  test('scopes a canonical ref to the current local shell turn only', async () => {
+  test('scopes a canonical ref to the current local turn only', async () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-artifact-ref-session-'));
     const originalCwd = process.cwd();
     process.chdir(workspace);
@@ -50,17 +50,16 @@ describe('Artifact context ref AgentSession integration', { concurrency: false }
         if (modelCall === 2) return finalResponse('local current done');
         if (modelCall === 3) return toolResponse('local-next', missingProbe);
         if (modelCall === 4) return finalResponse('local next done');
-        if (modelCall === 5) return toolResponse('remote-current', missingProbe, 'Alice');
         return finalResponse('remote done');
       },
     };
-    const toolManager = new ToolManager(workspace, {}, { enabledToolNames: ['execute_shell'] });
+    const toolManager = new ToolManager(workspace, {}, { enabledToolNames: ['execute_shell', 'read_file'] });
     const services: AgentServices = {
       aiService: aiService as any,
       toolManager,
       skillManager: skillManagerStub() as any,
     };
-    const session = new AgentSession(firstRoute.sessionKey, services, 'catscompany', firstRoute);
+    const session = new AgentSession('artifact-context-cli', services, 'cli', firstRoute);
     session.setSystemPromptProvider(() => 'integration system prompt');
 
     try {
@@ -77,11 +76,18 @@ describe('Artifact context ref AgentSession integration', { concurrency: false }
         },
       }));
 
-      const thirdEnvelope = envelopeForTurn(3, ARTIFACT_REF);
-      await session.handleMessage(thirdEnvelope.rawText, turnOptions(thirdEnvelope, {
-        callbacks: {
-          onToolEnd: (_name, _toolUseId, result) => toolResults.push(result),
+      const remoteResult = await toolManager.executeTool({
+        id: 'remote-current',
+        type: 'function',
+        function: {
+          name: 'read_file',
+          arguments: JSON.stringify({ file_path: 'README.md', target: 'Alice' }),
         },
+      }, [], {
+        workingDirectory: workspace,
+        conversationHistory: [],
+        surface: 'catscompany',
+        artifactContextRef: ARTIFACT_REF,
         targetRoutes: buildTargetRoutes([{
           userId: 'usr8',
           userName: 'Alice',
@@ -100,13 +106,14 @@ describe('Artifact context ref AgentSession integration', { concurrency: false }
             return { ok: true, content: 'remote missing' };
           },
         },
-      }));
+      });
 
       assert.match(toolResults[0], /active/);
       assert.match(toolResults[1], /missing/);
-      assert.match(toolResults[2], /remote missing/);
+      assert.equal(remoteResult.ok, true, JSON.stringify(remoteResult));
+      assert.match(String(remoteResult.content), /remote missing/);
       assert.equal(remoteRequests.length, 1);
-      assert.equal(providerRequests.length, 6);
+      assert.equal(providerRequests.length, 4);
       for (const request of providerRequests) {
         assert.doesNotMatch(JSON.stringify(request), ARTIFACT_REF_PATTERN);
       }
@@ -160,7 +167,6 @@ function turnOptions(envelope: MessageEnvelope, overrides: Record<string, unknow
   const route = routeForEnvelope(envelope);
   return {
     sessionRoute: route,
-    executionScope: createExecutionScope(envelope),
     artifactContextRef: envelope.artifactContextRef,
     localDeviceGrant: {
       kind: 'catscompany_body',
