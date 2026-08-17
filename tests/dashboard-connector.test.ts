@@ -25,13 +25,28 @@ test('real Connector Dashboard exposes four runtime states without local Bot man
   assert.doesNotMatch(html, /创建 Bot|选择 Bot|模型选择|System Prompt|Skill Hub|聊天输入/);
 });
 
+test('Connector local management restores channels and gives logs a full workspace', () => {
+  assert.match(html, /本地管理/);
+  assert.match(html, /通道与服务/);
+  assert.match(html, /运行日志/);
+  assert.match(html, /故障恢复/);
+  assert.match(html, /飞书/);
+  assert.match(html, /微信/);
+  assert.match(html, /service-logs/);
+  assert.match(script, /\/services\/\$\{encodeURIComponent\(name\)\}\/\$\{action\}/);
+  assert.match(script, /\/weixin\/qrcode/);
+  assert.match(script, /sanitizeLogLine/);
+  assert.match(styles, /\.log-viewer\s*\{[\s\S]*flex: 1 1 auto/);
+  assert.doesNotMatch(html, /<details class="diagnostics-panel"/);
+});
+
 test('Connector client uses real lifecycle APIs and remains syntax-valid', () => {
   assert.doesNotThrow(() => new vm.Script(script));
   assert.match(script, /\/cats\/bootstrap\/status/);
   assert.match(script, /\/cats\/auth\/login/);
   assert.match(script, /\/cats\/bootstrap/);
   assert.match(script, /\/cats\/auth\/logout/);
-  assert.match(script, /\/services\/catscompany\/logs/);
+  assert.match(script, /\/services\/\$\{encodeURIComponent\(service\)\}\/logs/);
   assert.match(script, /cats\.connected/);
   assert.match(script, /cats\.chatReady/);
   assert.match(script, /service\.status === 'running'/);

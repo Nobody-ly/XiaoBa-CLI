@@ -93,3 +93,11 @@ test('electron sends trusted CatsCo links to the system browser', () => {
   assert.match(electronMain, /shell\.openExternal\(target\.toString\(\)\)/);
   assert.match(electronMain, /return \{ action: 'deny' \}/);
 });
+
+test('electron opens trusted local diagnostics in a separate sandboxed window', () => {
+  assert.match(electronMain, /if \(isTrustedDashboardUrl\(url\)\)/);
+  assert.match(electronMain, /title: 'CatsCo Diagnostics'/);
+  assert.match(electronMain, /nodeIntegration: false/);
+  assert.match(electronMain, /contextIsolation: true/);
+  assert.match(electronMain, /sandbox: true/);
+});

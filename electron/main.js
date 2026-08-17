@@ -580,6 +580,23 @@ function createWindow() {
   mainWindow.loadURL(`http://127.0.0.1:${DASHBOARD_PORT}`);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isTrustedDashboardUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 1100,
+          height: 760,
+          minWidth: 820,
+          minHeight: 560,
+          title: 'CatsCo Diagnostics',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+          },
+        },
+      };
+    }
     try {
       const target = new URL(url);
       if (target.protocol === 'https:' && target.origin === 'https://app.catsco.cc') {

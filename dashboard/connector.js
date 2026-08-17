@@ -112,6 +112,13 @@
     actionBusy: false,
     fullPollTimer: null,
     bootstrapPollTimer: null,
+    managementOpen: false,
+    managementTab: 'services',
+    config: {},
+    weixinBinding: {},
+    serviceActionBusy: new Set(),
+    logPollTimer: null,
+    weixinPollTimer: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -161,6 +168,7 @@
       if (services.ok) state.services = Array.isArray(services.value) ? services.value : [];
       if (update.ok) state.update = update.value;
       render();
+      if (state.managementOpen) renderChannels();
     })();
     state.refreshInFlight = run;
     try {
@@ -373,14 +381,251 @@
     }
   }
 
+  const channelDefinitions = {
+    feishu: {
+      label: '飞书',
+      copy: '使用飞书 App 接入当前 CatsCo Agent。',
+      fields: [
+        ['FEISHU_APP_ID', 'App ID', false],
+        ['FEISHU_APP_SECRET', 'App Secret', true],
+        ['FEISHU_BOT_OPEN_ID', 'Bot Open ID', false],
+        ['FEISHU_BOT_ALIASES', '唤醒别名', false],
+      ],
+    },
+    weixin: {
+      label: '微信',
+      copy: '扫码授权后，将微信消息转交给当前 CatsCo Agent。',
+      fields: [['WEIXIN_TOKEN', 'Token', true]],
+    },
+  };
+
+  async function openManagement(tab = 'services') {
+    state.managementOpen = true;
+    $('connection-view').hidden = true;
+    $('management-open').hidden = true;
+    $('management-view').hidden = false;
+    $('management-view').closest('.primary-panel')?.classList.add('management-open');
+    switchManagementTab(tab);
+    await refreshManagementData();
+  }
+
+  function closeManagement() {
+    state.managementOpen = false;
+    $('management-view').hidden = true;
+    $('connection-view').hidden = false;
+    $('management-open').hidden = false;
+    $('management-view').closest('.primary-panel')?.classList.remove('management-open');
+    stopLogPolling();
+    stopWeixinPolling();
+  }
+
+  function switchManagementTab(tab) {
+    if (!['services', 'logs', 'recovery'].includes(tab)) return;
+    state.managementTab = tab;
+    document.querySelectorAll('[data-management-tab]').forEach((button) => {
+      const active = button.dataset.managementTab === tab;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-management-page]').forEach((page) => {
+      const active = page.dataset.managementPage === tab;
+      page.hidden = !active;
+      page.classList.toggle('active', active);
+    });
+    if (tab === 'logs') {
+      void loadLogs();
+      startLogPolling();
+    } else {
+      stopLogPolling();
+    }
+  }
+
+  async function refreshManagementData() {
+    const [config, binding, services] = await Promise.all([
+      settled('/config'),
+      settled('/weixin/channel-binding'),
+      settled('/services'),
+    ]);
+    if (config.ok) state.config = config.value || {};
+    if (binding.ok) state.weixinBinding = binding.value || {};
+    if (services.ok) state.services = Array.isArray(services.value) ? services.value : [];
+    renderChannels({ force: true });
+  }
+
+  function renderChannels(options = {}) {
+    const root = $('channel-list');
+    if (!root) return;
+    const editing = document.activeElement?.closest?.('.channel-config') || root.querySelector('.channel-config.dirty');
+    if (editing && !options.force) return;
+    const services = ['feishu', 'weixin'].map((name) => {
+      return state.services.find((service) => service.name === name) || { name, label: channelDefinitions[name].label, status: 'stopped' };
+    });
+    root.innerHTML = services.map(renderChannelCard).join('');
+  }
+
+  function renderChannelCard(service) {
+    const definition = channelDefinitions[service.name];
+    const running = service.status === 'running';
+    const busy = state.serviceActionBusy.has(service.name);
+    const statusText = running ? '运行中' : service.status === 'error' ? '异常' : '未运行';
+    const binding = service.name === 'weixin' && state.weixinBinding?.configured
+      ? `已绑定 ${state.weixinBinding.agentName || state.weixinBinding.agentUid || '当前 Agent'}`
+      : definition.copy;
+    const primaryAction = running ? 'stop' : 'start';
+    const primaryLabel = running ? '停止' : '启动';
+    return `<article class="channel-card ${escapeHtml(service.status || 'stopped')}" data-channel="${service.name}">
+      <div class="channel-main">
+        <div class="channel-identity">
+          <span class="channel-dot"></span>
+          <div><strong class="channel-name">${escapeHtml(definition.label)}</strong><small class="channel-meta">${escapeHtml(statusText)} · ${escapeHtml(binding)}</small></div>
+        </div>
+        <div class="channel-actions">
+          <button class="button button-small ${running ? 'button-quiet' : 'button-primary'}" type="button" data-service-action="${primaryAction}" data-service-name="${service.name}" ${busy ? 'disabled' : ''}>${busy ? '处理中…' : primaryLabel}</button>
+          ${running ? `<button class="button button-small button-quiet" type="button" data-service-action="restart" data-service-name="${service.name}" ${busy ? 'disabled' : ''}>重启</button>` : ''}
+          <button class="button button-small button-quiet" type="button" data-service-log="${service.name}">日志</button>
+        </div>
+      </div>
+      ${service.lastError ? `<p class="channel-error">${escapeHtml(service.lastError)}</p>` : ''}
+      ${renderChannelConfig(service.name)}
+    </article>`;
+  }
+
+  function renderChannelConfig(name) {
+    const definition = channelDefinitions[name];
+    const fields = definition.fields.map(([key, label, sensitive]) => {
+      const value = state.config?.[key] || '';
+      return `<label><span>${escapeHtml(label)}</span><input data-config-key="${key}" type="${sensitive ? 'password' : 'text'}" value="${escapeHtml(value)}" autocomplete="off"></label>`;
+    }).join('');
+    return `<details class="channel-config">
+      <summary>连接配置</summary>
+      <div class="channel-config-body">
+        ${fields}
+        ${name === 'weixin' ? '<div class="weixin-authorize" id="weixin-authorize" hidden></div>' : ''}
+        <div class="channel-config-actions">
+          <span class="channel-config-note">凭证仅保存在本机</span>
+          <div class="channel-actions">
+            ${name === 'weixin' ? '<button class="button button-small button-secondary" type="button" data-weixin-authorize>微信扫码授权</button>' : ''}
+            <button class="button button-small button-secondary" type="button" data-config-save="${name}">保存配置</button>
+          </div>
+        </div>
+      </div>
+    </details>`;
+  }
+
+  async function serviceAction(name, action) {
+    if (!channelDefinitions[name] || state.serviceActionBusy.has(name)) return;
+    state.serviceActionBusy.add(name);
+    renderChannels({ force: true });
+    try {
+      await request(`/services/${encodeURIComponent(name)}/${action}`, { method: 'POST', body: '{}' });
+      showToast(`${channelDefinitions[name].label}服务已${action === 'stop' ? '停止' : action === 'restart' ? '重启' : '启动'}`);
+    } catch (error) {
+      const failedChecks = error?.data?.preflight?.checks?.filter((check) => check.status === 'fail') || [];
+      const detail = failedChecks.map((check) => check.message).slice(0, 2).join('；');
+      showToast(`${channelDefinitions[name].label}操作失败：${detail || humanError(error)}`);
+    } finally {
+      state.serviceActionBusy.delete(name);
+      await refreshManagementData();
+    }
+  }
+
+  async function saveChannelConfig(name, button) {
+    const card = document.querySelector(`[data-channel="${name}"]`);
+    if (!card) return;
+    const updates = {};
+    card.querySelectorAll('[data-config-key]').forEach((input) => { updates[input.dataset.configKey] = input.value.trim(); });
+    button.disabled = true;
+    button.textContent = '保存中…';
+    try {
+      await request('/config', { method: 'PUT', body: JSON.stringify(updates) });
+      showToast(`${channelDefinitions[name].label}配置已保存到本机`);
+      await refreshManagementData();
+    } catch (error) {
+      showToast(`保存失败：${humanError(error)}`);
+    } finally {
+      button.disabled = false;
+      button.textContent = '保存配置';
+    }
+  }
+
+  async function beginWeixinAuthorization() {
+    stopWeixinPolling();
+    const panel = $('weixin-authorize');
+    if (!panel) return;
+    panel.hidden = false;
+    panel.innerHTML = '<span>正在获取微信二维码……</span>';
+    try {
+      const data = await request('/weixin/qrcode');
+      const imageUrl = String(data.qrcode_img_content || '');
+      panel.innerHTML = `${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="微信授权二维码">` : ''}<div><strong>请使用微信扫码授权</strong><small>授权将绑定到 ${escapeHtml(data.agent?.name || data.agent?.username || data.agent_uid || '当前 Agent')}</small></div>`;
+      state.weixinPollTimer = setInterval(() => pollWeixinAuthorization(data.qrcode, data.agent_uid), 2000);
+    } catch (error) {
+      panel.innerHTML = `<span class="channel-error">获取二维码失败：${escapeHtml(humanError(error))}</span>`;
+    }
+  }
+
+  async function pollWeixinAuthorization(qrcode, agentUid) {
+    try {
+      const data = await request(`/weixin/qrcode-status?qrcode=${encodeURIComponent(qrcode)}&agent_uid=${encodeURIComponent(agentUid || '')}`);
+      if (data.status === 'confirmed' && data.token_saved) {
+        stopWeixinPolling();
+        showToast('微信授权成功');
+        await refreshManagementData();
+      } else if (data.status === 'expired') {
+        stopWeixinPolling();
+        const panel = $('weixin-authorize');
+        if (panel) panel.innerHTML = '<span class="channel-error">二维码已过期，请重新获取。</span>';
+      }
+    } catch (error) {
+      stopWeixinPolling();
+      const panel = $('weixin-authorize');
+      if (panel) panel.innerHTML = `<span class="channel-error">微信授权失败：${escapeHtml(humanError(error))}</span>`;
+    }
+  }
+
+  function stopWeixinPolling() {
+    if (state.weixinPollTimer) clearInterval(state.weixinPollTimer);
+    state.weixinPollTimer = null;
+  }
+
   async function loadLogs() {
-    const output = $('connector-logs');
+    const output = $('service-logs');
+    if (!output) return;
+    const service = $('log-service-select')?.value || 'catscompany';
     output.textContent = '正在读取日志…';
     try {
-      const logs = await request('/services/catscompany/logs?lines=120');
-      output.textContent = Array.isArray(logs) && logs.length ? logs.join('\n') : '暂时没有 Connector 日志。';
+      const logs = await request(`/services/${encodeURIComponent(service)}/logs?lines=300`);
+      const text = Array.isArray(logs) && logs.length ? logs.map(sanitizeLogLine).join('\n') : '暂时没有运行日志。';
+      output.textContent = text;
+      if ($('log-auto-scroll')?.checked) output.scrollTop = output.scrollHeight;
     } catch (error) {
       output.textContent = `日志读取失败：${humanError(error)}`;
+    }
+  }
+
+  function sanitizeLogLine(line) {
+    return String(line == null ? '' : line)
+      .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\r/g, '');
+  }
+
+  function startLogPolling() {
+    stopLogPolling();
+    state.logPollTimer = setInterval(loadLogs, 3000);
+  }
+
+  function stopLogPolling() {
+    if (state.logPollTimer) clearInterval(state.logPollTimer);
+    state.logPollTimer = null;
+  }
+
+  async function copyLogs() {
+    try {
+      await navigator.clipboard.writeText($('service-logs')?.textContent || '');
+      showToast('日志已复制');
+    } catch (_error) {
+      showToast('复制失败，请在日志框中手动选择复制');
     }
   }
 
@@ -391,7 +636,7 @@
       state.cats = {};
       state.bootstrap = { stage: 'waiting_for_login' };
       await refresh({ force: true });
-      $('diagnostics').open = false;
+      closeManagement();
     } catch (error) {
       showToast(`退出失败：${humanError(error)}`);
     }
@@ -427,6 +672,16 @@
     return text.length > 18 ? `${text.slice(0, 9)}…${text.slice(-5)}` : text;
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[character]);
+  }
+
   let toastTimer;
   function showToast(message) {
     const toast = $('toast');
@@ -440,10 +695,39 @@
   $('refresh-button').addEventListener('click', () => refresh({ force: true }));
   $('retry-button').addEventListener('click', retry);
   $('diagnostic-retry').addEventListener('click', retry);
-  $('logs-button').addEventListener('click', loadLogs);
   $('logout-button').addEventListener('click', logout);
   $('update-button').addEventListener('click', checkUpdate);
-  $('diagnostics').addEventListener('toggle', () => { if ($('diagnostics').open) void loadLogs(); });
+  $('management-open').addEventListener('click', () => { void openManagement(); });
+  $('management-back').addEventListener('click', closeManagement);
+  $('services-refresh').addEventListener('click', refreshManagementData);
+  $('logs-refresh').addEventListener('click', loadLogs);
+  $('logs-copy').addEventListener('click', copyLogs);
+  $('log-service-select').addEventListener('change', loadLogs);
+  document.querySelectorAll('[data-management-tab]').forEach((button) => {
+    button.addEventListener('click', () => switchManagementTab(button.dataset.managementTab));
+  });
+  $('channel-list').addEventListener('click', (event) => {
+    const actionButton = event.target.closest('[data-service-action]');
+    if (actionButton) {
+      void serviceAction(actionButton.dataset.serviceName, actionButton.dataset.serviceAction);
+      return;
+    }
+    const logButton = event.target.closest('[data-service-log]');
+    if (logButton) {
+      $('log-service-select').value = logButton.dataset.serviceLog;
+      switchManagementTab('logs');
+      return;
+    }
+    const saveButton = event.target.closest('[data-config-save]');
+    if (saveButton) {
+      void saveChannelConfig(saveButton.dataset.configSave, saveButton);
+      return;
+    }
+    if (event.target.closest('[data-weixin-authorize]')) void beginWeixinAuthorization();
+  });
+  $('channel-list').addEventListener('input', (event) => {
+    event.target.closest('.channel-config')?.classList.add('dirty');
+  });
 
   void refresh({ force: true });
 })();
