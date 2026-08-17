@@ -23,6 +23,7 @@ export const SKILLHUB_THIN_RPC_TOOLS = {
   workspace: 'skillhub.localWorkspace.get',
   share: 'skillhub.localSkill.share',
   finalize: 'skillhub.localSkill.finalize',
+  delete: 'skillhub.localSkill.delete',
   switchBot: 'skillhub.localBot.switch',
 } as const;
 
@@ -145,6 +146,8 @@ export class SkillHubThinRpcHandler {
         return this.shareSkill(botUid, scope.ownerUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.finalize:
         return this.finalizeSkill(botUid, payload, request);
+      case SKILLHUB_THIN_RPC_TOOLS.delete:
+        return this.deleteSkill(botUid, payload, request);
       default:
         throw new SkillHubThinRpcError('TOOL_NOT_FOUND', 'Unsupported SkillHub device operation.');
     }
@@ -361,6 +364,88 @@ export class SkillHubThinRpcHandler {
       version,
       content_hash: contentHash,
       direction: result?.direction || 'none',
+    };
+  }
+
+  private async deleteSkill(
+    botUid: string,
+    payload: Record<string, unknown>,
+    request: CatsThinToolRpcMessage,
+  ): Promise<Record<string, unknown>> {
+    const localSkillId = requiredText(payload.local_skill_id, 'local_skill_id', MAX_NAME_LENGTH);
+    const removed = await withCurrentBotSkillWorkspaceWrite((context) => {
+      this.assertOperational(request);
+      this.assertRequestScope(request, botUid, true);
+      this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
+
+      const rejected: SkillHubWorkspaceValidationFailure[] = [];
+      const entries = scanSkillHubWorkspace(context.skillsRoot, {
+        onValidationFailure: failure => rejected.push(failure),
+      });
+      const candidates = [
+        ...entries.map(entry => ({
+          localSkillId: entry.localSkillId,
+          name: entry.name,
+          installName: entry.installName,
+          path: entry.path,
+        })),
+        ...rejected.map(entry => ({
+          localSkillId: entry.localSkillId,
+          name: entry.name,
+          installName: entry.installName,
+          path: entry.path,
+        })),
+      ];
+      const entry = candidates.find(candidate => candidate.localSkillId === localSkillId);
+      if (!entry) {
+        throw new SkillHubThinRpcError(
+          'LOCAL_SKILL_NOT_FOUND',
+          'The selected local Skill no longer exists.',
+        );
+      }
+
+      const root = fs.realpathSync(context.skillsRoot);
+      const entryStat = fs.lstatSync(entry.path);
+      if (entryStat.isSymbolicLink() || !entryStat.isDirectory()) {
+        throw new SkillHubThinRpcError(
+          'LOCAL_SKILL_UNSAFE',
+          'The selected local Skill is not a safe directory.',
+        );
+      }
+      const realEntry = fs.realpathSync(entry.path);
+      const relative = path.relative(root, realEntry);
+      if (!relative || relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
+        throw new SkillHubThinRpcError(
+          'LOCAL_SKILL_UNSAFE',
+          'The selected local Skill is outside the active Skill workspace.',
+        );
+      }
+      const nested = candidates.find(candidate => (
+        candidate.localSkillId !== localSkillId
+        && path.resolve(candidate.path).startsWith(`${path.resolve(entry.path)}${path.sep}`)
+      ));
+      if (nested) {
+        throw new SkillHubThinRpcError(
+          'LOCAL_SKILL_CONTAINS_SKILLS',
+          'The selected local Skill contains another Skill directory and cannot be deleted safely.',
+        );
+      }
+
+      fs.rmSync(realEntry, { recursive: true, force: false });
+      return {
+        localSkillId,
+        name: entry.name,
+        relativePath: entry.installName,
+      };
+    }, { runtimeRoot: this.runtimeRoot });
+
+    return {
+      schema: 'xiaoba.skillhub.local_delete.v1',
+      bot_uid: botUid,
+      local_skill_id: removed.localSkillId,
+      name: removed.name,
+      relative_path: removed.relativePath,
+      deleted: true,
     };
   }
 
