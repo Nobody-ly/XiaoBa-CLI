@@ -6,6 +6,7 @@ import { createApiRouter } from './routes/api';
 import { ServiceManager } from './service-manager';
 import { bootstrapDefaultSkillHubSkillsOnce } from '../skillhub/default-skill-bootstrap';
 import { createDashboardAuth } from './auth';
+import { CatsConnectorAutoStart } from './cats-connector-autostart';
 
 const DEFAULT_PORT = 3800;
 const activeServers: Server[] = [];
@@ -48,19 +49,27 @@ export async function startDashboard(
   const dashboardAuth = createDashboardAuth({
     apiKey: dashboardApiKey || undefined,
   });
+  const catsConnectorAutoStart = new CatsConnectorAutoStart({
+    port,
+    apiKey: dashboardApiKey || undefined,
+  });
 
   // API routes (with auth protection)
   app.use('/api', dashboardAuth.middleware, createApiRouter(serviceManager, controllers.updateController, {
     getAuthStatus: dashboardAuth.getStatus,
+    catsConnectorAutoStart,
   }));
 
   // Serve frontend
   const frontendPath = path.join(__dirname, '../../dashboard');
+  app.get('/', (_req, res) => {
+    res.sendFile(path.join(frontendPath, 'connector.html'));
+  });
   app.use(express.static(frontendPath));
 
   // SPA fallback
   app.use((_req, res) => {
-    res.sendFile(path.join(frontendPath, 'index.html'));
+    res.sendFile(path.join(frontendPath, 'connector.html'));
   });
 
   // 优雅退出
@@ -74,11 +83,12 @@ export async function startDashboard(
   });
 
   const server = app.listen(port, '127.0.0.1', () => {
-    Logger.success(`\nCatsCo Dashboard started`);
+    Logger.success(`\nCatsCo Connector started`);
     if (dashboardApiKey) {
       Logger.info(`API authentication enabled — provide DASHBOARD_API_KEY as Bearer token or X-API-Key header`);
     }
     Logger.info(`Open browser: http://127.0.0.1:${port} or http://localhost:${port}\n`);
+    catsConnectorAutoStart.schedule('startup', 100);
   });
   activeServers.push(server);
 
@@ -90,6 +100,7 @@ export async function startDashboard(
 
   return {
     async stop(): Promise<void> {
+      catsConnectorAutoStart.stop();
       serviceManager.stopAll();
       await Promise.all(activeServers.splice(0).map(closeServer));
     },

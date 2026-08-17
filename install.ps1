@@ -105,7 +105,7 @@ function Create-Launcher {
 @"
 @echo off
 cd /d "%~dp0"
-echo 正在启动 CatsCo Dashboard...
+echo 正在启动 CatsCo Connector...
 start http://localhost:$DashboardPort
 npx tsx src/index.ts dashboard
 "@ | Out-File -FilePath $launcher -Encoding ASCII
@@ -115,7 +115,7 @@ npx tsx src/index.ts dashboard
     try {
         $desktop = [Environment]::GetFolderPath("Desktop")
         $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut("$desktop\CatsCo Dashboard.lnk")
+        $shortcut = $shell.CreateShortcut("$desktop\CatsCo Connector.lnk")
         $shortcut.TargetPath = $launcher
         $shortcut.WorkingDirectory = $InstallDir
         $shortcut.IconLocation = "shell32.dll,21"
@@ -143,7 +143,7 @@ Write-Host "  CatsCo 安装完成！" -ForegroundColor Green
 Write-Host "════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "  安装目录: $InstallDir"
-Write-Host "  启动方式: 双击桌面 'CatsCo Dashboard' 快捷方式"
+Write-Host "  启动方式: 双击桌面 'CatsCo Connector' 快捷方式"
 Write-Host "  或运行:   $InstallDir\start.bat"
 Write-Host "  Dashboard: http://localhost:$DashboardPort"
 Write-Host ""

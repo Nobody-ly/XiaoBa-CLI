@@ -70,7 +70,7 @@ function main() {
 
   program
     .command('dashboard')
-    .description('Start the CatsCo Dashboard')
+    .description('Start the CatsCo Connector')
     .option('-p, --port <port>', 'Specify the port number', '3800')
     .action(async (options) => {
       const { dashboardCommand } = await import('./commands/dashboard');

@@ -1,0 +1,371 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import vm from 'node:vm';
+import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
+import { CatsConnectorAutoStart } from '../src/dashboard/cats-connector-autostart';
+
+const dashboardDir = join(process.cwd(), 'dashboard');
+const html = readFileSync(join(dashboardDir, 'connector.html'), 'utf-8');
+const script = readFileSync(join(dashboardDir, 'connector.js'), 'utf-8');
+const styles = readFileSync(join(dashboardDir, 'connector.css'), 'utf-8');
+const serverSource = readFileSync(join(process.cwd(), 'src/dashboard/server.ts'), 'utf-8');
+
+test('real Connector Dashboard exposes four runtime states without local Bot management', () => {
+  assert.match(html, /CatsCo Connector/);
+  assert.match(html, /登录并连接/);
+  assert.match(html, /正在连接这台电脑/);
+  assert.match(script, /这台电脑已连接/);
+  assert.match(html, /自动连接未完成/);
+  assert.match(html, /可以直接关闭此窗口/);
+  assert.doesNotMatch(html, /打开旧版控制台/);
+  assert.doesNotMatch(html, /CONNECT THIS COMPUTER|READY FOR CATSCO/);
+  assert.doesNotMatch(html, /创建 Bot|选择 Bot|模型选择|System Prompt|Skill Hub|聊天输入/);
+});
+
+test('Connector client uses real lifecycle APIs and remains syntax-valid', () => {
+  assert.doesNotThrow(() => new vm.Script(script));
+  assert.match(script, /\/cats\/bootstrap\/status/);
+  assert.match(script, /\/cats\/auth\/login/);
+  assert.match(script, /\/cats\/bootstrap/);
+  assert.match(script, /\/cats\/auth\/logout/);
+  assert.match(script, /\/services\/catscompany\/logs/);
+  assert.match(script, /cats\.connected/);
+  assert.match(script, /cats\.chatReady/);
+  assert.match(script, /service\.status === 'running'/);
+  assert.match(script, /bodyStatus\?\.state !== 'offline'/);
+});
+
+test('Connector Dashboard is the real root and uses a viewport-bound desktop layout', () => {
+  assert.match(serverSource, /app\.get\('\/',[\s\S]*connector\.html/);
+  assert.match(serverSource, /SPA fallback[\s\S]*connector\.html/);
+  assert.match(styles, /body\[data-view="ready"\]/);
+  assert.match(styles, /html, body \{[^}]*height: 100%[^}]*overflow: hidden/s);
+  assert.match(styles, /@media \(max-height: 700px\)/);
+});
+
+test('background bootstrap waits for login without making network requests', async () => {
+  const runtimeRoot = mkdtempSync(join(tmpdir(), 'catsco-connector-auth-'));
+  let calls = 0;
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error('unexpected network request');
+      },
+    });
+    const snapshot = await controller.run('test');
+    assert.equal(snapshot.stage, 'waiting_for_login');
+    assert.equal(calls, 0);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('background bootstrap provisions once without rotating legacy relay credentials', async () => {
+  const runtimeRoot = mkdtempSync(join(tmpdir(), 'catsco-connector-setup-'));
+  const configDir = join(runtimeRoot, '.xiaoba');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, 'catsco.json'), JSON.stringify({
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test', username: 'tester' },
+    endpoints: { httpBaseUrl: 'https://app.catsco.cc', serverUrl: 'wss://app.catsco.cc/v0/channels' },
+    preferences: { autoConnect: true },
+  }), 'utf-8');
+
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async (input, init) => {
+        const url = String(input);
+        requests.push({ url, init });
+        if (url.endsWith('/cats/status')) {
+          return new Response(JSON.stringify({ connected: true, bodyConfigured: false, configured: false, service: { status: 'stopped' } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/cats/setup')) {
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ error: 'unexpected request' }), { status: 500 });
+      },
+    });
+
+    const snapshot = await controller.run('test');
+    assert.equal(snapshot.stage, 'connected');
+    assert.equal(requests.filter((item) => item.url.endsWith('/cats/setup')).length, 1);
+    const setupRequest = requests.find((item) => item.url.endsWith('/cats/setup'));
+    assert.deepEqual(JSON.parse(String(setupRequest?.init?.body)), { setupRelayModel: false });
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('background bootstrap uses the fast start path for an existing binding', async () => {
+  const runtimeRoot = mkdtempSync(join(tmpdir(), 'catsco-connector-start-'));
+  const configDir = join(runtimeRoot, '.xiaoba');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, 'catsco.json'), JSON.stringify({
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    currentBot: {
+      uid: 'bot-test',
+      apiKey: 'test-bot-key',
+      boundByUserUid: 'usr-test',
+      bindingSource: 'test',
+    },
+    device: { deviceId: 'device-test', bodyId: 'device-test', installationId: 'device-test' },
+    preferences: { autoConnect: true },
+  }), 'utf-8');
+
+  const paths: string[] = [];
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async (input) => {
+        const url = String(input);
+        paths.push(url);
+        if (url.endsWith('/cats/status')) {
+          return new Response(JSON.stringify({ connected: true, bodyConfigured: true, configured: true, service: { status: 'stopped' } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/cats/connector/start')) {
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response('{}', { status: 500 });
+      },
+    });
+    const snapshot = await controller.run('startup');
+    assert.equal(snapshot.stage, 'connected');
+    assert.equal(paths.some((url) => url.endsWith('/cats/connector/start')), true);
+    assert.equal(paths.some((url) => url.endsWith('/cats/setup')), false);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('background bootstrap is a no-op when the Connector is already running', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-running-', {
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    preferences: { autoConnect: true },
+  });
+  const paths: string[] = [];
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async (input) => {
+        paths.push(String(input));
+        return jsonResponse({ connected: true, configured: true, service: { status: 'running' } });
+      },
+    });
+    const snapshot = await controller.run('startup');
+    assert.equal(snapshot.stage, 'connected');
+    assert.equal(paths.filter((url) => url.endsWith('/cats/status')).length, 1);
+    assert.equal(paths.some((url) => /\/cats\/(setup|connector\/start)$/.test(url)), false);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('invalid CatsCo login never provisions or starts a Connector', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-invalid-auth-', {
+    version: 1,
+    account: { token: 'expired-token', uid: 'usr-test' },
+    preferences: { autoConnect: true },
+  });
+  const paths: string[] = [];
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async (input) => {
+        paths.push(String(input));
+        return jsonResponse({ connected: false, authStatus: 'invalid', authError: '登录已过期' });
+      },
+    });
+    const snapshot = await controller.run('startup');
+    assert.equal(snapshot.stage, 'waiting_for_login');
+    assert.equal(snapshot.error, '登录已过期');
+    assert.equal(paths.some((url) => /\/cats\/(setup|connector\/start)$/.test(url)), false);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('disabled auto-connect performs no loopback requests unless forced', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-disabled-', {
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    preferences: { autoConnect: false },
+  });
+  let calls = 0;
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonResponse({});
+      },
+    });
+    const snapshot = await controller.run('startup');
+    assert.equal(snapshot.stage, 'disabled');
+    assert.equal(calls, 0);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('concurrent identical bootstrap triggers share one setup attempt', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-singleflight-', {
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    preferences: { autoConnect: true },
+  });
+  const setup = deferred<Response>();
+  let statusCalls = 0;
+  let setupCalls = 0;
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/cats/status')) {
+          statusCalls += 1;
+          return jsonResponse({ connected: true, bodyConfigured: false, configured: false, service: { status: 'stopped' } });
+        }
+        if (url.endsWith('/cats/setup')) {
+          setupCalls += 1;
+          return setup.promise;
+        }
+        return jsonResponse({ error: 'unexpected request' }, 500);
+      },
+    });
+    const runs = Array.from({ length: 10 }, () => controller.run('startup'));
+    await waitFor(() => setupCalls === 1);
+    setup.resolve(jsonResponse({ ok: true }));
+    const snapshots = await Promise.all(runs);
+    assert.equal(snapshots.every((snapshot) => snapshot.stage === 'connected'), true);
+    assert.equal(statusCalls, 1);
+    assert.equal(setupCalls, 1);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('logout during setup fences the stale run and stops any late Connector', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-logout-race-', {
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    preferences: { autoConnect: true },
+  });
+  const setup = deferred<Response>();
+  let setupCalls = 0;
+  let stopCalls = 0;
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/cats/status')) {
+          return jsonResponse({ connected: true, bodyConfigured: false, configured: false, service: { status: 'stopped' } });
+        }
+        if (url.endsWith('/cats/setup')) {
+          setupCalls += 1;
+          return setup.promise;
+        }
+        if (url.endsWith('/cats/connector/stop')) {
+          stopCalls += 1;
+          return jsonResponse({ ok: true });
+        }
+        return jsonResponse({ error: 'unexpected request' }, 500);
+      },
+    });
+
+    const staleRun = controller.run('startup');
+    await waitFor(() => setupCalls === 1);
+    createCatsCoLocalConfigService({ runtimeRoot }).clearAccount();
+    controller.invalidateAndSchedule('logout');
+    setup.resolve(jsonResponse({ ok: true }));
+    await staleRun;
+    await waitFor(() => controller.getSnapshot().stage === 'waiting_for_login' && stopCalls === 1);
+    assert.equal(controller.getSnapshot().trigger, 'logout');
+    assert.equal(stopCalls, 1);
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('loopback bootstrap requests include the configured Dashboard API key', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-api-key-', {
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    preferences: { autoConnect: true },
+  });
+  const headers: Headers[] = [];
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      apiKey: 'dashboard-test-key',
+      runtimeRoot,
+      fetchImpl: async (_input, init) => {
+        headers.push(new Headers(init?.headers));
+        return jsonResponse({ connected: true, configured: true, service: { status: 'running' } });
+      },
+    });
+    await controller.run('startup');
+    assert.equal(headers.length, 1);
+    assert.equal(headers[0].get('X-API-Key'), 'dashboard-test-key');
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+function createRuntimeConfig(prefix: string, value: Record<string, unknown>): string {
+  const runtimeRoot = mkdtempSync(join(tmpdir(), prefix));
+  const configDir = join(runtimeRoot, '.xiaoba');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, 'catsco.json'), JSON.stringify(value), 'utf-8');
+  return runtimeRoot;
+}
+
+function jsonResponse(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
