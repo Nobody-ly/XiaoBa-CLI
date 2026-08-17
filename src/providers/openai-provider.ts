@@ -1076,6 +1076,8 @@ export class OpenAIProvider implements AIProvider {
     const providerType = String(details?.type || '').trim();
     const code = providerCode || providerType;
     const statusByCode: Record<string, number> = {
+      internal_error: 500,
+      internal_server_error: 500,
       server_error: 500,
       rate_limit_exceeded: 429,
       overloaded_error: 529,
@@ -1571,23 +1573,40 @@ export class OpenAIProvider implements AIProvider {
 
   private async normalizeProviderErrorResponse(error: unknown): Promise<unknown> {
     const response = (error as any)?.response;
-    const data = response?.data;
-    if (!response || !isReadableErrorStream(data)) return error;
+    if (!response) return error;
 
-    const text = await readProviderErrorStream(data);
-    const normalizedData = parseProviderErrorBody(text);
-    try {
-      response.data = normalizedData;
-    } catch {
+    let normalizedData = response.data;
+    if (isReadableErrorStream(normalizedData)) {
+      const text = await readProviderErrorStream(normalizedData);
+      normalizedData = parseProviderErrorBody(text);
       try {
-        Object.defineProperty(error as object, 'response', {
-          value: { ...response, data: normalizedData },
-          configurable: true,
-          writable: true,
-        });
+        response.data = normalizedData;
       } catch {
-        // Error normalization is best-effort and must never replace the provider failure.
+        try {
+          Object.defineProperty(error as object, 'response', {
+            value: { ...response, data: normalizedData },
+            configurable: true,
+            writable: true,
+          });
+        } catch {
+          // Error normalization is best-effort and must never replace the provider failure.
+        }
       }
+    }
+
+    const mutableError = error as any;
+    const normalizedStatus = Number(response.status ?? normalizedData?.status ?? normalizedData?.status_code);
+    const details = normalizedData?.error && typeof normalizedData.error === 'object'
+      ? normalizedData.error
+      : normalizedData;
+    const providerCode = typeof details?.code === 'string' ? details.code.trim() : '';
+    const providerType = typeof details?.type === 'string' ? details.type.trim() : '';
+    try {
+      if (Number.isFinite(normalizedStatus) && normalizedStatus > 0) mutableError.status = normalizedStatus;
+      if (providerCode && !mutableError.providerCode) mutableError.providerCode = providerCode;
+      if (providerType && !mutableError.providerType) mutableError.providerType = providerType;
+    } catch {
+      // Preserve the original provider error when it is non-extensible.
     }
     return error;
   }

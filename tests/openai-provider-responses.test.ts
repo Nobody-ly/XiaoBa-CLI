@@ -574,6 +574,37 @@ describe('OpenAIProvider Responses API mode', () => {
     }
   });
 
+  test('maps an internal_server_error terminal failure to a retryable HTTP status', async () => {
+    const originalPost = axios.post;
+    (axios as any).post = async () => ({
+      data: Readable.from([sse({
+        type: 'response.failed',
+        response: {
+          id: 'resp_internal_failure',
+          status: 'failed',
+          error: {
+            code: 'internal_server_error',
+            message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
+          },
+        },
+      })]),
+    });
+
+    try {
+      await assert.rejects(
+        createProvider().chatStream([{ role: 'user', content: 'hello' }]),
+        (error: any) => (
+          error?.code === 'internal_server_error'
+          && error?.providerCode === 'internal_server_error'
+          && error?.status === 500
+          && error?.terminalEvent === 'response.failed'
+        ),
+      );
+    } finally {
+      (axios as any).post = originalPost;
+    }
+  });
+
   test('preserves the response header request ID when a terminal failure has none', async () => {
     const originalPost = axios.post;
     (axios as any).post = async () => ({
@@ -752,6 +783,63 @@ describe('OpenAIProvider Responses API mode', () => {
       assert.equal(bodies[0].prompt_cache_key, bodies[1].prompt_cache_key);
       assert.equal(requestHeaders[0].session_id, requestHeaders[1].session_id);
       assert.equal(requestHeaders[0]['x-client-request-id'], requestHeaders[1]['x-client-request-id']);
+    } finally {
+      (axios as any).post = originalPost;
+      if (originalRetries === undefined) delete process.env.CATSCO_MODEL_RETRY_MAX_RETRIES;
+      else process.env.CATSCO_MODEL_RETRY_MAX_RETRIES = originalRetries;
+    }
+  });
+
+  test('retries a streamed Axios 502 after normalizing its error body and status', async () => {
+    const originalPost = axios.post;
+    const originalRetries = process.env.CATSCO_MODEL_RETRY_MAX_RETRIES;
+    let attempts = 0;
+    (axios as any).post = async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error('Request failed with status code 502'), {
+          code: 'ERR_BAD_RESPONSE',
+          response: {
+            status: '502',
+            headers: { 'retry-after': '0' },
+            data: Readable.from([JSON.stringify({
+              error: {
+                code: 'accounting_service_unavailable',
+                message: 'relay accounting service unavailable: timed out',
+              },
+            })]),
+          },
+        });
+      }
+      return {
+        data: Readable.from([sse({
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [{
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: 'recovered' }],
+            }],
+          },
+        })]),
+      };
+    };
+    process.env.CATSCO_MODEL_RETRY_MAX_RETRIES = '1';
+
+    try {
+      const service = new AIService({
+        apiKey: 'test-key',
+        apiUrl: 'https://example.test/v1',
+        model: 'gpt-test',
+        provider: 'openai',
+        openaiApiMode: 'responses',
+      });
+      (service as any).sleepWithAbort = async () => {};
+      const result = await service.chatStream([{ role: 'user', content: 'hello' }]);
+
+      assert.equal(attempts, 2);
+      assert.equal(result.content, 'recovered');
     } finally {
       (axios as any).post = originalPost;
       if (originalRetries === undefined) delete process.env.CATSCO_MODEL_RETRY_MAX_RETRIES;

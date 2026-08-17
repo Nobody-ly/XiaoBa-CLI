@@ -46,6 +46,8 @@ const EMPTY_RESPONSE_MAX_RETRIES = 2;
 const EMPTY_RESPONSE_MAX_ELAPSED_MS = 2 * 60 * 1000;
 const EMPTY_RESPONSE_MAX_DELAY_MS = 2000;
 const TRANSIENT_PROVIDER_CODES = new Set([
+  'internal_error',
+  'internal_server_error',
   'stream_read_error',
   'upstream_error',
   'server_is_overloaded',
@@ -426,6 +428,10 @@ export class AIService {
     const status = error?.response?.status || error?.status;
     if (typeof status === 'number') {
       return status;
+    }
+    if (typeof status === 'string' && /^\d{3}$/.test(status.trim())) {
+      const parsed = Number(status);
+      return Number.isFinite(parsed) ? parsed : null;
     }
     const text = String(error?.message || error || '');
     const match = text.match(/(?:API错误|HTTP|status(?:\s*code)?)\s*[\(:= ]\s*(\d{3})\b/i);
