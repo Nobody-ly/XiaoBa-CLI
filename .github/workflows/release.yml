@@ -390,6 +390,11 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
       AWS_EC2_METADATA_DISABLED: 'true'
     steps:
+      - name: Checkout release retention scripts
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Verify CDN publishing credentials
         shell: bash
         run: |

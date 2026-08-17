@@ -36,6 +36,17 @@ test('stable releases publish a versioned worker artifact and manifest', () => {
 });
 
 test('desktop releases are pruned only after publication with bounded retention', () => {
+  const releaseJob = releaseWorkflow.match(/\r?\n  release:\r?\n[\s\S]*$/)?.[0] || '';
+
+  assert.match(
+    releaseJob,
+    /- name: Checkout release retention scripts\s+uses: actions\/checkout@v4\s+with:\s+persist-credentials: false/,
+  );
+  assert.ok(
+    releaseJob.indexOf('Checkout release retention scripts')
+      < releaseJob.indexOf('Prune old Guangzhou desktop releases'),
+    'release checkout must run before the retention planner',
+  );
   assert.match(releaseWorkflow, /group: desktop-release-\$\{\{ github\.ref \}\}/);
   assert.match(releaseWorkflow, /- name: Publish GitHub Release[\s\S]*?- name: Prune old Guangzhou desktop releases/);
   assert.match(releaseWorkflow, /--keep-versions 3/);
