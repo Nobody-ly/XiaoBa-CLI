@@ -17,7 +17,10 @@ import { BotSkillCloudRestoreError, BotSkillSyncService } from '../src/bot-skill
 import { snapshotPendingBotSkillWorkspace } from '../src/bot-skills/pending-snapshot';
 import type { BotSkillPackage, LocalBotSkillManifestEntry } from '../src/bot-skills/types';
 import { BotSkillWorkspaceService } from '../src/bot-skills/workspace';
-import { readSkillHubInstallMarker } from '../src/skillhub/install-marker';
+import {
+  readSkillHubInstallMarker,
+  writeSkillHubInstallMarker,
+} from '../src/skillhub/install-marker';
 import {
   applySkillHubLocalMetadata,
   readSkillHubLocalMetadata,
@@ -143,6 +146,90 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       ...publicReference,
       contentHash: privatePackage.contentHash,
     }]);
+  });
+
+  test('binds an unchanged SkillHub-installed public origin without a private upload', async () => {
+    const fixture = createFixture(roots);
+    const skillRoot = path.join(fixture.skillsRoot, 'public-installed');
+    writeSkill(fixture.skillsRoot, 'public-installed', 'public-installed', 'downloaded public content');
+    const publicReference = { skillId: 'alice/public-installed', version: '1.2.3' };
+    writeSkillHubInstallMarker(skillRoot, {
+      source: 'skillhub',
+      skillId: publicReference.skillId,
+      name: 'public-installed',
+      installName: 'public-installed',
+      version: publicReference.version,
+      packageChecksumSha256: 'registry-checksum',
+      signature: { algorithm: 'ed25519', keyId: 'test', signature: 'test' },
+      packageUrl: 'https://hub.test/public-installed.zip',
+      installedAt: '2026-08-17T00:00:00.000Z',
+    });
+    const entry = scanLocalBotSkill(skillRoot);
+    fixture.packages.set(refKey(publicReference), {
+      schema: 'catsco.private-skill-package.v1',
+      source: 'public',
+      reference: publicReference,
+      localSkillId: entry.localSkillId,
+      name: entry.name,
+      contentHash: entry.contentHash,
+      createdAt: '2026-08-17T00:00:00.000Z',
+      origin: publicReference,
+      files: entry.files,
+    });
+    delete (fixture.packages.get(refKey(publicReference)) as Partial<BotSkillPackage>).schema;
+
+    const result = await fixture.sync();
+
+    assert.equal(result.direction, 'local_to_cloud');
+    assert.equal(fixture.uploads, 0);
+    assert.deepStrictEqual(fixture.cloud.skills, [{
+      source: 'skillhub',
+      ...publicReference,
+      contentHash: entry.contentHash,
+    }]);
+    assert.deepStrictEqual(readBotSkillLocalMarker(skillRoot)?.reference, fixture.cloud.skills[0]);
+  });
+
+  test('uploads a locally edited public-origin Skill as a private Bot package', async () => {
+    const fixture = createFixture(roots);
+    const skillRoot = path.join(fixture.skillsRoot, 'public-edited');
+    writeSkill(fixture.skillsRoot, 'public-edited', 'public-edited', 'downloaded public content');
+    const publicReference = { skillId: 'alice/public-edited', version: '2.0.0' };
+    writeSkillHubInstallMarker(skillRoot, {
+      source: 'skillhub',
+      skillId: publicReference.skillId,
+      name: 'public-edited',
+      installName: 'public-edited',
+      version: publicReference.version,
+      packageChecksumSha256: 'registry-checksum',
+      signature: { algorithm: 'ed25519', keyId: 'test', signature: 'test' },
+      packageUrl: 'https://hub.test/public-edited.zip',
+      installedAt: '2026-08-17T00:00:00.000Z',
+    });
+    const original = scanLocalBotSkill(skillRoot);
+    fixture.packages.set(refKey(publicReference), {
+      schema: 'catsco.private-skill-package.v1',
+      source: 'public',
+      reference: publicReference,
+      localSkillId: original.localSkillId,
+      name: original.name,
+      contentHash: original.contentHash,
+      createdAt: '2026-08-17T00:00:00.000Z',
+      origin: publicReference,
+      files: original.files,
+    });
+    delete (fixture.packages.get(refKey(publicReference)) as Partial<BotSkillPackage>).schema;
+    fs.writeFileSync(
+      path.join(skillRoot, 'SKILL.md'),
+      skillText('public-edited', 'locally customized content'),
+      'utf8',
+    );
+
+    await fixture.sync();
+
+    assert.equal(fixture.uploads, 1);
+    assert.match(fixture.cloud.skills[0].skillId, /^private\//);
+    assert.deepStrictEqual(readBotSkillLocalMarker(skillRoot)?.origin, publicReference);
   });
 
   test('promotes a new local Skill to its public reference without privately uploading it', async () => {
