@@ -116,6 +116,11 @@
     managementTab: 'services',
     config: {},
     weixinBinding: {},
+    agents: [],
+    selectedAgentUid: '',
+    agentListLoading: false,
+    agentSwitchBusy: false,
+    agentSwitchError: '',
     serviceActionBusy: new Set(),
     logPollTimer: null,
     weixinPollTimer: null,
@@ -248,6 +253,8 @@
     setText('device-name', deviceName);
     setText('device-meta', cats.device?.bodyId ? `设备 ${shortId(cats.device.bodyId)}` : '本地工具与文件');
     setText('app-version', state.app.version || '—');
+    const switchButton = $('agent-switch-open');
+    switchButton.disabled = !cats.connected || state.agentSwitchBusy;
 
     $('login-form').hidden = view.key !== 'auth';
     $('progress-list').hidden = view.key !== 'connecting';
@@ -378,6 +385,108 @@
     } finally {
       state.actionBusy = false;
       setBusyButtons(false);
+    }
+  }
+
+  async function openAgentSwitch() {
+    if (!state.cats?.connected || state.agentSwitchBusy) return;
+    const dialog = $('agent-switch-dialog');
+    state.agentListLoading = true;
+    state.agentSwitchError = '';
+    state.agents = [];
+    state.selectedAgentUid = state.cats.botUid || '';
+    renderAgentSwitch();
+    dialog.showModal();
+    const [agents, binding] = await Promise.all([
+      settled('/cats/bots'),
+      settled('/weixin/channel-binding'),
+    ]);
+    state.agentListLoading = false;
+    if (agents.ok) {
+      state.agents = Array.isArray(agents.value?.bots) ? agents.value.bots : [];
+      state.selectedAgentUid = agents.value?.currentBotUid || state.cats.botUid || '';
+    } else {
+      state.agentSwitchError = `无法读取 Agent：${humanError(agents.error)}`;
+    }
+    if (binding.ok) state.weixinBinding = binding.value || {};
+    renderAgentSwitch();
+  }
+
+  function closeAgentSwitch() {
+    if (state.agentSwitchBusy) return;
+    const dialog = $('agent-switch-dialog');
+    if (dialog.open) dialog.close();
+    state.agentSwitchError = '';
+  }
+
+  function renderAgentSwitch() {
+    const list = $('agent-list');
+    const currentUid = String(state.cats?.botUid || '');
+    if (state.agentListLoading) {
+      list.innerHTML = '<div class="agent-list-state">正在读取 Agent……</div>';
+    } else if (state.agents.length === 0 && !state.agentSwitchError) {
+      list.innerHTML = '<div class="agent-list-state">当前账号下没有可切换的 Agent。</div>';
+    } else {
+      list.innerHTML = state.agents.map((agent) => {
+        const uid = String(agent.uid || '');
+        const selected = uid === state.selectedAgentUid;
+        const current = uid === currentUid;
+        const name = agent.display_name || agent.username || `Agent ${shortId(uid)}`;
+        const meta = agent.username || shortId(uid);
+        return `<label class="agent-option${selected ? ' selected' : ''}">
+          <input type="radio" name="agent-switch" value="${escapeHtml(uid)}" ${selected ? 'checked' : ''} ${state.agentSwitchBusy ? 'disabled' : ''}>
+          <span class="agent-option-copy"><strong>${escapeHtml(name)}</strong><small>${escapeHtml(meta)}</small></span>
+          ${current ? '<span class="current-badge">当前</span>' : ''}
+        </label>`;
+      }).join('');
+    }
+
+    const selected = state.agents.find((agent) => String(agent.uid || '') === state.selectedAgentUid);
+    const selectedName = selected?.display_name || selected?.username || '所选 Agent';
+    const boundWeixinUid = String(state.weixinBinding?.binding?.agentUid || '');
+    const needsWeixinRebind = Boolean(boundWeixinUid && state.selectedAgentUid && boundWeixinUid !== state.selectedAgentUid);
+    const warning = $('agent-switch-warning');
+    warning.hidden = !needsWeixinRebind;
+    if (needsWeixinRebind) {
+      warning.textContent = `微信当前绑定在其他 Agent。切换到“${selectedName}”后，微信服务会停止；如需使用微信，请为新 Agent 重新扫码。`;
+    }
+
+    const error = $('agent-switch-error');
+    error.hidden = !state.agentSwitchError;
+    error.textContent = state.agentSwitchError;
+    const confirm = $('agent-switch-confirm');
+    confirm.disabled = state.agentListLoading || state.agentSwitchBusy || !selected || state.selectedAgentUid === currentUid;
+    confirm.textContent = state.agentSwitchBusy ? '正在切换…' : '切换并重新连接';
+    $('agent-switch-close').disabled = state.agentSwitchBusy;
+    $('agent-switch-cancel').disabled = state.agentSwitchBusy;
+  }
+
+  async function switchAgent() {
+    const targetUid = String(state.selectedAgentUid || '');
+    if (!targetUid || targetUid === String(state.cats?.botUid || '') || state.agentSwitchBusy) return;
+    const target = state.agents.find((agent) => String(agent.uid || '') === targetUid);
+    state.agentSwitchBusy = true;
+    state.agentSwitchError = '';
+    renderAgentSwitch();
+    render();
+    try {
+      const result = await request('/cats/switch-bot', {
+        method: 'POST',
+        body: JSON.stringify({ botUid: targetUid }),
+      });
+      state.bootstrap = { stage: 'connecting', message: `正在连接 Agent“${target?.display_name || target?.username || shortId(targetUid)}”` };
+      if ($('agent-switch-dialog').open) $('agent-switch-dialog').close();
+      render();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      await refresh({ force: true });
+      showToast(result.weixinStopped ? 'Agent 已切换；微信服务已停止，请重新扫码后启动' : 'Agent 已切换并重新连接');
+    } catch (error) {
+      state.agentSwitchError = `切换失败：${humanError(error)}`;
+      renderAgentSwitch();
+    } finally {
+      state.agentSwitchBusy = false;
+      renderAgentSwitch();
+      render();
     }
   }
 
@@ -698,6 +807,21 @@
   $('logout-button').addEventListener('click', logout);
   $('update-button').addEventListener('click', checkUpdate);
   $('management-open').addEventListener('click', () => { void openManagement(); });
+  $('agent-switch-open').addEventListener('click', () => { void openAgentSwitch(); });
+  $('agent-switch-close').addEventListener('click', (event) => {
+    event.preventDefault();
+    closeAgentSwitch();
+  });
+  $('agent-switch-confirm').addEventListener('click', () => { void switchAgent(); });
+  $('agent-list').addEventListener('change', (event) => {
+    if (event.target?.name !== 'agent-switch') return;
+    state.selectedAgentUid = event.target.value;
+    state.agentSwitchError = '';
+    renderAgentSwitch();
+  });
+  $('agent-switch-dialog').addEventListener('cancel', (event) => {
+    if (state.agentSwitchBusy) event.preventDefault();
+  });
   $('management-back').addEventListener('click', closeManagement);
   $('services-refresh').addEventListener('click', refreshManagementData);
   $('logs-refresh').addEventListener('click', loadLogs);

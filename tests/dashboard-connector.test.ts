@@ -13,7 +13,7 @@ const script = readFileSync(join(dashboardDir, 'connector.js'), 'utf-8');
 const styles = readFileSync(join(dashboardDir, 'connector.css'), 'utf-8');
 const serverSource = readFileSync(join(process.cwd(), 'src/dashboard/server.ts'), 'utf-8');
 
-test('real Connector Dashboard exposes four runtime states without local Bot management', () => {
+test('real Connector Dashboard exposes four runtime states without local Bot creation', () => {
   assert.match(html, /CatsCo Connector/);
   assert.match(html, /登录并连接/);
   assert.match(html, /正在连接这台电脑/);
@@ -22,7 +22,18 @@ test('real Connector Dashboard exposes four runtime states without local Bot man
   assert.match(html, /可以直接关闭此窗口/);
   assert.doesNotMatch(html, /打开旧版控制台/);
   assert.doesNotMatch(html, /CONNECT THIS COMPUTER|READY FOR CATSCO/);
-  assert.doesNotMatch(html, /创建 Bot|选择 Bot|模型选择|System Prompt|Skill Hub|聊天输入/);
+  assert.doesNotMatch(html, /创建 Bot|模型选择|System Prompt|Skill Hub|聊天输入/);
+});
+
+test('Connector lets an authenticated user switch the Agent bound to this computer', () => {
+  assert.match(html, /id="agent-switch-open"[^>]*>切换/);
+  assert.match(html, /切换 Agent/);
+  assert.match(html, /一台电脑同一时间连接一个 Agent/);
+  assert.match(script, /settled\('\/cats\/bots'\)/);
+  assert.match(script, /request\('\/cats\/switch-bot'/);
+  assert.match(script, /微信服务会停止/);
+  assert.doesNotMatch(script, /\/cats\/create-bot/);
+  assert.match(styles, /\.agent-switch-dialog/);
 });
 
 test('Connector local management restores channels and gives logs a full workspace', () => {

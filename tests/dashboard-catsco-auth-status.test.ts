@@ -13,6 +13,7 @@ import { createBotDefinitionSyncService } from '../src/bot-definition/service';
 import { resolveActiveBotLLMConfig } from '../src/bot-definition/llm-config-resolver';
 import { BOT_CATALOG_MODEL_RUNTIME_SCHEMA, BOT_DEFINITION_SCHEMA } from '../src/bot-definition/types';
 import { BotSkillBaseStore } from '../src/bot-skills/base-store';
+import { saveChannelBindings } from '../src/dashboard/weixin-channel-binding';
 
 describe('dashboard CatsCo account status', () => {
   let testRoot: string;
@@ -62,6 +63,11 @@ describe('dashboard CatsCo account status', () => {
     'CATSCOMPANY_INSTALLATION_ID',
     'CATSCO_ALLOW_LOCAL_ENDPOINTS',
     'CATSCOMPANY_ALLOW_LOCAL_ENDPOINTS',
+    'WEIXIN_TOKEN',
+    'WEIXIN_BOUND_AGENT_UID',
+    'WEIXIN_BOUND_AGENT_NAME',
+    'WEIXIN_BOUND_BODY_ID',
+    'WEIXIN_BOUND_BY_USER_UID',
   ];
   const originalEnv: Record<string, string | undefined> = {};
 
@@ -1047,6 +1053,144 @@ describe('dashboard CatsCo account status', () => {
     assert.equal(env.CATSCO_BOT_UID, '199');
     assert.equal(env.CATSCO_API_KEY, 'last-agent-key');
     assert.equal(createBotCalls, 0);
+  });
+
+  test('POST /cats/switch-bot persists the selected Agent and stops Weixin when it needs rebinding', async () => {
+    if (dashboardServer) {
+      await close(dashboardServer);
+      dashboardServer = undefined;
+    }
+
+    const catsService = {
+      name: 'catscompany',
+      label: 'CatsCo agent',
+      command: process.execPath,
+      args: [],
+      status: 'running',
+    };
+    const weixinService = {
+      name: 'weixin',
+      label: '微信机器人',
+      command: process.execPath,
+      args: [],
+      status: 'running',
+    };
+    let connectorRestarted = 0;
+    let weixinStopped = 0;
+    const dashboardApp = express();
+    dashboardApp.use(express.json());
+    dashboardApp.use('/api', createApiRouter({
+      getAll: () => [catsService, weixinService],
+      getService: (name: string) => name === 'catscompany' ? catsService : name === 'weixin' ? weixinService : undefined,
+      restart: (name: string) => {
+        assert.equal(name, 'catscompany');
+        connectorRestarted += 1;
+        return catsService;
+      },
+      stop: (name: string) => {
+        assert.equal(name, 'weixin');
+        weixinStopped += 1;
+        weixinService.status = 'stopped';
+        return weixinService;
+      },
+    } as any));
+    dashboardServer = await listen(dashboardApp);
+    dashboardBaseUrl = serverBaseUrl(dashboardServer);
+
+    await startCatsServer((req, res) => {
+      if (req.path === '/api/me') {
+        return res.json({ uid: 88, username: 'owner', display_name: 'Owner' });
+      }
+      if (req.path === '/api/bots' && req.method === 'GET') {
+        return res.json({
+          bots: [
+            { uid: 188, username: 'old-agent', display_name: 'Old Agent', api_key: 'old-agent-key' },
+            { uid: 199, username: 'new-agent', display_name: 'New Agent', api_key: 'new-agent-key' },
+          ],
+        });
+      }
+      if (req.path === '/api/friends/request') return res.json({ ok: true });
+      if (req.path === '/api/friends/accept') {
+        assert.equal(req.header('authorization'), 'ApiKey new-agent-key');
+        return res.json({ ok: true });
+      }
+      return res.status(404).json({ error: 'not found' });
+    });
+
+    createCatsCoLocalConfigService({ runtimeRoot: testRoot }).save({
+      version: 1,
+      account: { token: 'user-token', uid: '88', username: 'owner', displayName: 'Owner' },
+      currentBot: {
+        uid: '188',
+        name: 'Old Agent',
+        username: 'old-agent',
+        apiKey: 'old-agent-key',
+        boundByUserUid: '88',
+        bindingSource: 'test',
+      },
+      device: { deviceId: 'device-1', bodyId: 'body-1', installationId: 'install-1' },
+      endpoints: { httpBaseUrl: catsBaseUrl, serverUrl: 'wss://app.catsco.cc/v0/channels' },
+    });
+    saveChannelBindings(testRoot, {
+      version: 1,
+      weixin: {
+        channel: 'weixin',
+        agentUid: '188',
+        agentName: 'Old Agent',
+        bodyId: 'body-1',
+        boundByUserUid: '88',
+        tokenHash: 'test-token-hash',
+        tokenLast4: '1234',
+        legacyEnvKey: 'WEIXIN_TOKEN',
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      },
+    });
+    writeEnv([
+      `CATSCO_HTTP_BASE_URL=${catsBaseUrl}`,
+      'CATSCO_SERVER_URL=wss://app.catsco.cc/v0/channels',
+      'CATSCO_USER_TOKEN=user-token',
+      'CATSCO_USER_UID=88',
+      'CATSCO_BOT_UID=188',
+      'CATSCO_API_KEY=old-agent-key',
+      'GAUZ_LLM_PROVIDER=anthropic',
+      'GAUZ_LLM_API_BASE=https://model.example.test/v1/messages',
+      'GAUZ_LLM_API_KEY=sk-test',
+      'GAUZ_LLM_MODEL=test-model',
+      'WEIXIN_TOKEN=weixin-token-1234',
+    ]);
+    new FileBotDefinitionRepository({ runtimeRoot: testRoot }).writeCanonical({
+      schema: BOT_DEFINITION_SCHEMA,
+      botId: '199',
+      model: {
+        kind: 'custom',
+        protocol: 'openai-responses',
+        apiBase: 'https://model.example.test/v1',
+        model: 'test-model',
+        apiKey: 'sk-test',
+        contextWindowTokens: 128_000,
+      },
+    });
+    seedVerifiedEmptyBotSkillWorkspace(testRoot, '199');
+
+    const response = await fetch(`${dashboardBaseUrl}/api/cats/switch-bot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botUid: '199' }),
+    });
+    const text = await response.text();
+    const data = JSON.parse(text) as any;
+    const localConfig = createCatsCoLocalConfigService({ runtimeRoot: testRoot }).load();
+
+    assert.equal(response.status, 200, text);
+    assert.equal(data.ok, true);
+    assert.equal(data.bot.uid, '199');
+    assert.equal(data.weixinRequiresRebind, true);
+    assert.equal(data.weixinStopped, true);
+    assert.equal(connectorRestarted, 1);
+    assert.equal(weixinStopped, 1);
+    assert.equal(localConfig.currentBot?.uid, '199');
+    assert.equal(localConfig.currentBot?.bindingSource, 'explicit-switch');
   });
 
   test('POST /cats/bind-bot restores the active binding when target preflight is blocked', async () => {

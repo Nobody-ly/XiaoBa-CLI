@@ -4012,6 +4012,10 @@ export function createApiRouter(
       const targetBot = bots.find((bot: any) => String(bot.id || bot.uid || '') === botUid);
       if (!targetBot) return res.status(404).json({ error: 'Bot not found' });
 
+      const previousWeixinStatus = getWeixinChannelStatus({
+        runtimeRoot: runtimeDataRoot(),
+        env: process.env,
+      });
       const apiKey = await getCatsBotApiKey(state, botUid, targetBot);
       const result = await commitCatsBotBindingAndStartConnector(serviceManager, state, {
         userUid,
@@ -4024,6 +4028,19 @@ export function createApiRouter(
         bindingSource: 'explicit-switch',
       });
       const botName = String(targetBot.display_name || targetBot.username || 'Bot');
+      const weixinRequiresRebind = Boolean(
+        previousWeixinStatus.binding?.agentUid
+        && previousWeixinStatus.binding.agentUid !== botUid,
+      );
+      let weixinStopped = false;
+      if (weixinRequiresRebind && serviceManager.getService('weixin')?.status === 'running') {
+        try {
+          serviceManager.stop('weixin');
+          weixinStopped = true;
+        } catch (error: any) {
+          result.warnings.push(`Agent 已切换，但微信服务停止失败：${String(error?.message || error)}`);
+        }
+      }
 
       res.json({
         ok: true,
@@ -4039,8 +4056,10 @@ export function createApiRouter(
         preflight: result.preflight,
         connectorStarted: result.connectorStarted,
         connectorRestarted: result.connectorRestarted,
+        weixinRequiresRebind,
+        weixinStopped,
         warnings: result.warnings.length > 0 ? result.warnings : undefined,
-        message: `已切换到机器人 "${botName}"`,
+        message: `已切换到 Agent "${botName}"`,
       });
     } catch (e: any) {
       const payload = catsErrorResponse(e);
