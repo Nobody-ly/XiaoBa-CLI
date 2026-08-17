@@ -65,9 +65,9 @@ function assertLine(name, text, expected) {
   }
 }
 
-assertIncludes('dashboard title', readText('dashboard/index.html'), '<title>CatsCo Dashboard</title>');
-assertIncludes('electron window title', readText('electron/main.js'), "title: 'CatsCo Dashboard'");
-assertIncludes('electron tray tooltip', readText('electron/main.js'), "tray.setToolTip('CatsCo Dashboard')");
+assertIncludes('connector title', readText('dashboard/connector.html'), '<title>CatsCo Connector</title>');
+assertIncludes('electron window title', readText('electron/main.js'), "title: 'CatsCo Connector'");
+assertIncludes('electron tray tooltip', readText('electron/main.js'), "tray.setToolTip('CatsCo Connector')");
 const releaseWorkflow = readText('.github/workflows/release.yml');
 assertIncludes('GitHub release title', releaseWorkflow, 'name: CatsCo ${{ github.ref_name }}');
 assertLine('macOS build ZIP artifact upload', releaseWorkflow, 'release/*.zip');
@@ -80,8 +80,8 @@ assertIncludes(
   releaseWorkflow,
   'gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false',
 );
-assertIncludes('Windows install shortcut', readText('install.ps1'), 'CatsCo Dashboard');
-assertIncludes('Unix install launcher', readText('install.sh'), 'CatsCo Dashboard');
+assertIncludes('Windows install shortcut', readText('install.ps1'), 'CatsCo Connector');
+assertIncludes('Unix install launcher', readText('install.sh'), 'CatsCo Connector');
 assertIncludes(
   'runtime context date variable',
   readText('prompts/runtime-context.md'),

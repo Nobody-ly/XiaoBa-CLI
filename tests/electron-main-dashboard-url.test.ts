@@ -10,7 +10,12 @@ test('electron opens the local dashboard through stable IPv4 loopback', () => {
   assert.doesNotMatch(electronMain, /mainWindow\.loadURL\(`http:\/\/localhost:\$\{DASHBOARD_PORT\}`\)/);
 });
 
-test('electron uses Chinese menus with close-to-tray control', () => {
+test('electron opens Connector in a compact desktop-sized window', () => {
+  assert.match(electronMain, /new BrowserWindow\(\{\s*width: 1080,\s*height: 720,/);
+  assert.match(electronMain, /minWidth: 900,\s*minHeight: 600,/);
+});
+
+test('electron keeps close-to-tray as the fixed Connector window behavior', () => {
   assert.match(electronMain, /function createApplicationMenu\(\)/);
   assert.match(electronMain, /Menu\.setApplicationMenu\(Menu\.buildFromTemplate\(template\)\)/);
   assert.match(electronMain, /label: '文件'/);
@@ -20,7 +25,8 @@ test('electron uses Chinese menus with close-to-tray control', () => {
   assert.match(electronMain, /label: '帮助'/);
   assert.match(electronMain, /label: '点 × 后隐藏到后台'/);
   assert.match(electronMain, /type: 'checkbox'/);
-  assert.match(electronMain, /writeCloseToTrayPreference\(menuItem\.checked\)/);
+  assert.match(electronMain, /visible: false/);
+  assert.match(electronMain, /if \(app\.isQuitting\) return;\s*event\.preventDefault\(\);\s*mainWindow\.hide\(\)/);
   assert.doesNotMatch(electronMain, /label: 'File'/);
   assert.doesNotMatch(electronMain, /label: 'Edit'/);
   assert.doesNotMatch(electronMain, /label: 'View'/);
@@ -76,6 +82,22 @@ test('electron registers catsco deep links and forwards connect codes to the loc
   assert.match(electronMain, /function trustedDeepLinkBase\(value\)/);
   assert.match(electronMain, /https:\/\/app\.catsco\.cc/);
   assert.match(electronMain, /\/cats\/desktop-connect/);
-  assert.match(electronMain, /\/cats\/setup/);
+  assert.match(electronMain, /\/cats\/bootstrap/);
+  assert.match(electronMain, /'X-API-Key': dashboardApiKey/);
   assert.doesNotMatch(electronMain, /httpBaseUrl: rawBase/);
+});
+
+test('electron sends trusted CatsCo links to the system browser', () => {
+  assert.match(electronMain, /setWindowOpenHandler/);
+  assert.match(electronMain, /target\.origin === 'https:\/\/app\.catsco\.cc'/);
+  assert.match(electronMain, /shell\.openExternal\(target\.toString\(\)\)/);
+  assert.match(electronMain, /return \{ action: 'deny' \}/);
+});
+
+test('electron opens trusted local diagnostics in a separate sandboxed window', () => {
+  assert.match(electronMain, /if \(isTrustedDashboardUrl\(url\)\)/);
+  assert.match(electronMain, /title: 'CatsCo Diagnostics'/);
+  assert.match(electronMain, /nodeIntegration: false/);
+  assert.match(electronMain, /contextIsolation: true/);
+  assert.match(electronMain, /sandbox: true/);
 });

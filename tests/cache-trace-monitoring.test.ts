@@ -281,14 +281,13 @@ test('one attempt keeps one JSONL file when it crosses midnight', async () => {
   }
 });
 
-test('dashboard exposes a discoverable cache trace page', () => {
+test('standalone cache trace diagnostics remain available after Dashboard reduction', () => {
   const root = path.resolve(__dirname, '..');
-  const index = fs.readFileSync(path.join(root, 'dashboard', 'index.html'), 'utf8');
+  const connector = fs.readFileSync(path.join(root, 'dashboard', 'connector.html'), 'utf8');
   const page = fs.readFileSync(path.join(root, 'dashboard', 'cache-trace.html'), 'utf8');
-  assert.match(index, /onclick="switchPage\('cache-trace'\)" data-page="cache-trace"/);
-  assert.match(index, /id="page-cache-trace"/);
-  assert.match(index, /id="cache-trace-frame"/);
-  assert.match(index, /data-src="cache-trace\.html"/);
+  assert.match(connector, /本地管理/);
+  assert.match(connector, /Cache Trace/);
+  assert.doesNotMatch(connector, /模型选择|SkillHub Skills|System Prompt|聊天输入/);
   assert.match(page, /缓存命中监控/);
   assert.match(page, /catsco\.dashboardApiKey/);
   assert.match(page, /采集 Cache Trace/);

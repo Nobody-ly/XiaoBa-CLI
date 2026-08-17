@@ -212,14 +212,18 @@ async function processDeepLink(value) {
   };
   const localApiBase = `http://127.0.0.1:${DASHBOARD_PORT}/api`;
   await postLocalJson(`${localApiBase}/cats/desktop-connect`, desktopConnectBody);
-  await postLocalJson(`${localApiBase}/cats/setup`, {});
+  await postLocalJson(`${localApiBase}/cats/bootstrap`, { trigger: 'desktop-connect' });
   showMainWindow();
 }
 
 async function postLocalJson(url, body) {
+  const dashboardApiKey = String(process.env.DASHBOARD_API_KEY || '').trim();
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(dashboardApiKey ? { 'X-API-Key': dashboardApiKey } : {}),
+    },
     body: JSON.stringify(body || {}),
   });
   if (!response.ok) {
@@ -559,13 +563,13 @@ function stopDashboardServer() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1080,
+    height: 720,
     minWidth: 900,
     minHeight: 600,
-    title: 'CatsCo Dashboard',
+    title: 'CatsCo Connector',
     titleBarStyle: 'hiddenInset',
-    backgroundColor: '#0f1117',
+    backgroundColor: '#edf3ef',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -575,8 +579,37 @@ function createWindow() {
 
   mainWindow.loadURL(`http://127.0.0.1:${DASHBOARD_PORT}`);
 
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isTrustedDashboardUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 1100,
+          height: 760,
+          minWidth: 820,
+          minHeight: 560,
+          title: 'CatsCo Diagnostics',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+          },
+        },
+      };
+    }
+    try {
+      const target = new URL(url);
+      if (target.protocol === 'https:' && target.origin === 'https://app.catsco.cc') {
+        void shell.openExternal(target.toString());
+      }
+    } catch (_error) {
+      // Ignore malformed or untrusted external URLs.
+    }
+    return { action: 'deny' };
+  });
+
   mainWindow.on('close', (event) => {
-    if (app.isQuitting || !readCloseToTrayPreference()) return;
+    if (app.isQuitting) return;
     event.preventDefault();
     mainWindow.hide();
     notifyWindowHidden();
@@ -681,7 +714,6 @@ function openAttachmentCacheDirectory() {
 }
 
 function createApplicationMenu() {
-  const closeToTray = readCloseToTrayPreference();
   const quit = () => {
     app.isQuitting = true;
     app.quit();
@@ -749,10 +781,8 @@ function createApplicationMenu() {
         {
           label: '点 × 后隐藏到后台',
           type: 'checkbox',
-          checked: closeToTray,
-          click: (menuItem) => {
-            writeCloseToTrayPreference(menuItem.checked);
-          },
+          visible: false,
+          checked: true,
         },
         { type: 'separator' },
         { label: '最小化', role: 'minimize' },
@@ -789,12 +819,12 @@ function createTray() {
   tray = new Tray(createTrayIcon());
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: '打开 CatsCo Dashboard', click: showMainWindow },
+    { label: '打开 CatsCo Connector', click: showMainWindow },
     { type: 'separator' },
     { label: '退出 CatsCo', click: () => { app.isQuitting = true; app.quit(); }} ,
   ]);
 
-  tray.setToolTip('CatsCo Dashboard');
+  tray.setToolTip('CatsCo Connector');
   tray.setContextMenu(contextMenu);
   tray.on('click', () => {
     showMainWindow();

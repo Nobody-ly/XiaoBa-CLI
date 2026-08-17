@@ -135,7 +135,7 @@ export async function catscompanyCommand(): Promise<void> {
   if (ownerPid) {
     ownerWatchTimer = setInterval(() => {
       if (isProcessAlive(ownerPid)) return;
-      Logger.warning(`CatsCo Dashboard owner process 已退出，正在关闭孤儿 connector。ownerPid=${ownerPid}`);
+      Logger.warning(`CatsCo Connector owner process 已退出，正在关闭孤儿 connector。ownerPid=${ownerPid}`);
       void shutdown();
     }, CONNECTOR_OWNER_POLL_MS);
   }

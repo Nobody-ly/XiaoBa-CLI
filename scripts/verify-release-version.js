@@ -42,7 +42,7 @@ function fail(message, version, tag) {
   console.error('Stable release tags must be committed to source before tagging.');
   console.error('Fix locally with:');
   console.error(`  node scripts/inject-version.js ${releaseTag}`);
-  console.error('  git add package.json package-lock.json dashboard/index.html');
+  console.error('  git add package.json package-lock.json');
   console.error(`  git commit -m "chore(release): bump version to ${releaseTag}"`);
   console.error('  git push upstream main');
   console.error(`  git tag ${releaseTag}`);
@@ -60,7 +60,6 @@ if (!version) {
 
 const packageJson = readJson('package.json');
 const packageLock = readJson('package-lock.json');
-const dashboardHtml = fs.readFileSync(path.join(rootDir, 'dashboard', 'index.html'), 'utf-8');
 
 if (packageJson.version !== version) {
   fail(`package.json version ${packageJson.version} does not match ${tag}.`, version, tag);
@@ -72,10 +71,6 @@ if (packageLock.version && packageLock.version !== version) {
 
 if (packageLock.packages?.['']?.version && packageLock.packages[''].version !== version) {
   fail(`package-lock root package version ${packageLock.packages[''].version} does not match ${tag}.`, version, tag);
-}
-
-if (!dashboardHtml.includes(`sidebar-brand-ver">v${version}<`)) {
-  fail(`dashboard/index.html sidebar version does not match ${tag}.`, version, tag);
 }
 
 console.log(`Source version is in sync with ${tag}.`);
