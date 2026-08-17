@@ -102,6 +102,7 @@ export interface ChatConfig {
   catscompany?: {
     serverUrl?: string;
     apiKey?: string;
+    runtimeCredential?: string;
     httpBaseUrl?: string;
     sessionTTL?: number;
   };
