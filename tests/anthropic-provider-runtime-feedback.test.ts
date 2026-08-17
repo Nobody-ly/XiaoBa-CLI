@@ -24,15 +24,14 @@ describe('AnthropicProvider runtime feedback boundary', () => {
         properties: {
           summary: { type: 'string' },
           refs: { type: 'array', items: { type: 'string' } },
-          inject: { type: 'boolean' },
         },
-        required: ['summary', 'refs', 'inject'],
+        required: ['summary', 'refs'],
       },
     };
 
     const transformed = (provider as any).transformTools([finishTool]);
 
-    assert.deepStrictEqual(transformed[0].input_schema.required, ['summary', 'refs', 'inject']);
+    assert.deepStrictEqual(transformed[0].input_schema.required, ['summary', 'refs']);
   });
 
   test('transforms runtime feedback without leaking internal message fields', () => {
