@@ -18,15 +18,28 @@ test('stable releases publish a versioned worker artifact and manifest', () => {
   assert.match(releaseWorkflow, /npm run --silent worker:artifact/);
   assert.match(releaseWorkflow, /release\/worker\/manifest\.json/);
   assert.match(releaseWorkflow, /path: release-worker/);
-  assert.match(releaseWorkflow, /find release-worker -maxdepth 1 -type f -print0/);
+  assert.match(releaseWorkflow, /find release-worker -maxdepth 1 -type f ! -name manifest\.json -print0/);
   assert.match(releaseWorkflow, /TOS_WORKER_BUCKET: catsco-worker-release/);
   assert.match(releaseWorkflow, /VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID/);
   assert.match(releaseWorkflow, /retention-days: 7/);
   assert.match(releaseWorkflow, /aws configure set default\.s3\.addressing_style virtual/);
   assert.match(releaseWorkflow, /WORKER_PREFIX="update\/worker\/\$\{WORKER_VERSION\}"/);
   assert.match(releaseWorkflow, /--acl private/);
-  assert.match(releaseWorkflow, /Private worker manifest unexpectedly returned HTTP/);
+  assert.match(releaseWorkflow, /publish_immutable_worker_file release-worker\/manifest\.json/);
+  assert.match(releaseWorkflow, /Refusing to overwrite immutable worker artifact/);
+  assert.match(releaseWorkflow, /Private worker manifest privacy verification failed/);
   assert.match(releaseWorkflow, /needs: \[build-mac, build-win, build-linux, build-worker\]/);
+});
+
+test('desktop releases are pruned only after publication with bounded retention', () => {
+  assert.match(releaseWorkflow, /group: desktop-release-\$\{\{ github\.ref \}\}/);
+  assert.match(releaseWorkflow, /- name: Publish GitHub Release[\s\S]*?- name: Prune old Guangzhou desktop releases/);
+  assert.match(releaseWorkflow, /--keep-versions 3/);
+  assert.match(releaseWorkflow, /--min-age-days 30/);
+  assert.match(releaseWorkflow, /--max-delete-objects 80/);
+  assert.match(releaseWorkflow, /scripts\/plan-release-retention\.mjs/);
+  assert.match(releaseWorkflow, /delete-objects/);
+  assert.match(releaseWorkflow, /One or more old release objects still exist/);
 });
 
 test('worker artifacts never enter the public release paths', () => {

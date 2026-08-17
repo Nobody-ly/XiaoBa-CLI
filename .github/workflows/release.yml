@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   NODE_VERSION: '20'
   NPM_INSTALL_FLAGS: '--prefer-offline --no-audit --fund=false'
@@ -547,27 +551,98 @@ jobs:
           WORKER_PREFIX="update/worker/${WORKER_VERSION}"
           IMMUTABLE_PRIVATE_CACHE_CONTROL="private, max-age=31536000, immutable"
 
-          while IFS= read -r -d '' file; do
+          retry() {
+            local max_attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep $((attempt * 2))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          publish_immutable_worker_file() {
+            local file="$1"
+            local name key local_sha local_size head remote_sha remote_size
             name="$(basename "$file")"
             key="${WORKER_PREFIX}/${name}"
-            aws s3 cp "$file" "s3://${TOS_WORKER_BUCKET}/${key}" \
-              --endpoint-url "$WORKER_ENDPOINT_URL" \
-              --acl private \
-              --cache-control "$IMMUTABLE_PRIVATE_CACHE_CONTROL" \
-              --only-show-errors
-            aws s3api head-object \
+            local_sha="$(sha256sum "$file" | awk '{print $1}')"
+            local_size="$(stat --format='%s' "$file")"
+
+            if head="$(retry 4 aws s3api head-object \
               --bucket "$TOS_WORKER_BUCKET" \
               --key "$key" \
               --endpoint-url "$WORKER_ENDPOINT_URL" \
-              >/dev/null
-          done < <(find release-worker -maxdepth 1 -type f -print0)
+              --output json 2>/dev/null)"; then
+              remote_sha="$(jq -r '.Metadata.sha256 // ""' <<<"$head")"
+              remote_size="$(jq -r '.ContentLength // -1' <<<"$head")"
+              if [ "$remote_sha" != "$local_sha" ] || [ "$remote_size" != "$local_size" ]; then
+                echo "Refusing to overwrite immutable worker artifact with different content: $key"
+                return 1
+              fi
+              echo "Worker artifact already published with matching identity: $key"
+              return 0
+            fi
+
+            retry 4 aws s3 cp "$file" "s3://${TOS_WORKER_BUCKET}/${key}" \
+              --endpoint-url "$WORKER_ENDPOINT_URL" \
+              --acl private \
+              --cache-control "$IMMUTABLE_PRIVATE_CACHE_CONTROL" \
+              --metadata "sha256=$local_sha" \
+              --only-show-errors
+
+            head="$(retry 4 aws s3api head-object \
+              --bucket "$TOS_WORKER_BUCKET" \
+              --key "$key" \
+              --endpoint-url "$WORKER_ENDPOINT_URL" \
+              --output json)"
+            remote_sha="$(jq -r '.Metadata.sha256 // ""' <<<"$head")"
+            remote_size="$(jq -r '.ContentLength // -1' <<<"$head")"
+            [ "$remote_sha" = "$local_sha" ] && [ "$remote_size" = "$local_size" ] || {
+              echo "Worker artifact verification failed after upload: $key"
+              return 1
+            }
+          }
+
+          mapfile -d '' worker_payloads < <(
+            find release-worker -maxdepth 1 -type f ! -name manifest.json -print0 | sort -z
+          )
+          [ "${#worker_payloads[@]}" -ge 2 ] || {
+            echo "Expected worker payload and checksum before publishing manifest"
+            exit 1
+          }
+          test -f release-worker/manifest.json
+
+          # The manifest is the release commit marker. Payloads must be present
+          # and verified first so an interrupted upload never exposes a usable
+          # update that is missing its archive.
+          for file in "${worker_payloads[@]}"; do
+            publish_immutable_worker_file "$file"
+          done
+          publish_immutable_worker_file release-worker/manifest.json
 
           MANIFEST_URL="https://${TOS_WORKER_BUCKET}.tos-${TOS_WORKER_REGION}.volces.com/${WORKER_PREFIX}/manifest.json"
-          anonymous_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "$MANIFEST_URL")"
-          if [ "$anonymous_status" != "403" ] && [ "$anonymous_status" != "404" ]; then
-            echo "Private worker manifest unexpectedly returned HTTP ${anonymous_status} to an anonymous request"
+          verify_private_manifest() {
+            local anonymous_status
+            anonymous_status="$(curl --silent --show-error --output /dev/null \
+              --write-out '%{http_code}' --connect-timeout 15 --max-time 60 "$MANIFEST_URL")" || return 1
+            if [ "$anonymous_status" = "403" ] || [ "$anonymous_status" = "404" ]; then
+              return 0
+            fi
+            if [ "$anonymous_status" = "200" ]; then
+              echo "Private worker manifest is publicly readable"
+              return 2
+            fi
+            echo "Anonymous privacy probe returned transient HTTP $anonymous_status"
+            return 1
+          }
+          retry 4 verify_private_manifest || {
+            echo "Private worker manifest privacy verification failed"
             exit 1
-          fi
+          }
 
       - name: Expose replicated payloads in Guangzhou bucket
         run: |
@@ -739,3 +814,82 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Prune old Guangzhou desktop releases
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_ENDPOINT_URL="https://tos-s3-${TOS_TARGET_REGION}.volces.com"
+          RETENTION_DIR="$(mktemp -d)"
+          trap 'rm -rf "$RETENTION_DIR"' EXIT
+
+          retry() {
+            local max_attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep $((attempt * 3))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          list_releases() {
+            aws s3api list-objects-v2 \
+              --bucket "$TOS_TARGET_BUCKET" \
+              --prefix update/ \
+              --endpoint-url "$TARGET_ENDPOINT_URL" \
+              --output json > "$1"
+          }
+
+          retry 4 list_releases "$RETENTION_DIR/before.json"
+          node scripts/plan-release-retention.mjs \
+            --listing "$RETENTION_DIR/before.json" \
+            --metadata release-win/latest.yml \
+            --metadata release-linux/latest-linux.yml \
+            --metadata release-mac/x64/latest-mac.yml \
+            --metadata release-mac/arm64/latest-mac.yml \
+            --keep-versions 3 \
+            --min-age-days 30 \
+            --max-delete-objects 80 \
+            > "$RETENTION_DIR/plan.json"
+
+          jq '{policy, protectedVersions, deleteVersions, deferredVersions, totals}' "$RETENTION_DIR/plan.json"
+          delete_count="$(jq -r '.totals.deleteObjects' "$RETENTION_DIR/plan.json")"
+          if [ "$delete_count" -eq 0 ]; then
+            echo "No old Guangzhou desktop release objects are eligible for deletion"
+            exit 0
+          fi
+
+          jq '{Objects: [.deleteObjects[] | {Key: .key}], Quiet: false}' \
+            "$RETENTION_DIR/plan.json" > "$RETENTION_DIR/delete.json"
+
+          delete_batch() {
+            aws s3api delete-objects \
+              --bucket "$TOS_TARGET_BUCKET" \
+              --delete "file://$RETENTION_DIR/delete.json" \
+              --endpoint-url "$TARGET_ENDPOINT_URL" \
+              --output json > "$RETENTION_DIR/delete-result.json" \
+              && jq -e '(.Errors // []) | length == 0' "$RETENTION_DIR/delete-result.json" >/dev/null
+          }
+          retry 3 delete_batch
+
+          verify_deleted() {
+            list_releases "$RETENTION_DIR/after.json" || return 1
+            jq -n -e \
+              --slurpfile plan "$RETENTION_DIR/plan.json" \
+              --slurpfile after "$RETENTION_DIR/after.json" '
+                ($plan[0].deleteObjects | map(.key)) as $deleted
+                | ($after[0].Contents // [] | map(.Key)) as $remaining
+                | [$deleted[] | select(. as $key | $remaining | index($key))] | length == 0
+              ' >/dev/null
+          }
+          retry 4 verify_deleted || {
+            echo "One or more old release objects still exist after the delete request"
+            exit 1
+          }
+
+          echo "Deleted $delete_count old release objects; current metadata and the newest three versions were preserved"
