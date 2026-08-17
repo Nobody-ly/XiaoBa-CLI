@@ -22,6 +22,7 @@ test('stable releases publish a versioned worker artifact and manifest', () => {
   assert.match(releaseWorkflow, /TOS_WORKER_BUCKET: catsco-worker-release/);
   assert.match(releaseWorkflow, /VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID/);
   assert.match(releaseWorkflow, /retention-days: 7/);
+  assert.match(releaseWorkflow, /aws configure set default\.s3\.addressing_style virtual/);
   assert.match(releaseWorkflow, /WORKER_PREFIX="update\/worker\/\$\{WORKER_VERSION\}"/);
   assert.match(releaseWorkflow, /--acl private/);
   assert.match(releaseWorkflow, /Private worker manifest unexpectedly returned HTTP/);
