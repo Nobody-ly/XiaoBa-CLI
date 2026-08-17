@@ -85,7 +85,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   transition: border-color 120ms ease, background 120ms ease;
 }
 .button:hover { border-color: #aeb9ca; background: #f8fafc; }
-.button:focus-visible, input:focus-visible, summary:focus-visible {
+.button:focus-visible, .summary-action:focus-visible, .dialog-close:focus-visible, input:focus-visible, summary:focus-visible {
   outline: 3px solid rgba(47, 111, 237, .22);
   outline-offset: 2px;
 }
@@ -202,7 +202,58 @@ h1 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.summary-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.summary-card-heading > span { color: var(--muted); font-size: 14px; }
+.summary-action {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid #d4dbe6;
+  border-radius: 7px;
+  background: #fff;
+  color: #3269c7;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.summary-action:hover { border-color: #aeb9ca; background: #f8fafc; }
+.summary-action:disabled { color: #a3adbc; cursor: default; opacity: .72; }
 .compact-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+
+.agent-switch-dialog {
+  width: min(560px, calc(100vw - 40px));
+  max-height: min(680px, calc(100vh - 40px));
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 24px 70px rgba(18, 31, 52, .24);
+}
+.agent-switch-dialog::backdrop { background: rgba(24, 32, 51, .34); }
+.agent-switch-shell { min-height: 0; max-height: inherit; display: flex; flex-direction: column; }
+.agent-switch-header { padding: 22px 24px 17px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); }
+.agent-switch-header h2 { margin: 0; font-size: 22px; line-height: 1.25; }
+.agent-switch-header p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.dialog-close { width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--muted); font-size: 23px; line-height: 1; cursor: pointer; }
+.dialog-close:hover { border-color: #aeb9ca; color: var(--ink); background: #f8fafc; }
+.agent-switch-body { min-height: 0; padding: 18px 24px; overflow: auto; }
+.agent-switch-intro { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.agent-list { display: grid; gap: 9px; }
+.agent-list-state { padding: 34px 16px; border: 1px dashed #d3dae5; border-radius: 9px; color: var(--muted); text-align: center; font-size: 13px; }
+.agent-option { min-height: 66px; padding: 12px 14px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; cursor: pointer; }
+.agent-option:hover { border-color: #b9c7da; background: #fbfcfe; }
+.agent-option.selected { border-color: #8eb1f5; background: var(--blue-soft); box-shadow: 0 0 0 1px #8eb1f5 inset; }
+.agent-option input { width: 16px; height: 16px; flex: 0 0 auto; accent-color: var(--blue); }
+.agent-option-copy { min-width: 0; flex: 1 1 auto; }
+.agent-option-copy strong, .agent-option-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-option-copy strong { font-size: 15px; }
+.agent-option-copy small { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.current-badge { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; background: #e8f7f1; color: #087253; font-size: 11px; font-weight: 650; }
+.agent-switch-warning, .agent-switch-error { margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.55; }
+.agent-switch-warning { border: 1px solid #efddb9; background: var(--orange-soft); color: #7a521a; }
+.agent-switch-error { border: 1px solid #efc7c3; background: var(--red-soft); color: #a33a35; }
+.agent-switch-footer { padding: 15px 24px 20px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; border-top: 1px solid var(--line); }
 
 .login-card {
   width: min(620px, 100%);

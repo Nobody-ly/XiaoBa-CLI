@@ -157,8 +157,11 @@
             <strong id="account-name">—</strong>
             <small id="account-meta">等待登录</small>
           </article>
-          <article class="summary-card">
-            <span>当前 Agent</span>
+          <article class="summary-card agent-summary-card">
+            <div class="summary-card-heading">
+              <span>当前 Agent</span>
+              <button class="summary-action" id="agent-switch-open" type="button" disabled>切换</button>
+            </div>
             <strong id="agent-name">—</strong>
             <small id="agent-meta">登录后自动准备</small>
           </article>
@@ -175,6 +178,33 @@
       </div>
     </section>
   </main>
+
+  <dialog class="agent-switch-dialog" id="agent-switch-dialog" aria-labelledby="agent-switch-title">
+    <form method="dialog" class="agent-switch-shell">
+      <header class="agent-switch-header">
+        <div>
+          <h2 id="agent-switch-title">切换 Agent</h2>
+          <p>选择使用这台电脑本地工具、文件和桌面能力的 Agent。</p>
+        </div>
+        <button class="dialog-close" id="agent-switch-close" type="submit" value="cancel" aria-label="关闭">×</button>
+      </header>
+
+      <div class="agent-switch-body">
+        <p class="agent-switch-intro">一台电脑同一时间连接一个 Agent。切换时 Connector 会短暂重启，云端模型、Prompt 和 Skills 会同步到本机。</p>
+        <div class="agent-list" id="agent-list" role="radiogroup" aria-label="可用 Agent">
+          <div class="agent-list-state">正在读取 Agent……</div>
+        </div>
+        <p class="agent-switch-warning" id="agent-switch-warning" hidden></p>
+        <p class="agent-switch-error" id="agent-switch-error" role="alert" hidden></p>
+      </div>
+
+      <footer class="agent-switch-footer">
+        <button class="button button-quiet" id="agent-switch-cancel" type="submit" value="cancel">取消</button>
+        <button class="button button-primary" id="agent-switch-confirm" type="button" disabled>切换并重新连接</button>
+      </footer>
+    </form>
+  </dialog>
+
   <div class="toast" id="toast" role="status" hidden></div>
   <script src="connector.js"></script>
 </body>
