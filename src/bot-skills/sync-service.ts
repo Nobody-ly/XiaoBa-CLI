@@ -676,6 +676,24 @@ export class BotSkillSyncService {
       } else if (!reference && entry.reference && !markerChanged) {
         reference = entry.reference;
       }
+      if (!reference && entry.origin && !isPrivateSkillReference(entry.origin.skillId)) {
+        const publicReference: BotSkillRef = {
+          source: 'skillhub',
+          skillId: entry.origin.skillId,
+          version: entry.origin.version,
+          contentHash: entry.contentHash,
+        };
+        try {
+          const installed = await this.privateClient.download(publicReference);
+          if (installed.source === 'public') reference = publicReference;
+        } catch (error: any) {
+          const isExpectedPublicMismatch = (
+            [400, 404].includes(Number(error?.status))
+            || error?.message === 'SkillHub package does not match the BotDefinition contentHash.'
+          );
+          if (!isExpectedPublicMismatch) throw error;
+        }
+      }
       if (!reference) {
         await options.validateScope?.();
         const uploaded = await this.privateClient.upsert(entry);

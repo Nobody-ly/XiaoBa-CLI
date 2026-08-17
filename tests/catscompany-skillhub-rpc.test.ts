@@ -91,6 +91,103 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(JSON.stringify(result).includes('# Local Demo'), false);
   });
 
+  test('deletes only the exact local Skill selected by local_skill_id', async () => {
+    const siblingRoot = path.join(runtimeRoot, 'skills', 'sibling-demo');
+    fs.mkdirSync(siblingRoot, { recursive: true });
+    fs.writeFileSync(path.join(siblingRoot, 'SKILL.md'), [
+      '---',
+      'name: local-demo',
+      'description: Same display name, different local Skill',
+      '---',
+      '',
+    ].join('\n'));
+    const entries = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'));
+    const selected = entries.find(entry => entry.installName === 'local-demo');
+    const sibling = entries.find(entry => entry.installName === 'sibling-demo');
+    assert.ok(selected);
+    assert.ok(sibling);
+
+    const result = await handler.execute(request({
+      request_id: 'delete-exact-local-skill',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.delete,
+      payload: {
+        bot_uid: '42',
+        local_skill_id: selected.localSkillId,
+      },
+    }));
+
+    assert.equal(result.schema, 'xiaoba.skillhub.local_delete.v1');
+    assert.equal(result.deleted, true);
+    assert.equal(result.local_skill_id, selected.localSkillId);
+    assert.equal(fs.existsSync(selected.path), false);
+    assert.equal(fs.existsSync(sibling.path), true);
+  });
+
+  test('deletes an invalid local Skill by its existing marker identity', async () => {
+    const invalidRoot = path.join(runtimeRoot, 'skills', 'invalid-delete');
+    fs.mkdirSync(invalidRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(invalidRoot, 'SKILL.md'),
+      '---\nname: [unterminated\ndescription: Broken YAML\n---\n',
+    );
+    writeBotSkillLocalMarker(invalidRoot, {
+      schema: 'xiaoba.bot-skill-local.v1',
+      localSkillId: 'invalid-delete-id',
+    });
+
+    const result = await handler.execute(request({
+      request_id: 'delete-invalid-local-skill',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.delete,
+      payload: {
+        bot_uid: '42',
+        local_skill_id: 'invalid-delete-id',
+      },
+    }));
+
+    assert.equal(result.deleted, true);
+    assert.equal(fs.existsSync(invalidRoot), false);
+  });
+
+  test('refuses to delete a local Skill directory that contains another Skill', async () => {
+    const parentRoot = path.join(runtimeRoot, 'skills', 'parent-delete');
+    const childRoot = path.join(parentRoot, 'child-delete');
+    fs.mkdirSync(childRoot, { recursive: true });
+    fs.writeFileSync(path.join(parentRoot, 'SKILL.md'), [
+      '---',
+      'name: parent-delete',
+      'description: Parent Skill',
+      '---',
+      '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(childRoot, 'SKILL.md'), [
+      '---',
+      'name: child-delete',
+      'description: Child Skill',
+      '---',
+      '',
+    ].join('\n'));
+    const parent = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))
+      .find(entry => entry.installName === 'parent-delete');
+    assert.ok(parent);
+
+    await assert.rejects(
+      handler.execute(request({
+        request_id: 'delete-parent-with-child',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.delete,
+        payload: {
+          bot_uid: '42',
+          local_skill_id: parent.localSkillId,
+        },
+      })),
+      (error: any) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'LOCAL_SKILL_CONTAINS_SKILLS'
+      ),
+    );
+    assert.equal(fs.existsSync(parentRoot), true);
+    assert.equal(fs.existsSync(childRoot), true);
+  });
+
   test('keeps credential-bearing local Skills visible and shareable', async () => {
     const blockedRoot = path.join(runtimeRoot, 'skills', 'blocked-demo');
     fs.mkdirSync(blockedRoot, { recursive: true });

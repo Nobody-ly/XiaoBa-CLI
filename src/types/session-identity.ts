@@ -167,6 +167,7 @@ export type DeviceGrantOperation =
   | 'skillhub.localWorkspace.get'
   | 'skillhub.localSkill.share'
   | 'skillhub.localSkill.finalize'
+  | 'skillhub.localSkill.delete'
   | 'skillhub.localBot.switch';
 
 export interface ScopedLocalDeviceGrant {

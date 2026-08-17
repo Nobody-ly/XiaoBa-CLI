@@ -20,6 +20,7 @@ describe('CatsCompany runtime device capabilities', () => {
       'skillhub.localWorkspace.get',
       'skillhub.localSkill.share',
       'skillhub.localSkill.finalize',
+      'skillhub.localSkill.delete',
       'skillhub.localBot.switch',
     ]);
     assert.deepEqual(
