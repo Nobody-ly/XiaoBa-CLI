@@ -355,6 +355,7 @@ jobs:
         with:
           name: worker-release
           if-no-files-found: error
+          retention-days: 7
           path: |
             release/worker/*.tar.gz
             release/worker/*.sha256
@@ -369,10 +370,14 @@ jobs:
     env:
       VOLC_TOS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_ACCESS_KEY_ID }}
       VOLC_TOS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
+      VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
+      VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
       TOS_SOURCE_BUCKET: github-hk
       TOS_SOURCE_REGION: cn-hongkong
       TOS_TARGET_BUCKET: github-release
       TOS_TARGET_REGION: cn-guangzhou
+      TOS_WORKER_BUCKET: catsco-worker-release
+      TOS_WORKER_REGION: cn-guangzhou
       XIAOBA_UPDATE_BASE_URL: https://github-release.tos-cn-guangzhou.volces.com/update
       AWS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
@@ -384,6 +389,8 @@ jobs:
           set -euo pipefail
           : "${VOLC_TOS_ACCESS_KEY_ID:?VOLC_TOS_ACCESS_KEY_ID is required}"
           : "${VOLC_TOS_SECRET_ACCESS_KEY:?VOLC_TOS_SECRET_ACCESS_KEY is required}"
+          : "${VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID:?worker publish access key is required}"
+          : "${VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY:?worker publish secret key is required}"
 
       - name: Download macOS x64 artifacts
         uses: actions/download-artifact@v4
@@ -470,9 +477,6 @@ jobs:
               release-mac/arm64/*)
                 printf 'update/macos-arm64/%s\n' "$name"
                 ;;
-              release-worker/*)
-                printf 'update/worker/%s/%s\n' "${GITHUB_REF_NAME#v}" "$name"
-                ;;
               *)
                 printf 'update/%s\n' "$name"
                 ;;
@@ -490,7 +494,7 @@ jobs:
             target_key="$(target_key_for_file "$file")"
             upload_source_file "$file" "$target_key"
             replicated_keys+=("$target_key")
-          done < <(find release-mac release-win release-linux release-worker -type f -print0)
+          done < <(find release-mac release-win release-linux -type f -print0)
 
           printf '%s\n' "${replicated_keys[@]}" > replicated-keys.txt
 
@@ -530,6 +534,41 @@ jobs:
             wait_for_target_object "$key"
           done < replicated-keys.txt
 
+      - name: Publish private worker artifacts to Guangzhou bucket
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+
+          WORKER_ENDPOINT_URL="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
+          WORKER_VERSION="${GITHUB_REF_NAME#v}"
+          WORKER_PREFIX="update/worker/${WORKER_VERSION}"
+          IMMUTABLE_PRIVATE_CACHE_CONTROL="private, max-age=31536000, immutable"
+
+          while IFS= read -r -d '' file; do
+            name="$(basename "$file")"
+            key="${WORKER_PREFIX}/${name}"
+            aws s3 cp "$file" "s3://${TOS_WORKER_BUCKET}/${key}" \
+              --endpoint-url "$WORKER_ENDPOINT_URL" \
+              --acl private \
+              --cache-control "$IMMUTABLE_PRIVATE_CACHE_CONTROL" \
+              --only-show-errors
+            aws s3api head-object \
+              --bucket "$TOS_WORKER_BUCKET" \
+              --key "$key" \
+              --endpoint-url "$WORKER_ENDPOINT_URL" \
+              >/dev/null
+          done < <(find release-worker -maxdepth 1 -type f -print0)
+
+          MANIFEST_URL="https://${TOS_WORKER_BUCKET}.tos-${TOS_WORKER_REGION}.volces.com/${WORKER_PREFIX}/manifest.json"
+          anonymous_status="$(curl --silent --output /dev/null --write-out '%{http_code}' "$MANIFEST_URL")"
+          if [ "$anonymous_status" != "403" ] && [ "$anonymous_status" != "404" ]; then
+            echo "Private worker manifest unexpectedly returned HTTP ${anonymous_status} to an anonymous request"
+            exit 1
+          fi
+
       - name: Expose replicated payloads in Guangzhou bucket
         run: |
           set -euo pipefail
@@ -568,7 +607,6 @@ jobs:
             release-mac/arm64/latest-mac-arm64.yml
             release-win/*
             release-linux/*
-            release-worker/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
