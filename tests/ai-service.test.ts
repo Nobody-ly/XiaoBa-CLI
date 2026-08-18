@@ -407,6 +407,8 @@ test('AIService still retries transient load balancer failures', async () => {
 
 test('AIService retries Responses semantic transient codes and types', async () => {
   const semanticFailures = [
+    { code: 'internal_error' },
+    { code: 'internal_server_error' },
     { code: 'stream_read_error' },
     { code: 'upstream_error' },
     { type: 'server_is_overloaded' },
