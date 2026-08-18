@@ -44,6 +44,17 @@ const artifactPath = path.resolve(
   options.output ||
     path.join(outputDir, `catsco-worker-${releaseId}-linux-x64.tar.gz`),
 );
+const manifestOutputPath = options.manifestOutput
+  ? path.resolve(options.manifestOutput)
+  : "";
+if (
+  manifestOutputPath === artifactPath ||
+  manifestOutputPath === `${artifactPath}.sha256`
+) {
+  throw new Error(
+    "Manifest output must not overwrite the worker artifact or checksum",
+  );
+}
 
 if (process.platform !== "linux" || process.arch !== "x64") {
   throw new Error(
@@ -82,6 +93,7 @@ try {
       "package-lock.json",
       "package.json",
       "prompts",
+      "scripts/update-worker-artifact.sh",
       "skills",
     ],
     options.archiveSource,
@@ -155,9 +167,17 @@ try {
     `${sha256}  ${path.basename(artifactPath)}\n`,
     "utf8",
   );
-  process.stdout.write(
-    `${JSON.stringify({ ...manifest, artifactPath, sha256 }, null, 2)}\n`,
-  );
+  const buildManifest = `${JSON.stringify(
+    { ...manifest, artifactPath, sha256 },
+    null,
+    2,
+  )}\n`;
+  if (manifestOutputPath) {
+    fs.mkdirSync(path.dirname(manifestOutputPath), { recursive: true });
+    fs.writeFileSync(manifestOutputPath, buildManifest, "utf8");
+  } else {
+    process.stdout.write(buildManifest);
+  }
 } finally {
   fs.rmSync(stagingRoot, { recursive: true, force: true });
 }
@@ -168,7 +188,7 @@ function parseArgs(args) {
     const arg = args[index];
     if (arg === "--help" || arg === "-h") {
       process.stdout.write(
-        "Usage: node scripts/build-linux-worker-artifact.mjs [--root PATH] [--output PATH] [--output-dir PATH] [--version VERSION] [--commit SHA] [--archive-source]\n",
+        "Usage: node scripts/build-linux-worker-artifact.mjs [--root PATH] [--output PATH] [--output-dir PATH] [--manifest-output PATH] [--version VERSION] [--commit SHA] [--archive-source]\n",
       );
       process.exit(0);
     }
@@ -180,6 +200,7 @@ function parseArgs(args) {
       "--root": "root",
       "--output": "output",
       "--output-dir": "outputDir",
+      "--manifest-output": "manifestOutput",
       "--version": "version",
       "--commit": "commit",
     }[arg];

@@ -108,6 +108,16 @@ node scripts/deploy-worker-artifact.mjs \
 镜像负责系统/运行时底座；应用制品负责 worker 侧应用层迭代。二者并存，
 制品更新失败可回退到镜像内旧版本。
 
+## 稳定版本发布与懒加载
+
+- 正式 `vX.Y.Z` tag 的桌面发布工作流同时构建 Linux worker 制品，并发布到
+  `update/worker/<version>/`；目录包含 tar.gz、SHA256 和 `manifest.json`。
+- worker 镜像仍负责预装发布时的应用版本。已有 worker 选择其他版本时，控制面
+  只下载当前 worker 本地缺失的制品；已经存在于 `/opt/catsco/releases` 的版本
+  直接切换软链接复用。
+- 更新、回滚都保留 `/srv/catsco-agent`。重置走镜像重建，是独立操作并会清空
+  worker 本地数据。
+
 ## 相关文件
 
 - `scripts/update-worker-artifact.sh` — worker 侧更新/状态/回滚脚本
