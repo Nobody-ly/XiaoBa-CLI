@@ -188,7 +188,7 @@ test('chat-triggered execute_shell is denied before local or remote execution', 
 
   assert.equal(result.ok, false);
   assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
-  assert.match(result.ok ? '' : result.message, /isolated Skill candidate workspace/);
+  assert.match(result.ok ? '' : result.message, /verified SkillHub script/);
   assert.equal(rpcCalls, 0);
 });
 
