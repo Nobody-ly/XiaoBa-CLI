@@ -8,7 +8,6 @@ import type {
   UploadedFileResult,
 } from '../types/tool';
 import { Logger } from '../utils/logger';
-import { checkFormalBotSkillPathAccess } from '../bot-skills/formal-workspace-policy';
 import { resolveToolPath } from '../utils/tool-path-resolver';
 import {
   buildExecutionRouteTargetContext,
@@ -189,10 +188,6 @@ export async function uploadImportFileSource(
   if (!validation.ok) return validation;
 
   const resolved = resolveToolPath(validation.filePath, context);
-  const formalAccess = checkFormalBotSkillPathAccess(context, resolved.absolutePath, 'read');
-  if (!formalAccess.ok) {
-    return { ok: false, errorCode: 'PERMISSION_DENIED', message: formalAccess.reason };
-  }
   if (!resolved.exists) {
     return {
       ok: false,

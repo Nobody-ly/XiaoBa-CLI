@@ -67,7 +67,7 @@ export class ShellTool implements Tool {
       'Windows 目标上 command 会作为 PowerShell 脚本执行，可直接写多行 PowerShell，无需再套一层 powershell -Command。',
       '命令从当前目录启动；每次调用都是新的 shell 进程，只有最终当前目录会保留到后续工具调用。',
       '环境变量、alias、函数和已激活虚拟环境不会自动跨调用保留；需要时在同一条 command 中显式设置。',
-      'CatsCo 聊天只允许直接运行当前 Bot 已启用且完整性校验通过的 SkillHub Node 脚本；请用 write_file 创建运行目录和输入文件，不要拼接 shell 命令。',
+      '当前 Bot 已启用且完整性校验通过的 SkillHub Node 脚本会优先以 shell=false 直接执行；其他命令继续走普通 execute_shell 路径，并遵守既有设备授权和危险命令策略。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -134,8 +134,6 @@ export class ShellTool implements Tool {
       return { ok: false, errorCode: route.errorCode, message: route.message };
     }
     const trustedSkillScript = route.mode === 'local' ? route.trustedSkillScript : undefined;
-    const remoteResult = await executeRouteIfRemote(context, route, 'execute_shell', 'execute_shell', args);
-    if (remoteResult) return remoteResult;
 
     const toolPermission = isToolAllowed(this.definition.name);
     if (!toolPermission.allowed) {
@@ -143,14 +141,15 @@ export class ShellTool implements Tool {
     }
 
     const commandPermission = isBashCommandAllowed(command, {
-      confirmed: context.deviceRpcReceiver || confirm_dangerous === true,
-      env: context.deviceRpcReceiver
-        ? { ...process.env, GAUZ_BASH_ALLOW_DANGEROUS: 'true' }
-        : process.env,
+      confirmed: confirm_dangerous === true,
+      env: process.env,
     });
     if (!commandPermission.allowed) {
       return { ok: false, errorCode: 'PERMISSION_DENIED', message: `Execution blocked: ${commandPermission.reason}` };
     }
+
+    const remoteResult = await executeRouteIfRemote(context, route, 'execute_shell', 'execute_shell', args);
+    if (remoteResult) return remoteResult;
 
     if (description) {
       Logger.info(`Executing command: ${description}`);

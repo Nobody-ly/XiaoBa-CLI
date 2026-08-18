@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { Logger } from '../utils/logger';
-import { checkFormalBotSkillPathAccess } from '../bot-skills/formal-workspace-policy';
 import { resolveToolPath } from '../utils/tool-path-resolver';
 import { resolveLocalFileAccess, resolveLocalFileReference } from './local-file-gateway';
 import { resolveOutboundTarget } from './outbound-gateway';
@@ -115,11 +114,6 @@ export class SendFileTool implements Tool {
       }
       displayPath = formatCatsCoVisiblePath(context, displayPath, { preserveRelative: true });
       visibleInputPath = displayPath;
-    }
-
-    const formalAccess = checkFormalBotSkillPathAccess(context, absolutePath, 'read');
-    if (!formalAccess.ok) {
-      return { ok: false, errorCode: 'PERMISSION_DENIED', message: formalAccess.reason };
     }
 
     if (!fs.existsSync(absolutePath)) {

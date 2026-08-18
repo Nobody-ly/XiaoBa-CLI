@@ -114,18 +114,16 @@ describe('trusted Bot Skill script execution', () => {
     assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')).slice(0, 2), ['safe', ';']);
   });
 
-  test('rejects arbitrary chat shell with actionable Skill workflow guidance', async () => {
+  test('falls back to the ordinary shell for arbitrary chat commands', async () => {
     const result = await new ShellTool().execute({
-      command: 'New-Item -ItemType Directory -Path work\\run',
+      command: 'node -e "console.log(\'ordinary-shell-ok\')"',
     }, catsContext());
 
-    assert.equal(result.ok, false);
-    assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
-    assert.match(result.ok ? '' : result.message, /write_file/);
-    assert.match(result.ok ? '' : result.message, /one direct node/i);
+    assert.equal(result.ok, true);
+    assert.match(result.ok ? String(result.content) : '', /ordinary-shell-ok/);
   });
 
-  test('rejects Node scripts outside the verified current Bot Skill package', async () => {
+  test('falls back to the ordinary shell for Node scripts outside the verified Skill package', async () => {
     const externalScript = path.join(workspaceRoot, 'external.mjs');
     fs.writeFileSync(externalScript, "console.log('must not run');\n", 'utf8');
     const decision = resolveTrustedBotSkillScriptInvocation(
@@ -136,11 +134,11 @@ describe('trusted Bot Skill script execution', () => {
     assert.equal(decision.ok, false);
     assert.match(decision.ok ? '' : decision.reason, /outside an installed Bot Skill/);
     const result = await new ShellTool().execute({ command: `node "${externalScript}"` }, catsContext());
-    assert.equal(result.ok, false);
-    assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
+    assert.equal(result.ok, true);
+    assert.match(result.ok ? String(result.content) : '', /must not run/);
   });
 
-  test('rejects target overrides even for a verified current Bot Skill script', async () => {
+  test('keeps normal target routing when a trusted Skill command has a target override', async () => {
     const command = `node "${scriptPath}" "${path.join(workspaceRoot, 'remote.json')}"`;
     const decision = resolveTrustedBotSkillScriptInvocation(command, catsContext(), { target: 'Alice' });
 
@@ -148,7 +146,7 @@ describe('trusted Bot Skill script execution', () => {
     assert.match(decision.ok ? '' : decision.reason, /without a target override/);
     const result = await new ShellTool().execute({ command, target: 'Alice' }, catsContext());
     assert.equal(result.ok, false);
-    assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
+    assert.equal(result.ok ? '' : result.errorCode, 'TARGET_NOT_FOUND');
   });
 
   test('rejects a verified package that is not enabled for the active Bot', async () => {
@@ -163,7 +161,7 @@ describe('trusted Bot Skill script execution', () => {
     assert.match(decision.ok ? '' : decision.reason, /current Bot definition/);
   });
 
-  test('fails closed after an installed Skill script is modified locally', async () => {
+  test('falls back to the ordinary shell after an installed Skill script is modified locally', async () => {
     fs.appendFileSync(scriptPath, '// tampered\n', 'utf8');
     const command = `node "${scriptPath}" "${path.join(workspaceRoot, 'tampered.json')}"`;
     const decision = resolveTrustedBotSkillScriptInvocation(command, catsContext());
@@ -171,8 +169,8 @@ describe('trusted Bot Skill script execution', () => {
     assert.equal(decision.ok, false);
     assert.match(decision.ok ? '' : decision.reason, /content hash/);
     const result = await new ShellTool().execute({ command }, catsContext());
-    assert.equal(result.ok, false);
-    assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
+    assert.equal(result.ok, true);
+    assert.equal(fs.existsSync(path.join(workspaceRoot, 'tampered.json')), true);
   });
 
   function catsContext(overrides: Partial<ToolExecutionContext> = {}): ToolExecutionContext {

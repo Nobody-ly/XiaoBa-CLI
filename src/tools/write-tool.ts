@@ -2,7 +2,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { Logger } from '../utils/logger';
-import { checkFormalBotSkillPathAccess } from '../bot-skills/formal-workspace-policy';
 import { isToolAllowed, isPathAllowed } from '../utils/safety';
 import { formatCatsCoVisiblePath } from './tool-gateway';
 import { executeRouteIfRemote, resolveExecutionRoute, targetParameterDescription } from './execution-router';
@@ -58,11 +57,6 @@ export class WriteTool implements Tool {
     const absolutePath = path.isAbsolute(file_path)
       ? file_path
       : path.join(context.workingDirectory, file_path);
-
-    const formalAccess = checkFormalBotSkillPathAccess(context, absolutePath, 'write');
-    if (!formalAccess.ok) {
-      return { ok: false, errorCode: 'PERMISSION_DENIED', message: formalAccess.reason };
-    }
 
     const pathPermission = isPathAllowed(absolutePath, context.workingDirectory);
     if (!pathPermission.allowed) {
