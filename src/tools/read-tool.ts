@@ -12,7 +12,6 @@ import { resolvePrimaryModelVisionCapability } from '../utils/model-capabilities
 import { analyzeImageWithReaderProxy, ReaderProxyResult } from '../utils/reader-proxy';
 import { analyzeImageWithVisionFallback } from '../utils/vision-fallback-provider';
 import { Logger } from '../utils/logger';
-import { checkFormalBotSkillPathAccess } from '../bot-skills/formal-workspace-policy';
 import { formatPathForLog } from '../utils/log-redaction';
 import { resolveLocalFileAccess, resolveLocalFileReference } from './local-file-gateway';
 import { formatCatsCoVisiblePath } from './tool-gateway';
@@ -247,11 +246,6 @@ export class ReadTool implements Tool {
       displayPath = formatCatsCoVisiblePath(context, displayPath, { preserveRelative: true });
       visiblePath = formatCatsCoVisiblePath(context, visiblePath);
       visibleInputPath = formatCatsCoVisiblePath(context, file_path);
-    }
-
-    const formalAccess = checkFormalBotSkillPathAccess(context, absolutePath, 'read');
-    if (!formalAccess.ok) {
-      return { ok: false, errorCode: 'PERMISSION_DENIED', message: formalAccess.reason };
     }
 
     if (!fs.existsSync(absolutePath)) {

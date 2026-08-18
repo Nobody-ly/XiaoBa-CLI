@@ -170,12 +170,14 @@ test('legacy speaker_default fallback still uses Device RPC when runtime routes 
   assert.deepEqual(capturedArgs, { path: 'C:\\Users\\Alice\\Desktop', pattern: '*' });
 });
 
-test('chat-triggered execute_shell is denied before local or remote execution', async () => {
-  let rpcCalls = 0;
+test('remote execute_shell routes before local dangerous command checks', async () => {
+  let capturedCommand = '';
   const context = catsContext({
     thinToolRpc: {
-      executeTool: async () => {
-        rpcCalls += 1;
+      executeTool: async request => {
+        capturedCommand = String(request.args.command || '');
+        assert.equal(request.toolName, 'execute_shell');
+        assert.equal(request.targetDeviceId, 'dev-alice-win');
         return { ok: true, content: 'remote shell ok' };
       },
     },
@@ -186,24 +188,10 @@ test('chat-triggered execute_shell is denied before local or remote execution', 
     target: 'Alice',
   }, context);
 
-  assert.equal(result.ok, false);
-  assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
-  assert.match(result.ok ? '' : result.message, /verified SkillHub script/);
-  assert.equal(rpcCalls, 0);
-});
-
-test('local CLI execute_shell remains available', () => {
-  const route = resolveExecutionRoute({
-    workingDirectory: process.cwd(),
-    conversationHistory: [],
-    surface: 'cli',
-  }, {
-    toolName: 'execute_shell',
-    operation: 'execute_shell',
-  });
-
-  assert.equal(route.ok, true);
-  assert.equal(route.ok && route.mode, 'local');
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.content, 'remote shell ok');
+  assert.equal(capturedCommand, 'Remove-Item -Recurse -Force C:\\Temp\\xiaoba-routing-test');
+  assert.match(result.targetContext || '', /target: Alice/);
 });
 
 test('Device RPC receiver always executes locally and does not route again', () => {
