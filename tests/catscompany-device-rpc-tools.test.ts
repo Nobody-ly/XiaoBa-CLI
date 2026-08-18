@@ -467,7 +467,7 @@ describe('CatsCompany Device RPC file tools', () => {
     assert.ok(captured.result);
     assert.equal(captured.result.result, undefined);
     assert.equal(captured.result.error.code, 'PERMISSION_DENIED');
-    assert.match(String(captured.result.error.message), /isolated Skill candidate workspace/);
+    assert.match(String(captured.result.error.message), /verified SkillHub script/);
   });
 
   test('rejects Device RPC requests for another target device', async () => {
