@@ -134,8 +134,6 @@ export class ShellTool implements Tool {
       return { ok: false, errorCode: route.errorCode, message: route.message };
     }
     const trustedSkillScript = route.mode === 'local' ? route.trustedSkillScript : undefined;
-    const remoteResult = await executeRouteIfRemote(context, route, 'execute_shell', 'execute_shell', args);
-    if (remoteResult) return remoteResult;
 
     const toolPermission = isToolAllowed(this.definition.name);
     if (!toolPermission.allowed) {
@@ -143,14 +141,15 @@ export class ShellTool implements Tool {
     }
 
     const commandPermission = isBashCommandAllowed(command, {
-      confirmed: context.deviceRpcReceiver || confirm_dangerous === true,
-      env: context.deviceRpcReceiver
-        ? { ...process.env, GAUZ_BASH_ALLOW_DANGEROUS: 'true' }
-        : process.env,
+      confirmed: confirm_dangerous === true,
+      env: process.env,
     });
     if (!commandPermission.allowed) {
       return { ok: false, errorCode: 'PERMISSION_DENIED', message: `Execution blocked: ${commandPermission.reason}` };
     }
+
+    const remoteResult = await executeRouteIfRemote(context, route, 'execute_shell', 'execute_shell', args);
+    if (remoteResult) return remoteResult;
 
     if (description) {
       Logger.info(`Executing command: ${description}`);
