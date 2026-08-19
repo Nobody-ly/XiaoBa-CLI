@@ -115,6 +115,11 @@ export function resolveCatsCoRuntimeConfig(
   );
   const serverUrl = firstNonEmpty(explicitServerUrl, config.catscompany?.serverUrl, auth.serverUrl);
   const rawApiKey = firstNonEmpty(auth.apiKey, config.catscompany?.apiKey);
+  const runtimeCredential = firstNonEmpty(
+    effectiveEnv.CATSCO_RUNTIME_CREDENTIAL,
+    effectiveEnv.CATSCOMPANY_RUNTIME_CREDENTIAL,
+    config.catscompany?.runtimeCredential,
+  );
   const httpBaseUrl = normalizeBaseUrl(
     firstNonEmpty(explicitHttpBaseUrl, config.catscompany?.httpBaseUrl, auth.httpBaseUrl),
     DEFAULT_CATSCO_HTTP_BASE_URL,
@@ -146,6 +151,7 @@ export function resolveCatsCoRuntimeConfig(
       botUid,
       bodyId,
       installationId,
+      runtimeCredential,
       ownerUserId,
       deviceName: localConfig.device?.name,
       runtimeRole,
