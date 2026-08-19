@@ -205,6 +205,25 @@
     </form>
   </dialog>
 
+  <dialog class="agent-switch-dialog logout-dialog" id="logout-dialog" aria-labelledby="logout-title">
+    <form method="dialog" class="agent-switch-shell">
+      <header class="agent-switch-header">
+        <div>
+          <h2 id="logout-title">退出 CatsCo 账号</h2>
+          <p>退出后，这台电脑上的 Connector 会停止运行。</p>
+        </div>
+        <button class="dialog-close" id="logout-close" type="submit" value="cancel" aria-label="关闭">×</button>
+      </header>
+      <div class="agent-switch-body logout-dialog-body">
+        确定要退出当前账号吗？之后需要重新登录才能让 WebApp 使用这台电脑。
+      </div>
+      <footer class="agent-switch-footer">
+        <button class="button button-quiet" id="logout-cancel" type="submit" value="cancel">取消</button>
+        <button class="button button-danger" id="logout-confirm" type="button">退出账号</button>
+      </footer>
+    </form>
+  </dialog>
+
   <div class="toast" id="toast" role="status" hidden></div>
   <script src="connector.js"></script>
 </body>

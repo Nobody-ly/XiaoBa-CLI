@@ -109,6 +109,8 @@
     update: {},
     refreshInFlight: null,
     loginBusy: false,
+    openWebAppAfterLogin: false,
+    logoutBusy: false,
     actionBusy: false,
     fullPollTimer: null,
     bootstrapPollTimer: null,
@@ -269,6 +271,27 @@
     if (view.key === 'error') renderError(view);
     renderUpdate();
     syncPolling(view.key);
+    maybeOpenWebAppAfterLogin(view.key);
+  }
+
+  function maybeOpenWebAppAfterLogin(viewKey) {
+    if (viewKey !== 'ready' || !state.openWebAppAfterLogin) return;
+    state.openWebAppAfterLogin = false;
+    window.setTimeout(() => {
+      void openWebAppFromDashboard();
+    }, 250);
+  }
+
+  async function openWebAppFromDashboard() {
+    try {
+      if (window.catscoDesktop?.openWebApp) {
+        await window.catscoDesktop.openWebApp();
+      } else {
+        window.open('https://app.catsco.cc', '_blank', 'noopener,noreferrer');
+      }
+    } finally {
+      await window.catscoDesktop?.hideWindow?.();
+    }
   }
 
   function renderAuth(view) {
@@ -359,6 +382,7 @@
       await request('/cats/auth/login', { method: 'POST', body: JSON.stringify({ account, password }) });
       $('login-password').value = '';
       await request('/cats/bootstrap', { method: 'POST', body: JSON.stringify({ trigger: 'login' }) });
+      state.openWebAppAfterLogin = true;
       state.bootstrap = { stage: 'connecting', message: '登录成功，正在自动连接这台电脑' };
       await refresh({ force: true });
     } catch (error) {
@@ -738,16 +762,32 @@
     }
   }
 
+  function openLogoutDialog() {
+    if (state.logoutBusy) return;
+    $('logout-dialog').showModal();
+  }
+
   async function logout() {
-    if (!window.confirm('退出后，本机 Connector 会停止。确定退出这个 CatsCo 账号吗？')) return;
+    if (state.logoutBusy) return;
+    state.logoutBusy = true;
+    $('logout-confirm').disabled = true;
+    $('logout-confirm').textContent = '正在退出…';
     try {
       await request('/cats/auth/logout', { method: 'POST', body: '{}' });
+      $('logout-dialog').close();
+      closeManagement();
       state.cats = {};
       state.bootstrap = { stage: 'waiting_for_login' };
       await refresh({ force: true });
-      closeManagement();
+      window.requestAnimationFrame(() => {
+        $('login-account')?.focus({ preventScroll: true });
+      });
     } catch (error) {
       showToast(`退出失败：${humanError(error)}`);
+    } finally {
+      state.logoutBusy = false;
+      $('logout-confirm').disabled = false;
+      $('logout-confirm').textContent = '退出账号';
     }
   }
 
@@ -801,10 +841,18 @@
   }
 
   $('login-form').addEventListener('submit', login);
+  $('webapp-button').addEventListener('click', (event) => {
+    event.preventDefault();
+    void openWebAppFromDashboard();
+  });
   $('refresh-button').addEventListener('click', () => refresh({ force: true }));
   $('retry-button').addEventListener('click', retry);
   $('diagnostic-retry').addEventListener('click', retry);
-  $('logout-button').addEventListener('click', logout);
+  $('logout-button').addEventListener('click', openLogoutDialog);
+  $('logout-confirm').addEventListener('click', () => { void logout(); });
+  $('logout-dialog').addEventListener('cancel', (event) => {
+    if (state.logoutBusy) event.preventDefault();
+  });
   $('update-button').addEventListener('click', checkUpdate);
   $('management-open').addEventListener('click', () => { void openManagement(); });
   $('agent-switch-open').addEventListener('click', () => { void openAgentSwitch(); });
