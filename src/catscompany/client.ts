@@ -858,16 +858,23 @@ export class CatsClient extends EventEmitter {
       throw new CatsSendError('ack', `Skill mutation grant request_id already pending: ${requestID}`, 409);
     }
     const msgId = `${++this.msgId}`;
+    // Keep the client request boundary explicit. Runtime identity and grant
+    // fields are server-issued result fields and must never be injectable by
+    // callers through an `as any` or plain JavaScript object.
     const message: CatsSkillMutationGrantMessage = {
-      ...request,
+      request_id: requestID,
       client_request_id: clientRequestID,
       source_topic_id: sourceTopicID,
+      source_message_id: request.source_message_id,
       local_skill_id: localSkillID,
+      operation: request.operation,
       candidate_content_hash: candidateHash,
+      candidate_size_bytes: request.candidate_size_bytes,
+      expected_definition_revision: request.expected_definition_revision,
       ...(expectedPreviousHash ? { expected_previous_content_hash: expectedPreviousHash } : {}),
+      ...(request.before_reference ? { before_reference: request.before_reference } : {}),
       id: msgId,
       type: 'request',
-      request_id: requestID,
     };
     const resultPromise = new Promise<CatsSkillMutationGrantMessage>((resolve, reject) => {
       const timer = setTimeout(() => {

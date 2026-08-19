@@ -230,6 +230,81 @@ describe('CatsCompany client body identity', () => {
     assert.equal(result.runtime_body_id, 'body-test');
   });
 
+  test('does not forward server-issued identity fields from an untyped request', async () => {
+    clearIdentityEnv();
+    const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+    servers.push(server);
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const requestPromise = new Promise<any>(resolve => {
+      server.once('connection', socket => {
+        socket.on('message', data => {
+          const message = JSON.parse(data.toString());
+          if (message.hi) {
+            socket.send(JSON.stringify({
+              ctrl: { code: 200, params: { build: 'catscompany', uid: 42, name: 'Bot' } },
+            }));
+            return;
+          }
+          if (!message.skill_mutation_grant) return;
+          resolve(message.skill_mutation_grant);
+          socket.send(JSON.stringify({
+            skill_mutation_grant: {
+              id: message.skill_mutation_grant.id,
+              type: 'result',
+              request_id: message.skill_mutation_grant.request_id,
+              client_request_id: message.skill_mutation_grant.client_request_id,
+              grant: 'candidate-bound-grant',
+              expires_at: Date.now() + 60_000,
+              actor_user_id: 'usr7',
+              agent_id: 'usr42',
+              runtime_body_id: 'body-test',
+            },
+          }));
+        });
+      });
+    });
+    const address = server.address() as AddressInfo;
+    const client = new CatsClient({
+      serverUrl: `ws://127.0.0.1:${address.port}`,
+      apiKey: 'cc-test-key',
+      botUid: '42',
+      bodyId: 'body-test',
+      installationId: 'install-test',
+      runtimeCredential: 'runtime-credential-test',
+    });
+    client.on('error', () => undefined);
+    const ready = new Promise<void>(resolve => client.once('ready', () => resolve()));
+    client.connect();
+    await withTimeout(ready);
+
+    const resultPromise = client.requestSkillMutationGrant({
+      client_request_id: 'candidate-request-2',
+      source_topic_id: 'p2p_7_42',
+      source_message_id: 102,
+      local_skill_id: 'review-pr',
+      operation: 'replace',
+      candidate_content_hash: 'c'.repeat(64),
+      candidate_size_bytes: 1024,
+      expected_definition_revision: 10,
+      ...( {
+        actor_user_id: 'forged-actor',
+        agent_id: 'forged-agent',
+        runtime_body_id: 'forged-body',
+        grant: 'forged-grant',
+        expires_at: Date.now() + 86_400_000,
+      } as any),
+    } as any);
+    const request = await withTimeout(requestPromise);
+    await withTimeout(resultPromise);
+    client.disconnect();
+
+    assert.equal(request.actor_user_id, undefined);
+    assert.equal(request.agent_id, undefined);
+    assert.equal(request.runtime_body_id, undefined);
+    assert.equal(request.grant, undefined);
+    assert.equal(request.expires_at, undefined);
+  });
+
   test('fails before connecting when body id is missing', () => {
     clearIdentityEnv();
     const client = new CatsClient({
