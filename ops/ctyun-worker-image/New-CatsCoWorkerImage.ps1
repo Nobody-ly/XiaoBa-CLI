@@ -29,20 +29,17 @@ param(
     [string]$ImageName = "",
     [string]$ArtifactPath = "",
     [string]$ArtifactSha256 = "",
+    [string]$ArtifactUrl = "",
+    [string]$PrepareScriptUrl = "",
+    [string]$PrepareScriptSha256 = "",
     [string]$BuildNumber = "",
     [string]$BuildAttempt = "1",
     [string]$BuildIdentity = "",
     [string]$BootDiskType = "SATA",
     [ValidateRange(40, 2048)]
     [int]$BootDiskSize = 40,
-    [ValidateRange(1, 300)]
-    [int]$BuilderBandwidth = 5,
     [ValidateRange(10, 120)]
     [int]$TimeoutMinutes = 50,
-    [ValidateRange(10, 90)]
-    [int]$RemoteBuildTimeoutMinutes = 45,
-    [ValidateRange(10, 60)]
-    [int]$ArtifactTransferTimeoutMinutes = 30,
     [ValidateRange(60, 300)]
     [int]$BakeTimeoutMinutes = 240,
     [ValidateRange(10, 90)]
@@ -62,7 +59,6 @@ Set-StrictMode -Version Latest
 $script:BuilderID = ""
 $script:BuilderName = ""
 $script:BuilderResourceID = ""
-$script:BuilderIP = ""
 $script:BuilderCreateAttempted = $false
 $script:KeyPairName = ""
 $script:KeyPairID = ""
@@ -367,40 +363,6 @@ function Wait-ForInstance {
         Start-Sleep -Seconds 8
     }
     throw "Timed out waiting for builder state: $($States -join ', ')"
-}
-
-function Wait-ForSsh {
-    param(
-        [Parameter(Mandatory = $true)][string]$IP,
-        [Parameter(Mandatory = $true)][string]$PrivateKey,
-        [Parameter(Mandatory = $true)][string]$KnownHosts
-    )
-
-    $deadline = Get-BoundedDeadline `
-        -RequestedSeconds (12 * 60) `
-        -Phase "temporary builder SSH wait"
-    while ((Get-Date) -lt $deadline) {
-        # Match the reported status text instead of the exit code of
-        # `cloud-init status --wait`: Tianyi's Ubuntu images finish
-        # cloud-init in a done state yet return exit code 2 (module error)
-        # from --wait, which would fail every SSH probe even though the system
-        # is fully usable. `cloud-init status` prints 'status: done' in that
-        # case, so grep on it; still requires SSH + root key auth to succeed.
-        & ssh `
-            -i $PrivateKey `
-            -o BatchMode=yes `
-            -o ConnectTimeout=6 `
-            -o ServerAliveInterval=15 `
-            -o ServerAliveCountMax=3 `
-            -o StrictHostKeyChecking=accept-new `
-            -o "UserKnownHostsFile=$KnownHosts" `
-            "root@$IP" "cloud-init status 2>/dev/null | grep -q '^status: done'" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            return
-        }
-        Start-Sleep -Seconds 8
-    }
-    throw "Timed out waiting for SSH on temporary builder"
 }
 
 function Get-Image {
@@ -994,7 +956,7 @@ if (-not (Get-Command "git" -ErrorAction SilentlyContinue)) {
     throw "Missing required command: git"
 }
 if ($Mode -in @("Create", "Cleanup")) {
-    foreach ($command in @("ctyun-cli", "ssh", "scp", "ssh-keygen", "timeout")) {
+    foreach ($command in @("ctyun-cli", "ssh-keygen", "timeout")) {
         if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
             throw "Missing required command: $command"
         }
@@ -1082,6 +1044,25 @@ if ($ArtifactPath) {
 } elseif ($ArtifactSha256) {
     throw "ArtifactSha256 cannot be used without ArtifactPath"
 }
+if ($Mode -eq "Create") {
+    $artifactUri = $null
+    if (
+        -not [Uri]::TryCreate($ArtifactUrl, [UriKind]::Absolute, [ref]$artifactUri) -or
+        $artifactUri.Scheme -ne "https"
+    ) {
+        throw "ArtifactUrl must be an absolute HTTPS URL in Create mode"
+    }
+    $prepareScriptUri = $null
+    if (
+        -not [Uri]::TryCreate($PrepareScriptUrl, [UriKind]::Absolute, [ref]$prepareScriptUri) -or
+        $prepareScriptUri.Scheme -ne "https"
+    ) {
+        throw "PrepareScriptUrl must be an absolute HTTPS URL in Create mode"
+    }
+    if ($PrepareScriptSha256 -notmatch "^[0-9a-fA-F]{64}$") {
+        throw "PrepareScriptSha256 must be a SHA-256 hex digest in Create mode"
+    }
+}
 
 $plan = [ordered]@{
     mode = $Mode
@@ -1101,6 +1082,7 @@ $plan = [ordered]@{
     securityGroupID = $SecurityGroupID
     bootDisk = "$BootDiskType $BootDiskSize GiB"
     artifactSource = $(if ($resolvedArtifactPath) { "local source-free CI artifact" } else { "not supplied in plan mode" })
+    builderNetwork = "private subnet with cloud-init artifact pull"
     mutatesExistingWorkers = $false
 }
 $plan | ConvertTo-Json
@@ -1162,8 +1144,6 @@ $script:TemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) "catsco-image-$([gu
 New-Item -ItemType Directory -Path $script:TemporaryRoot | Out-Null
 $privateKey = Join-Path $script:TemporaryRoot "builder-rsa"
 $publicKeyPath = "$privateKey.pub"
-$knownHosts = Join-Path $script:TemporaryRoot "known_hosts"
-$remoteBuildScript = Join-Path $script:TemporaryRoot "build-image.sh"
 $primaryFailure = $null
 $cleanupFailure = $null
 $result = $null
@@ -1238,6 +1218,40 @@ try {
         throw "Temporary builder name is already in use: $script:BuilderName"
     }
 
+    $artifactUrlBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($ArtifactUrl)
+    )
+    $prepareScriptUrlBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($PrepareScriptUrl)
+    )
+    $artifactName = "catsco-worker-$releaseId-linux-x64.tar.gz"
+    $bootstrap = @"
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec > >(tee -a /var/log/catsco-image-build.log) 2>&1
+artifact_url="`$(printf '%s' '$artifactUrlBase64' | base64 -d)"
+prepare_script_url="`$(printf '%s' '$prepareScriptUrlBase64' | base64 -d)"
+curl --fail --silent --show-error --location --retry 8 --retry-all-errors \
+  "`$prepare_script_url" --output /tmp/prepare-image.sh
+printf '%s  %s\n' '$($PrepareScriptSha256.ToLowerInvariant())' /tmp/prepare-image.sh | sha256sum --check --strict
+chmod 700 /tmp/prepare-image.sh
+curl --fail --silent --show-error --location --retry 8 --retry-all-errors \
+  "`$artifact_url" --output '/tmp/$artifactName'
+bash /tmp/prepare-image.sh \
+  --artifact '/tmp/$artifactName' \
+  --sha256 '$ArtifactSha256' \
+  --version '$version' \
+  --commit '$commit'
+rm -f '/tmp/$artifactName'
+bash /tmp/prepare-image.sh --finalize
+sync
+shutdown -h now
+"@
+    $userData = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
+    if ($userData.Length -gt 16384) {
+        throw "Generated builder userData exceeds Tianyi Cloud's 16384-character limit"
+    }
+
     $createResponse = Invoke-Ctyun @(
         "ecs", "CreateEcsInstance",
         "--regionID", $RegionID,
@@ -1256,12 +1270,9 @@ try {
         "--networkCardList", "[{`"isMaster`":true,`"subnetID`":`"$SubnetID`"}]",
         "--secGroupList", "[`"$SecurityGroupID`"]",
         "--keyPairID", $script:KeyPairID,
+        "--userData", $userData,
         "--onDemand", "true",
-        "--extIP", "1",
-        "--bandwidth", "$BuilderBandwidth",
-        "--ipVersion", "ipv4",
-        "--lineType", "standalone",
-        "--demandBillingType", "upflowc",
+        "--extIP", "0",
         "--monitorService", "false",
         "--securityProduct", "false",
         "--trustInstance", "false",
@@ -1284,84 +1295,9 @@ try {
     }
     Assert-TemporaryBuilder $builder
 
-    $builder = Wait-ForInstance -States @("running", "active") -RequireIP
-    $script:BuilderIP = [string]$builder.floatingIP
-    Wait-ForSsh -IP $script:BuilderIP -PrivateKey $privateKey -KnownHosts $knownHosts
-
-    $artifactName = "catsco-worker-$releaseId-linux-x64.tar.gz"
-    $remoteScriptContent = @"
-#!/usr/bin/env bash
-set -Eeuo pipefail
-ARTIFACT='/tmp/$artifactName'
-bash /tmp/prepare-image.sh \
-  --artifact "`$ARTIFACT" \
-  --sha256 '$ArtifactSha256' \
-  --version '$version' \
-  --commit '$commit'
-rm -f "`$ARTIFACT"
-bash /tmp/prepare-image.sh --finalize
-"@
-    [IO.File]::WriteAllText(
-        $remoteBuildScript,
-        $remoteScriptContent,
-        [Text.UTF8Encoding]::new($false)
-    )
-
-    $sshOptions = @(
-        "-i", $privateKey,
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "UserKnownHostsFile=$knownHosts"
-    )
-    $artifactTransferTimeoutSeconds = Get-BoundedTimeoutSeconds `
-        -RequestedSeconds ($ArtifactTransferTimeoutMinutes * 60) `
-        -Phase "worker artifact transfer"
-    Invoke-External -Command "timeout" -Arguments (@(
-        "--signal=TERM",
-        "--kill-after=30s",
-        "$($artifactTransferTimeoutSeconds)s",
-        "scp"
-    ) + $sshOptions + @(
-        $resolvedArtifactPath,
-        "root@$($script:BuilderIP):/tmp/$artifactName"
-    ))
-    $scriptTransferTimeoutSeconds = Get-BoundedTimeoutSeconds `
-        -RequestedSeconds (5 * 60) `
-        -Phase "image preparation script transfer"
-    Invoke-External -Command "timeout" -Arguments (@(
-        "--signal=TERM",
-        "--kill-after=30s",
-        "$($scriptTransferTimeoutSeconds)s",
-        "scp"
-    ) + $sshOptions + @(
-        "$PSScriptRoot/prepare-image.sh",
-        $remoteBuildScript,
-        "root@$($script:BuilderIP):/tmp/"
-    ))
-    $remoteBuildTimeoutSeconds = Get-BoundedTimeoutSeconds `
-        -RequestedSeconds (($RemoteBuildTimeoutMinutes + 3) * 60) `
-        -Phase "remote image preparation"
-    Invoke-External -Command "timeout" -Arguments (@(
-        "--signal=TERM",
-        "--kill-after=150s",
-        "$($remoteBuildTimeoutSeconds)s",
-        "ssh"
-    ) + $sshOptions + @(
-        "root@$($script:BuilderIP)",
-        "chmod 700 /tmp/build-image.sh /tmp/prepare-image.sh && timeout --signal=TERM --kill-after=120s $($RemoteBuildTimeoutMinutes)m bash /tmp/build-image.sh"
-    ))
-
-    $builder = Resolve-BuilderInstance
-    Assert-TemporaryBuilder $builder
-    Invoke-Ctyun @(
-        "ecs", "StopEcsInstance",
-        "--regionID", $RegionID,
-        "--instanceID", $script:BuilderID,
-        "--force", "false"
-    ) | Out-Null
+    # cloud-init powers off only after artifact verification, preparation and
+    # finalization all succeed. A failed bootstrap stays running, times out,
+    # and is removed by the existing compensating cleanup path.
     Wait-ForInstance -States @("stopped", "shutoff") | Out-Null
 
     $script:ImageCreateAttempted = $true
