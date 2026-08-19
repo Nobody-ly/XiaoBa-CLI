@@ -33,9 +33,9 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 
 .connector-window {
-  width: min(1080px, 100%);
-  height: min(700px, 100%);
-  min-width: 720px;
+  width: min(780px, 100%);
+  height: min(520px, 100%);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -44,6 +44,61 @@ button, a { -webkit-tap-highlight-color: transparent; }
   background: var(--surface);
   box-shadow: 0 16px 44px rgba(25, 42, 70, .09);
 }
+
+body[data-view="ready"] .app-shell { padding: 10px; }
+body[data-view="ready"] .connector-window { border-radius: 12px; }
+body[data-view="ready"] .topbar { height: 58px; flex-basis: 58px; padding: 0 18px; }
+body[data-view="ready"] .brand { gap: 10px; }
+body[data-view="ready"] .brand img { width: 34px; height: 34px; }
+body[data-view="ready"] .brand strong { font-size: 17px; }
+body[data-view="ready"] .brand span { font-size: 12px; }
+body[data-view="ready"] .top-actions #refresh-button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+body[data-view="ready"] .notice { min-height: 36px; margin: 10px 16px 0; padding: 7px 11px; font-size: 13px; }
+body[data-view="ready"] .main-grid { padding: 10px 12px 12px; grid-template-columns: minmax(0, 1fr) 250px; gap: 10px; }
+body[data-view="ready"] .primary-panel { padding: 18px 22px 10px; border-radius: 10px; }
+body[data-view="ready"] .summary-panel { padding: 2px 14px; border-radius: 10px; }
+body[data-view="ready"] .status-line { gap: 8px; font-size: 15px; }
+body[data-view="ready"] h1 { margin-top: 16px; font-size: 34px; letter-spacing: 0; }
+body[data-view="ready"] .hero-copy { margin: 9px 0 18px; font-size: 14px; line-height: 1.5; }
+body[data-view="ready"] .hero-actions .button { min-height: 36px; padding: 0 13px; font-size: 13px; }
+body[data-view="ready"] .close-hint { margin-top: 9px; font-size: 12px; }
+body[data-view="ready"] .summary-card { padding: 12px 2px; }
+body[data-view="ready"] .summary-card > span,
+body[data-view="ready"] .summary-card div > span,
+body[data-view="ready"] .summary-card-heading > span { font-size: 12px; }
+body[data-view="ready"] .summary-card > strong,
+body[data-view="ready"] .summary-card div > strong { margin-top: 4px; font-size: 16px; }
+body[data-view="ready"] .summary-card > small { margin-top: 2px; font-size: 11px; }
+body[data-view="ready"] .summary-action { min-height: 26px; padding: 0 8px; font-size: 11px; }
+body[data-view="ready"] .management-entry { min-height: 39px; margin-top: 8px; }
+body[data-view="ready"] .management-entry strong { font-size: 13px; }
+body[data-view="ready"] .management-entry small { font-size: 11px; }
+
+/* The login screen is an entry point, not a second dashboard. Keep it in one
+   compact column so the form is fully visible without nested scrollbars. */
+body[data-view="auth"] .topbar { height: 58px; flex-basis: 58px; padding: 0 18px; }
+body[data-view="auth"] .brand { gap: 10px; }
+body[data-view="auth"] .brand img { width: 34px; height: 34px; }
+body[data-view="auth"] .brand strong { font-size: 17px; }
+body[data-view="auth"] .brand span { font-size: 12px; }
+body[data-view="auth"] .top-actions #refresh-button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+body[data-view="auth"] .notice { min-height: 36px; margin: 10px 16px 0; padding: 7px 11px; font-size: 13px; }
+body[data-view="auth"] .main-grid { grid-template-columns: minmax(0, 1fr); padding: 10px 14px 14px; overflow: hidden; }
+body[data-view="auth"] .summary-panel,
+body[data-view="auth"] .management-entry { display: none; }
+body[data-view="auth"] .primary-panel { padding: 18px 24px 16px; overflow: visible; }
+body[data-view="auth"] .primary-content { overflow: visible; justify-content: flex-start; }
+body[data-view="auth"] .status-line { gap: 8px; font-size: 15px; }
+body[data-view="auth"] h1 { margin-top: 14px; font-size: 38px; letter-spacing: 0; }
+body[data-view="auth"] .hero-copy { margin: 8px 0 14px; font-size: 15px; line-height: 1.5; }
+body[data-view="auth"] .login-card { width: 100%; padding: 14px; gap: 10px; }
+body[data-view="auth"] .form-heading strong { font-size: 16px; }
+body[data-view="auth"] .form-heading span { margin-top: 2px; font-size: 12px; }
+body[data-view="auth"] .login-card label span { margin-bottom: 4px; font-size: 12px; }
+body[data-view="auth"] .login-card input { height: 36px; font-size: 13px; }
+body[data-view="auth"] .form-actions { gap: 8px; }
+body[data-view="auth"] .form-actions .button { min-height: 36px; padding: 0 14px; font-size: 13px; }
+body[data-view="auth"] .text-link { font-size: 12px; }
 
 .topbar {
   height: 76px;
@@ -231,6 +286,8 @@ h1 {
   box-shadow: 0 24px 70px rgba(18, 31, 52, .24);
 }
 .agent-switch-dialog::backdrop { background: rgba(24, 32, 51, .34); }
+.logout-dialog { width: min(460px, calc(100vw - 40px)); }
+.logout-dialog-body { color: var(--muted); font-size: 14px; line-height: 1.65; }
 .agent-switch-shell { min-height: 0; max-height: inherit; display: flex; flex-direction: column; }
 .agent-switch-header { padding: 22px 24px 17px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); }
 .agent-switch-header h2 { margin: 0; font-size: 22px; line-height: 1.25; }
@@ -379,6 +436,7 @@ h1 {
 .channel-name { display: block; font-size: 16px; }
 .channel-meta { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
 .channel-actions { display: flex; align-items: center; gap: 8px; }
+.channel-actions .button { min-width: 64px; flex: 0 0 auto; white-space: nowrap; }
 .channel-error { margin: 10px 0 0 20px; color: var(--red); font-size: 12px; }
 .empty-state { padding: 38px 16px; border: 1px dashed #d3dae5; border-radius: 9px; color: var(--muted); text-align: center; font-size: 13px; }
 
@@ -474,6 +532,39 @@ h1 {
   .management-view { min-height: 430px; flex: 0 0 auto; }
   .channel-main, .recovery-row, .danger-zone { align-items: flex-start; }
 }
+
+/* Connecting is transient, so it should read as a compact progress state and
+   never expose the full dashboard's nested scroll areas. */
+body[data-view="connecting"] .app-shell { padding: 10px; }
+body[data-view="connecting"] .topbar { height: 58px; flex-basis: 58px; padding: 0 18px; }
+body[data-view="connecting"] .brand { gap: 10px; }
+body[data-view="connecting"] .brand img { width: 34px; height: 34px; }
+body[data-view="connecting"] .brand strong { font-size: 17px; }
+body[data-view="connecting"] .brand span { font-size: 12px; }
+body[data-view="connecting"] .top-actions #refresh-button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+body[data-view="connecting"] .notice { min-height: 36px; margin: 10px 16px 0; padding: 7px 11px; font-size: 13px; }
+body[data-view="connecting"] .main-grid { padding: 10px 12px 12px; grid-template-columns: minmax(0, 1fr) 250px; gap: 10px; overflow: hidden; }
+body[data-view="connecting"] .primary-panel { padding: 16px 22px 10px; border-radius: 10px; overflow: hidden; }
+body[data-view="connecting"] .primary-content { overflow: hidden; justify-content: flex-start; }
+body[data-view="connecting"] .status-line { gap: 8px; font-size: 15px; }
+body[data-view="connecting"] h1 { margin: 12px 0 0; font-size: 32px; line-height: 1.2; letter-spacing: 0; }
+body[data-view="connecting"] .hero-copy { margin: 7px 0 12px; font-size: 14px; line-height: 1.45; }
+body[data-view="connecting"] .progress-list { width: 100%; margin: 0; }
+body[data-view="connecting"] .progress-list li { min-height: 48px; padding: 8px 13px; gap: 10px; }
+body[data-view="connecting"] .progress-list strong { font-size: 14px; }
+body[data-view="connecting"] .progress-list small { margin-top: 1px; font-size: 12px; }
+body[data-view="connecting"] .summary-panel { padding: 2px 14px; border-radius: 10px; overflow: hidden; }
+body[data-view="connecting"] .summary-card { padding: 12px 2px; }
+body[data-view="connecting"] .summary-card > span,
+body[data-view="connecting"] .summary-card div > span,
+body[data-view="connecting"] .summary-card-heading > span { font-size: 12px; }
+body[data-view="connecting"] .summary-card > strong,
+body[data-view="connecting"] .summary-card div > strong { margin-top: 4px; font-size: 16px; }
+body[data-view="connecting"] .summary-card > small { margin-top: 2px; font-size: 11px; }
+body[data-view="connecting"] .summary-action { min-height: 26px; padding: 0 8px; font-size: 11px; }
+body[data-view="connecting"] .management-entry { min-height: 39px; margin-top: 8px; }
+body[data-view="connecting"] .management-entry strong { font-size: 13px; }
+body[data-view="connecting"] .management-entry small { font-size: 11px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

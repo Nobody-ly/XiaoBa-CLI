@@ -34,6 +34,9 @@ test('Connector lets an authenticated user switch the Agent bound to this comput
   assert.match(script, /微信服务会停止/);
   assert.doesNotMatch(script, /\/cats\/create-bot/);
   assert.match(styles, /\.agent-switch-dialog/);
+  assert.match(html, /id="logout-dialog"/);
+  assert.doesNotMatch(script, /window\.confirm\(/);
+  assert.match(script, /login-account'\)\?\.focus/);
 });
 
 test('Connector local management restores channels and gives logs a full workspace', () => {
@@ -62,6 +65,9 @@ test('Connector client uses real lifecycle APIs and remains syntax-valid', () =>
   assert.match(script, /cats\.chatReady/);
   assert.match(script, /service\.status === 'running'/);
   assert.match(script, /bodyStatus\?\.state !== 'offline'/);
+  assert.match(script, /webapp-button.*addEventListener\('click'/s);
+  assert.match(script, /openWebAppFromDashboard/);
+  assert.match(styles, /\.channel-actions \.button[\s\S]*white-space: nowrap/);
 });
 
 test('Connector Dashboard is the real root and uses a viewport-bound desktop layout', () => {
@@ -70,6 +76,8 @@ test('Connector Dashboard is the real root and uses a viewport-bound desktop lay
   assert.match(styles, /body\[data-view="ready"\]/);
   assert.match(styles, /html, body \{[^}]*height: 100%[^}]*overflow: hidden/s);
   assert.match(styles, /@media \(max-height: 700px\)/);
+  assert.match(styles, /body\[data-view="connecting"\] \.primary-panel[\s\S]*overflow: hidden/);
+  assert.match(styles, /body\[data-view="connecting"\] \.progress-list[\s\S]*width: 100%/);
 });
 
 test('background bootstrap waits for login without making network requests', async () => {

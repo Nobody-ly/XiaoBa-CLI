@@ -11,8 +11,8 @@ test('electron opens the local dashboard through stable IPv4 loopback', () => {
 });
 
 test('electron opens Connector in a compact desktop-sized window', () => {
-  assert.match(electronMain, /new BrowserWindow\(\{\s*width: 1080,\s*height: 720,/);
-  assert.match(electronMain, /minWidth: 900,\s*minHeight: 600,/);
+  assert.match(electronMain, /new BrowserWindow\(\{\s*width: 780,\s*height: 560,/);
+  assert.match(electronMain, /minWidth: 680,\s*minHeight: 480,/);
 });
 
 test('electron keeps close-to-tray as the fixed Connector window behavior', () => {
@@ -91,7 +91,16 @@ test('electron sends trusted CatsCo links to the system browser', () => {
   assert.match(electronMain, /setWindowOpenHandler/);
   assert.match(electronMain, /target\.origin === 'https:\/\/app\.catsco\.cc'/);
   assert.match(electronMain, /shell\.openExternal\(target\.toString\(\)\)/);
+  assert.match(electronMain, /ipcMain\.handle\('catsco:open-webapp'/);
+  assert.match(electronMain, /label: '打开 CatsCo WebApp'/);
   assert.match(electronMain, /return \{ action: 'deny' \}/);
+});
+
+test('electron keeps authenticated startup in the tray and shows the Dashboard when login is required', () => {
+  assert.match(electronMain, /async function shouldShowDashboardAtStartup\(\)/);
+  assert.match(electronMain, /if \(!readStoredCatsCoSession\(\)\) return true/);
+  assert.match(electronMain, /if \(await shouldShowDashboardAtStartup\(\)\) createWindow\(\)/);
+  assert.match(electronMain, /ipcMain\.handle\('catsco:hide-window'/);
 });
 
 test('electron opens trusted local diagnostics in a separate sandboxed window', () => {
