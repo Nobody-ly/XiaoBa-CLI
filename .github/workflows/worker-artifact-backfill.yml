@@ -64,7 +64,7 @@ jobs:
         run: |
           npm ci --prefer-offline --no-audit --fund=false
           mkdir -p release/worker
-          npm run --silent worker:artifact -- --manifest-output release/worker/build-manifest.json
+          npm run --silent worker:artifact > release/worker/build-manifest.json
           test "$(node -p "require('./package.json').version")" = "${{ inputs.version }}"
 
       - name: Install AWS CLI
