@@ -14,6 +14,7 @@ import {
 import { SyntheticObservation, SyntheticObservationQueue } from './synthetic-observation';
 import { ObservationBranchDisposition, ObservationBranchSession } from './observation-branch-session';
 import { MemoryLogStore } from './memory-log-store';
+import type { MemoryBranchActivationContext } from './sidecar-memory-branch';
 
 export interface MemorySearchBranchSessionOptions {
   sessionKey: string;
@@ -24,6 +25,7 @@ export interface MemorySearchBranchSessionOptions {
   queue: SyntheticObservationQueue;
   signal?: AbortSignal;
   logEnabled?: boolean;
+  activationContext?: MemoryBranchActivationContext;
 }
 
 export class MemorySearchBranchSession extends ObservationBranchSession<MemorySearchFinishPayload> {
@@ -55,6 +57,7 @@ export class MemorySearchBranchSession extends ObservationBranchSession<MemorySe
           input: this.memoryOptions.input,
           recentMessages: this.memoryOptions.recentMessages,
           hasMemoryRoots: this.store.hasRoots(),
+          activationContext: this.memoryOptions.activationContext,
         }),
       },
     ];
@@ -142,6 +145,9 @@ function buildMemorySearchSystemPrompt(): string {
     '- 如果找到了足够支撑当前任务的高价值 refs，应及时 finish_memory_search；不要为了重复确认而继续读取大量近邻。',
     '- 如果 late/older memory 与当前用户输入冲突，summary 要明确提示冲突，并让主 agent 以当前用户输入为准。',
     '- 历史时间和版本只是证据边界。不要把旧结论写成当前事实；当前用户输入、recent context 和当前代码状态优先。',
+    '- repeated activation 会提供 delta_since_last_run 和 previous_injections。previous_injections 只是避免内容重复的参考，不是 refs 黑名单。',
+    '- 同一个 ref 在任务的新阶段仍可重新读取和引用，但只有产生不同且当前有用的信息时才再次注入；不要重复 previous_injections 已表达的同一结论。',
+    '- delta_since_last_run 可能包含本 Episode 中更新的用户修正。如果它与 task anchor 或历史记忆冲突，始终以最新用户内容为准。',
     '',
     'summary 写法：',
     '- summary 是给主 agent 用的任务辅助记忆，不是搜索过程汇报。',
@@ -169,13 +175,19 @@ function buildMemorySearchUserInput(options: {
   input: string | ContentBlock[];
   recentMessages: Message[];
   hasMemoryRoots: boolean;
+  activationContext?: MemoryBranchActivationContext;
 }): string {
   const recentTurns = extractRecentCompletedTurns(options.recentMessages).slice(-2);
-  const payload = {
+  const payload: Record<string, unknown> = {
     current_user_input: contentToText(options.input),
     recent_completed_turns: recentTurns,
     memory_source_available: options.hasMemoryRoots,
   };
+  if (options.activationContext) {
+    payload.current_user_input = options.activationContext.taskAnchor;
+    payload.delta_since_last_run = options.activationContext.deltaSinceLastRun;
+    payload.previous_injections = options.activationContext.previousInjections;
+  }
   return JSON.stringify(payload, null, 2);
 }
 
