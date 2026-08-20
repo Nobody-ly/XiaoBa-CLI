@@ -57,25 +57,6 @@ function deviceGrant(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function artifactContext(artifactId = 'lesson-game') {
-  return {
-    kind: 'catsco_artifact_context',
-    source: 'catscompany',
-    contractVersion: 'catsco.artifact-context.v1',
-    artifactId,
-    title: artifactId,
-    artifactKind: 'html',
-    url: `https://agent-43.artifacts.catsco.fun:19991/artifacts/${artifactId}/latest/`,
-    topicId: 'p2p_7_43',
-    agentId: 'usr43',
-    currentlyVisible: true,
-    displayedVersion: 1,
-    latestVersion: 1,
-    identityTrust: 'server_canonical',
-    observationTrust: 'untrusted_content',
-  } as const;
-}
-
 function metadataWithDeviceGrants(actorUserId: string, topicId: string, grants: unknown[], agentId = 'usr43', bodyId = 'body-main') {
   const metadata = canonicalMetadata(actorUserId, topicId, agentId, bodyId);
   (metadata.catsco_identity as any).device_grants = grants;
@@ -501,13 +482,17 @@ describe('CatsCompany execution scope flow', () => {
 
   test('keeps execution scope when a busy CatsCompany turn is queued then drained', async () => {
     const { bot, handledTurns, sessionKeys, session } = createHarness({ busy: true });
+    const ref = `acr_${'c'.repeat(43)}`;
 
     await (bot as any).onMessage({
       topic: 'p2p_8_43',
       senderId: 'usr8',
       text: '继续查',
       content: '继续查',
-      metadata: canonicalMetadata('usr8', 'p2p_8_43'),
+      metadata: {
+        ...canonicalMetadata('usr8', 'p2p_8_43'),
+        artifact_context_ref: ref,
+      },
       isGroup: false,
       seq: 12,
     });
@@ -524,6 +509,7 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(handledTurns[0].options.executionScope.actorUserId, 'usr8');
     assert.equal(handledTurns[0].options.executionScope.topicId, 'p2p_8_43');
     assert.equal(handledTurns[0].options.executionScope.isTrusted, true);
+    assert.equal(handledTurns[0].options.artifactContextRef, ref);
   });
 
   test('keeps a drained user message queued when the session call rejects once', async () => {
@@ -1249,6 +1235,30 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(handledTurns[0].options.deviceGrants, undefined);
   });
 
+  test('forwards a trusted Artifact context ref only through current turn options', async () => {
+    const { bot, handledTurns } = createHarness();
+    const ref = `acr_${'a'.repeat(43)}`;
+    const metadata = {
+      ...canonicalMetadata('usr7', 'p2p_7_43'),
+      artifact_context_ref: ref,
+    };
+
+    await (bot as any).onMessage({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: '分析这些',
+      content: '分析这些',
+      metadata,
+      isGroup: false,
+      seq: 12,
+    });
+
+    assert.equal(handledTurns.length, 1);
+    assert.equal(handledTurns[0].options.artifactContextRef, ref);
+    assert.equal('artifactContextRef' in handledTurns[0].options.executionScope, false);
+    assert.doesNotMatch(JSON.stringify(handledTurns[0].userMessage), /acr_[A-Za-z0-9_-]{43}/);
+  });
+
   test('does not merge queued CatsCo group input from another actor into the current actor scope', () => {
     const { bot } = createHarness();
     const aliceScope = createExecutionScope(createCatsCoMessageEnvelope({
@@ -1288,48 +1298,6 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(bot.messageQueue.has(bobScope.sessionKey), false);
   });
 
-  test('keeps plain queued input compatible while explicitly switching or clearing Artifact focus', () => {
-    const { bot } = createHarness();
-    const executionScope = createExecutionScope(createCatsCoMessageEnvelope({
-      topic: 'p2p_7_43',
-      senderId: 'usr7',
-      text: 'first',
-      metadata: canonicalMetadata('usr7', 'p2p_7_43'),
-      botUid: 'usr43',
-    }));
-    const queued = (userMessage: string, artifact?: ReturnType<typeof artifactContext>) => ({
-      userMessage,
-      topic: 'p2p_7_43',
-      senderId: 'usr7',
-      seq: 13,
-      executionScope,
-      artifactContext: artifact,
-      receivedAt: Date.now(),
-      source: 'user' as const,
-    });
-
-    bot.messageQueue.set(executionScope.sessionKey, [queued('普通补充')]);
-    assert.equal(
-      (bot as any).consumeQueuedUserInput(executionScope.sessionKey, executionScope),
-      '普通补充',
-    );
-
-    bot.messageQueue.set(executionScope.sessionKey, [queued('已经离开页面')]);
-    const cleared = (bot as any).consumeQueuedUserInput(
-      executionScope.sessionKey,
-      executionScope,
-      undefined,
-      artifactContext('old-artifact'),
-    );
-    assert.equal(cleared.content, '已经离开页面');
-    assert.equal(cleared.artifactContext, null);
-
-    bot.messageQueue.set(executionScope.sessionKey, [queued('改新页面', artifactContext('new-artifact'))]);
-    const switched = (bot as any).consumeQueuedUserInput(executionScope.sessionKey, executionScope);
-    assert.equal(switched.content, '改新页面');
-    assert.equal(switched.artifactContext?.artifactId, 'new-artifact');
-  });
-
   test('preserves device grants when queued CatsCompany user input is merged', () => {
     const { bot } = createHarness();
     const scope = createExecutionScope(createCatsCoMessageEnvelope({
@@ -1356,6 +1324,57 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(pending.content, '补充读取文件');
     assert.equal(pending.deviceGrants.length, 1);
     assert.equal(pending.deviceGrants[0].deviceId, 'alice-laptop');
+  });
+
+  test('uses the latest queued Artifact context ref and can explicitly clear the previous one', () => {
+    const { bot } = createHarness();
+    const scope = createExecutionScope(createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: 'first',
+      metadata: canonicalMetadata('usr7', 'p2p_7_43'),
+      botUid: 'usr43',
+    }));
+    const firstRef = `acr_${'a'.repeat(43)}`;
+    const secondRef = `acr_${'b'.repeat(43)}`;
+
+    bot.messageQueue.set(scope.sessionKey, [{
+      userMessage: '先看第一版',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 13,
+      executionScope: scope,
+      artifactContextRef: firstRef,
+      receivedAt: Date.now(),
+      source: 'user',
+    }, {
+      userMessage: '以现在页面为准',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 14,
+      executionScope: scope,
+      artifactContextRef: secondRef,
+      receivedAt: Date.now() + 1,
+      source: 'user',
+    }]);
+
+    const replaced = (bot as any).consumeQueuedUserInput(scope.sessionKey, scope);
+    assert.equal(replaced.artifactContextRef, secondRef);
+    assert.doesNotMatch(JSON.stringify(replaced.content), /acr_[A-Za-z0-9_-]{43}/);
+
+    bot.messageQueue.set(scope.sessionKey, [{
+      userMessage: '页面已经关掉了',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 15,
+      executionScope: scope,
+      artifactContextRef: undefined,
+      receivedAt: Date.now() + 2,
+      source: 'user',
+    }]);
+    const cleared = (bot as any).consumeQueuedUserInput(scope.sessionKey, scope);
+    assert.equal(Object.prototype.hasOwnProperty.call(cleared, 'artifactContextRef'), true);
+    assert.equal(cleared.artifactContextRef, undefined);
   });
 
   test('preserves latest device selection when queued CatsCompany user input is merged', () => {
@@ -1397,5 +1416,50 @@ describe('CatsCompany execution scope flow', () => {
     assert.equal(typeof pending, 'object');
     assert.equal(pending.content, '补充读取文件');
     assert.equal(pending.deviceSelection.selectedDeviceId, 'alice-laptop');
+  });
+
+  test('ignores legacy Artifact page metadata instead of forwarding it into a turn', async () => {
+    const { bot, handledTurns } = createHarness();
+    const sentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
+    const metadata = {
+      ...canonicalMetadata('usr7', 'p2p_7_43'),
+      artifact_context: {
+        contract_version: 'catsco.artifact-context.v1',
+        id: 'lesson-game',
+        agent_uid: '43',
+        title: 'Lesson game',
+        kind: 'mini_app',
+        url: 'https://agent-43.artifacts.catsco.fun/artifacts/lesson-game/latest/',
+        topic_id: 'p2p_7_43',
+        currently_visible: true,
+        displayed_version: 2,
+        latest_version: 3,
+        page_context: {
+          contract_version: 'catsco.artifact-page-context.v1',
+          observed_at: '2026-08-14T03:00:00Z',
+          selected_text: sentinel,
+          semantic_context: { note: sentinel },
+        },
+      },
+      artifact_page_context: {
+        contract_version: 'catsco.artifact-page-context.v1',
+        observed_at: '2026-08-14T03:00:00Z',
+        selected_text: sentinel,
+      },
+    };
+
+    await bot.onMessage({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: '分析右边这些',
+      content: '分析右边这些',
+      metadata,
+      isGroup: false,
+      seq: 31,
+    });
+
+    assert.equal(handledTurns.length, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(handledTurns[0].options, 'artifactContext'), false);
+    assert.equal(JSON.stringify(handledTurns[0].options).includes(sentinel), false);
   });
 });

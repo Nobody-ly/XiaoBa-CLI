@@ -1,7 +1,6 @@
 import { Message } from '../types';
 import type {
   ExecutionScope,
-  ScopedArtifactContext,
   ScopedDeviceGrant,
   ScopedDeviceSelection,
   ScopedLocalDeviceGrant,
@@ -133,6 +132,8 @@ export interface HandleMessageOptions {
   sessionRoute?: SessionRoute;
   /** 当前 turn 的可信执行身份 */
   executionScope?: ExecutionScope;
+  /** 当前 turn 的短期 Artifact context ref；不进入模型消息或持久历史。 */
+  artifactContextRef?: string;
   /** 当前本机运行体授权，例如 CatsCo body/device 绑定。 */
   localDeviceGrant?: ScopedLocalDeviceGrant;
   /** 当前 turn 已授权的用户设备资源。 */
@@ -143,8 +144,6 @@ export interface HandleMessageOptions {
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
-  /** 当前 turn 的服务端确认 Artifact 共同焦点。 */
-  artifactContext?: ScopedArtifactContext;
   /** 当前 turn 已授权的本地文件资源。 */
   localFileGrants?: ScopedLocalFileGrant[];
   /** 当前 turn 专属、给 agent 可见的运行时反馈 */
@@ -583,13 +582,13 @@ export class AgentSession {
       let channel: ChannelCallbacks | undefined;
       let sessionRoute: SessionRoute | undefined;
       let executionScope: ExecutionScope | undefined;
+      let artifactContextRef: string | undefined;
       let localDeviceGrant: ScopedLocalDeviceGrant | undefined;
       let deviceGrants: ScopedDeviceGrant[] | undefined;
       let deviceSelection: ScopedDeviceSelection | undefined;
       let deviceRpc: DeviceRpcTransport | undefined;
       let thinToolRpc: ThinToolRpcTransport | undefined;
       let targetRoutes: TargetRoutes | undefined;
-      let artifactContext: ScopedArtifactContext | undefined;
       let localFileGrants: ScopedLocalFileGrant[] | undefined;
       let runtimeFeedbackInputs: RuntimeFeedbackInput[] = [];
       let pendingUserInputProvider: PendingUserInputProvider | undefined;
@@ -599,13 +598,13 @@ export class AgentSession {
           'channel' in callbacksOrOptions
           || 'sessionRoute' in callbacksOrOptions
           || 'executionScope' in callbacksOrOptions
+          || 'artifactContextRef' in callbacksOrOptions
           || 'localDeviceGrant' in callbacksOrOptions
           || 'deviceGrants' in callbacksOrOptions
           || 'deviceSelection' in callbacksOrOptions
           || 'deviceRpc' in callbacksOrOptions
           || 'thinToolRpc' in callbacksOrOptions
           || 'targetRoutes' in callbacksOrOptions
-          || 'artifactContext' in callbacksOrOptions
           || 'localFileGrants' in callbacksOrOptions
           || 'callbacks' in callbacksOrOptions
           || 'runtimeFeedback' in callbacksOrOptions
@@ -617,13 +616,13 @@ export class AgentSession {
           channel = opts.channel;
           sessionRoute = opts.sessionRoute;
           executionScope = opts.executionScope;
+          artifactContextRef = opts.artifactContextRef;
           localDeviceGrant = opts.localDeviceGrant;
           deviceGrants = opts.deviceGrants;
           deviceSelection = opts.deviceSelection;
           deviceRpc = opts.deviceRpc;
           thinToolRpc = opts.thinToolRpc;
           targetRoutes = opts.targetRoutes;
-          artifactContext = opts.artifactContext;
           localFileGrants = opts.localFileGrants;
           runtimeFeedbackInputs = opts.runtimeFeedback || [];
           pendingUserInputProvider = opts.pendingUserInputProvider;
@@ -703,13 +702,13 @@ export class AgentSession {
           channel,
           sessionRoute,
           executionScope,
+          artifactContextRef,
           localDeviceGrant,
           deviceGrants,
           deviceSelection,
           deviceRpc,
           thinToolRpc,
           targetRoutes,
-          artifactContext,
           localFileGrants,
           pendingUserInputProvider,
           abortSignal: this.activeAbortController.signal,

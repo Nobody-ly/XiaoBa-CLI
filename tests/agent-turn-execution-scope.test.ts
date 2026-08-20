@@ -18,6 +18,8 @@ test('AgentSession accepts executionScope in HandleMessageOptions', () => {
   assert.match(agentSessionSource, /deviceGrants\s*=\s*opts\.deviceGrants/);
   assert.match(agentSessionSource, /localFileGrants\?:\s*ScopedLocalFileGrant\[\]/);
   assert.match(agentSessionSource, /localFileGrants\s*=\s*opts\.localFileGrants/);
+  assert.match(agentSessionSource, /artifactContextRef\?:\s*string/);
+  assert.match(agentSessionSource, /artifactContextRef\s*=\s*opts\.artifactContextRef/);
 });
 
 test('AgentTurnController forwards executionScope into ToolExecutionContext', () => {
@@ -33,15 +35,8 @@ test('AgentTurnController forwards executionScope into ToolExecutionContext', ()
   assert.match(agentTurnSource, /deviceGrants:\s*options\.deviceGrants/);
   assert.match(agentTurnSource, /localFileGrants:\s*params\.localFileGrants/);
   assert.match(agentTurnSource, /localFileGrants:\s*options\.localFileGrants/);
-});
-
-test('AgentTurnController forwards Artifact context into ConversationRunner', () => {
-  assert.match(agentTurnSource, /artifactContext\?:\s*ScopedArtifactContext/);
-  assert.match(
-    agentTurnSource,
-    /const runner = this\.createRunner\(\{[\s\S]*?artifactContext:\s*params\.artifactContext[\s\S]*?\}\);/,
-  );
-  assert.match(agentTurnSource, /artifactContext:\s*options\.artifactContext/);
+  assert.match(agentTurnSource, /artifactContextRef:\s*params\.artifactContextRef/);
+  assert.match(agentTurnSource, /artifactContextRef:\s*options\.artifactContextRef/);
 });
 
 test('ToolExecutionContext exposes executionScope for future ToolGateway checks', () => {
@@ -49,6 +44,7 @@ test('ToolExecutionContext exposes executionScope for future ToolGateway checks'
   assert.match(toolTypesSource, /localDeviceGrant\?:\s*ScopedLocalDeviceGrant/);
   assert.match(toolTypesSource, /deviceGrants\?:\s*ScopedDeviceGrant\[\]/);
   assert.match(toolTypesSource, /localFileGrants\?:\s*ScopedLocalFileGrant\[\]/);
+  assert.match(toolTypesSource, /artifactContextRef\?:\s*string/);
 });
 
 test('AgentTurnController image history replacement can preserve opaque attachment references', () => {

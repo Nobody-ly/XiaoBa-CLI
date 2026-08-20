@@ -2,7 +2,6 @@ import { ContentBlock, Message } from '../types';
 import { randomUUID } from 'crypto';
 import type {
   ExecutionScope,
-  ScopedArtifactContext,
   ScopedDeviceGrant,
   ScopedDeviceSelection,
   ScopedLocalDeviceGrant,
@@ -76,13 +75,13 @@ export interface RunAgentTurnParams {
   channel?: ChannelCallbacks;
   sessionRoute?: SessionRoute;
   executionScope?: ExecutionScope;
+  artifactContextRef?: string;
   localDeviceGrant?: ScopedLocalDeviceGrant;
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
-  artifactContext?: ScopedArtifactContext;
   localFileGrants?: ScopedLocalFileGrant[];
   pendingUserInputProvider?: PendingUserInputProvider;
   abortSignal?: AbortSignal;
@@ -163,7 +162,6 @@ export class AgentTurnController {
       deviceGrants: params.deviceGrants,
       deviceSelection: params.deviceSelection,
       targetRoutes: params.targetRoutes,
-      artifactContext: params.artifactContext,
       localFileGrants: params.localFileGrants,
       durableMessages: params.messages,
       runtimeFeedback: params.runtimeFeedback,
@@ -181,13 +179,13 @@ export class AgentTurnController {
     const runner = this.createRunner({
       channel: params.channel,
       executionScope: params.executionScope,
+      artifactContextRef: params.artifactContextRef,
       localDeviceGrant: params.localDeviceGrant,
       deviceGrants: params.deviceGrants,
       deviceSelection: params.deviceSelection,
       deviceRpc: params.deviceRpc,
       thinToolRpc: params.thinToolRpc,
       targetRoutes: params.targetRoutes,
-      artifactContext: params.artifactContext,
       localFileGrants: params.localFileGrants,
       executionContext: turnContext.executionContext,
       pendingUserInputProvider: params.pendingUserInputProvider,
@@ -268,13 +266,13 @@ export class AgentTurnController {
   private createRunner(options: {
     channel?: ChannelCallbacks;
     executionScope?: ExecutionScope;
+    artifactContextRef?: string;
     localDeviceGrant?: ScopedLocalDeviceGrant;
     deviceGrants?: ScopedDeviceGrant[];
     deviceSelection?: ScopedDeviceSelection;
     deviceRpc?: DeviceRpcTransport;
     thinToolRpc?: ThinToolRpcTransport;
     targetRoutes?: TargetRoutes;
-    artifactContext?: ScopedArtifactContext;
     localFileGrants?: ScopedLocalFileGrant[];
     executionContext?: import('./runtime-context-builder').ExecutionContextSnapshot;
     pendingUserInputProvider?: PendingUserInputProvider;
@@ -316,13 +314,13 @@ export class AgentTurnController {
           abortSignal: options.abortSignal,
           channel: options.channel,
           executionScope: options.executionScope,
+          artifactContextRef: options.artifactContextRef,
           localDeviceGrant: options.localDeviceGrant,
           deviceGrants: options.deviceGrants,
           deviceSelection: options.deviceSelection,
           deviceRpc: options.deviceRpc,
           thinToolRpc: options.thinToolRpc,
           targetRoutes: options.targetRoutes,
-          artifactContext: options.artifactContext,
           executionContext: options.executionContext,
           localFileGrants: options.localFileGrants,
           confirmToolExecution: options.confirmToolExecution,

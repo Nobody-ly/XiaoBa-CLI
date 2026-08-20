@@ -11,6 +11,14 @@ import type {
 } from '../src/types/tool';
 
 const usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 };
+const legacyArtifactSentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
+const legacyArtifactObservation: Message = {
+  role: 'user',
+  content: `[transient_artifact_observation]\n${legacyArtifactSentinel}`,
+  __injected: true,
+  __runtimeObservation: true,
+  runtimeObservationSource: 'catsco_artifact',
+};
 
 test('runner checkpoints only after a complete tool result and resumes the same episode', async () => {
   const events: string[] = [];
@@ -57,6 +65,7 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     compactIfNeeded: async (messages: Message[], request: any) => {
       checkpointRequest = request;
       events.push('checkpoint');
+      assert.equal(JSON.stringify(messages).includes(legacyArtifactSentinel), false);
       assert.ok(messages.some(message =>
         message.role === 'tool' && message.content === 'verified tool evidence'));
       return {
@@ -81,15 +90,19 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     checkpointCompactionCoordinator: coordinator,
     onCompactionCheckpoint: async messages => {
       events.push('persist');
+      assert.equal(JSON.stringify(messages).includes(legacyArtifactSentinel), false);
       assert.ok(messages.some(message => message.__checkpointSummary));
     },
   });
 
-  const result = await runner.run([{
-    role: 'user',
-    content: 'inspect and continue',
-    __episodeId: 'episode-main',
-  }]);
+  const result = await runner.run([
+    legacyArtifactObservation,
+    {
+      role: 'user',
+      content: 'inspect and continue',
+      __episodeId: 'episode-main',
+    },
+  ]);
 
   assert.equal(result.response, 'continued successfully');
   assert.equal(checkpointRequest.phase, 'mid_turn');
@@ -101,6 +114,7 @@ test('runner checkpoints only after a complete tool result and resumes the same 
     'model:second',
   ]);
   assert.ok(modelRequests[1].some(message => message.__checkpointSummary));
+  assert.equal(JSON.stringify(modelRequests).includes(legacyArtifactSentinel), false);
 });
 
 test('runner keeps the original transcript when checkpoint persistence fails', async () => {

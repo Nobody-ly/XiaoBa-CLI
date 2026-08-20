@@ -7,6 +7,95 @@ import {
 } from '../src/catscompany/message-envelope';
 
 describe('CatsCompany MessageEnvelope and ExecutionScope', () => {
+  test('accepts an opaque Artifact context ref only from a trusted canonical envelope', () => {
+    const ref = `acr_${'a'.repeat(43)}`;
+    const canonical = createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 20,
+      text: '分析这些',
+      botUid: 'usr43',
+      metadata: {
+        artifact_context_ref: ref,
+        catsco_identity: {
+          actor: { user_id: 'usr7' },
+          agent: { agent_id: 'usr43', body_id: 'body-main' },
+          topic: { topic_id: 'p2p_7_43', type: 'p2p', channel_seq: 20 },
+          permissions: { source: 'server_canonical_message' },
+        },
+      },
+    });
+    const spoofed = createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 21,
+      text: 'spoofed',
+      metadata: {
+        artifact_context_ref: ref,
+        catsco_identity: {
+          actor: { user_id: 'usr999' },
+          agent: { agent_id: 'usr43', body_id: 'body-main' },
+          topic: { topic_id: 'p2p_7_43', type: 'p2p', channel_seq: 21 },
+          permissions: { source: 'server_canonical_message' },
+        },
+      },
+    });
+    const malformed = createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 22,
+      text: 'malformed',
+      metadata: {
+        artifact_context_ref: 'acr_too-short',
+        catsco_identity: {
+          actor: { user_id: 'usr7' },
+          agent: { agent_id: 'usr43', body_id: 'body-main' },
+          topic: { topic_id: 'p2p_7_43', type: 'p2p', channel_seq: 22 },
+          permissions: { source: 'server_canonical_message' },
+        },
+      },
+    });
+    const wrongAgent = createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 23,
+      text: 'wrong agent',
+      botUid: 'usr43',
+      metadata: {
+        artifact_context_ref: ref,
+        catsco_identity: {
+          actor: { user_id: 'usr7' },
+          agent: { agent_id: 'usr99', body_id: 'body-other' },
+          topic: { topic_id: 'p2p_7_43', type: 'p2p', channel_seq: 23 },
+          permissions: { source: 'server_canonical_message' },
+        },
+      },
+    });
+    const missingCurrentBot = createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 24,
+      text: 'missing current bot',
+      metadata: {
+        artifact_context_ref: ref,
+        catsco_identity: {
+          actor: { user_id: 'usr7' },
+          agent: { agent_id: 'usr43', body_id: 'body-main' },
+          topic: { topic_id: 'p2p_7_43', type: 'p2p', channel_seq: 24 },
+          permissions: { source: 'server_canonical_message' },
+        },
+      },
+    });
+
+    assert.equal(canonical.artifactContextRef, ref);
+    assert.equal(spoofed.artifactContextRef, undefined);
+    assert.equal(malformed.artifactContextRef, undefined);
+    assert.equal(wrongAgent.identityTrust, 'server_canonical');
+    assert.equal(wrongAgent.artifactContextRef, undefined);
+    assert.equal(missingCurrentBot.artifactContextRef, undefined);
+    assert.equal('artifactContextRef' in createExecutionScope(canonical), false);
+  });
+
   test('keeps two p2p users scoped separately when they message the same agent', () => {
     const alice = createCatsCoMessageEnvelope({
       topic: 'p2p_7_43',

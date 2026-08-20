@@ -1,5 +1,5 @@
 import { Message, ContentBlock, ChatConfig, ChatResponse } from '../types';
-import type { ScopedArtifactContext, ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalFileGrant } from '../types/session-identity';
+import type { ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalFileGrant } from '../types/session-identity';
 import type { TargetRoutes } from '../types/tool';
 import { AIService } from '../utils/ai-service';
 import { ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResult, ToolTranscriptMode } from '../types/tool';
@@ -26,10 +26,9 @@ import {
   TRANSIENT_RUNNER_HINT_PREFIX,
 } from './runner-orchestration-policy';
 import {
-  TRANSIENT_ARTIFACT_OBSERVATION_PREFIX,
   TRANSIENT_RUNTIME_CONTEXT_PREFIX,
-  buildArtifactObservationMessage,
   buildRuntimeContextMessage,
+  isLegacyArtifactObservationMessage,
 } from './runtime-context-builder';
 import { buildPendingUserInputBoundaryMessage } from './pending-user-input-boundary';
 import {
@@ -142,7 +141,8 @@ export interface RunResult {
 
 export interface PendingUserInput {
   content: string | ContentBlock[];
-  artifactContext?: ScopedArtifactContext | null;
+  /** Replaces the current turn's short-lived Artifact context ref when present, including explicit undefined. */
+  artifactContextRef?: string;
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   targetRoutes?: TargetRoutes;
@@ -301,6 +301,7 @@ export class ConversationRunner {
    * @returns 最终文本回复和完整消息列表
    */
   async run(messages: Message[], callbacks?: RunnerCallbacks): Promise<RunResult> {
+    this.removeLegacyArtifactObservations(messages);
     const allTools = this.toolExecutor.getToolDefinitions();
     const supportsToolCalling = (this.aiService as any).isToolCallingSupported?.() !== false;
     const activeTools = supportsToolCalling ? allTools : [];
@@ -729,6 +730,12 @@ export class ConversationRunner {
 
     const content = isPendingUserInput(pending) ? pending.content : pending;
     let shouldRefreshRuntimeContext = false;
+    if (isPendingUserInput(pending) && Object.prototype.hasOwnProperty.call(pending, 'artifactContextRef')) {
+      this.toolExecutionContext = {
+        ...(this.toolExecutionContext || {}),
+        artifactContextRef: pending.artifactContextRef,
+      };
+    }
     if (isPendingUserInput(pending) && pending.deviceGrants?.length) {
       this.toolExecutionContext = {
         ...(this.toolExecutionContext || {}),
@@ -750,13 +757,6 @@ export class ConversationRunner {
       this.toolExecutionContext = {
         ...(this.toolExecutionContext || {}),
         targetRoutes: pending.targetRoutes,
-      };
-      shouldRefreshRuntimeContext = true;
-    }
-    if (isPendingUserInput(pending) && Object.prototype.hasOwnProperty.call(pending, 'artifactContext')) {
-      this.toolExecutionContext = {
-        ...(this.toolExecutionContext || {}),
-        artifactContext: pending.artifactContext || undefined,
       };
       shouldRefreshRuntimeContext = true;
     }
@@ -849,10 +849,11 @@ export class ConversationRunner {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (
-        typeof message.content === 'string'
-        && (
-          (message.role === 'system' && message.content.startsWith(TRANSIENT_RUNTIME_CONTEXT_PREFIX))
-          || (message.__injected && message.content.startsWith(TRANSIENT_ARTIFACT_OBSERVATION_PREFIX))
+        isLegacyArtifactObservationMessage(message)
+        || (
+          message.role === 'system'
+          && typeof message.content === 'string'
+          && message.content.startsWith(TRANSIENT_RUNTIME_CONTEXT_PREFIX)
         )
       ) {
         messages.splice(i, 1);
@@ -866,12 +867,15 @@ export class ConversationRunner {
       deviceGrants: this.toolExecutionContext?.deviceGrants,
       deviceSelection: this.toolExecutionContext?.deviceSelection,
       targetRoutes: this.toolExecutionContext?.targetRoutes,
-      artifactContext: this.toolExecutionContext?.artifactContext,
       localFileGrants: this.toolExecutionContext?.localFileGrants,
     });
     if (runtimeContext) messages.push(runtimeContext);
-    const artifactObservation = buildArtifactObservationMessage(this.toolExecutionContext?.artifactContext);
-    if (artifactObservation) messages.push(artifactObservation);
+  }
+
+  private removeLegacyArtifactObservations(messages: Message[]): void {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (isLegacyArtifactObservationMessage(messages[index])) messages.splice(index, 1);
+    }
   }
 
   private injectSyntheticObservations(messages: Message[], turn: number): void {

@@ -1,7 +1,6 @@
 import { ContentBlock } from './index';
 import type {
   ExecutionScope,
-  ScopedArtifactContext,
   ScopedDeviceGrant,
   ScopedDeviceSelection,
   ScopedLocalDeviceGrant,
@@ -243,8 +242,6 @@ export interface ToolExecutionContext {
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
-  /** 当前 turn 的服务端确认 Artifact 共同焦点，仅用于 transient 模型上下文。 */
-  artifactContext?: ScopedArtifactContext;
   executionContext?: {
     schema: 'xiaoba.execution_context.v1';
     conversation: {
@@ -265,6 +262,8 @@ export interface ToolExecutionContext {
   deviceRpcReceiver?: boolean;
   /** 当前 turn 已授权的本地文件资源，例如用户本轮上传的 CatsCo 附件缓存。 */
   localFileGrants?: ScopedLocalFileGrant[];
+  /** 当前 turn 的短期 Artifact context ref；只供本机工具子进程临时读取。 */
+  artifactContextRef?: string;
 }
 
 /**

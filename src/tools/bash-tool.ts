@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Tool, ToolDefinition, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { Logger } from '../utils/logger';
+import { withArtifactContextRefEnvironment } from '../utils/artifact-context-ref';
 import { resolveRuntimeEnvironment } from '../utils/runtime-environment';
 import { isToolAllowed, isBashCommandAllowed } from '../utils/safety';
 import { executeRouteIfRemote, resolveExecutionRoute, targetParameterDescription } from './execution-router';
@@ -166,6 +167,14 @@ export class ShellTool implements Tool {
       env: process.env,
       probeVersion: false,
     });
+    const commandEnvironment = withArtifactContextRefEnvironment(
+      runtimeEnvironment.env,
+      context.artifactContextRef,
+    );
+    const scopedRuntimeEnvironment = {
+      ...runtimeEnvironment,
+      env: commandEnvironment,
+    };
     const wrapped = trustedSkillScript ? undefined : this.wrapCommandWithDirectoryProbe(command);
 
     try {
@@ -173,14 +182,14 @@ export class ShellTool implements Tool {
         ? await this.executeTrustedSkillScript(
           trustedSkillScript.args,
           executionDirectory.directory,
-          runtimeEnvironment,
+          scopedRuntimeEnvironment,
           timeout,
           context.abortSignal,
         )
         : await this.executeWrappedCommand(
           wrapped!,
           executionDirectory.directory,
-          runtimeEnvironment.env,
+          commandEnvironment,
           timeout,
           context.abortSignal,
         );

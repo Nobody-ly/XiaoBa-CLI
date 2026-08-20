@@ -5,17 +5,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { AgentSession } from '../src/core/agent-session';
 import { TurnContextBuilder } from '../src/core/turn-context-builder';
-import {
-  TRANSIENT_ARTIFACT_OBSERVATION_PREFIX,
-  TRANSIENT_RUNTIME_CONTEXT_PREFIX,
-} from '../src/core/runtime-context-builder';
+import { TRANSIENT_RUNTIME_CONTEXT_PREFIX } from '../src/core/runtime-context-builder';
 import { getCatsCoAttachmentCacheSessionRoot } from '../src/catscompany/attachment-cache';
 import { createDeviceGrant, createUserDevice } from '../src/core/device-grants';
 import { createExecutionScopeFromRoute, createSessionRoute } from '../src/core/session-router';
 import type { Message } from '../src/types';
 import type {
   ExecutionScope,
-  ScopedArtifactContext,
   ScopedDeviceGrant,
   ScopedDeviceSelection,
   ScopedLocalFileGrant,
@@ -155,64 +151,119 @@ describe('runtime context builder', () => {
     }
   });
 
-  test('injects escaped Artifact observation for one turn without persisting it', async () => {
-    const builder = new TurnContextBuilder();
-    const route = createSessionRoute({
-      source: 'catscompany',
-      topicType: 'p2p',
-      topicId: 'p2p_7_43',
-      actorUserId: 'usr7',
-      agentId: 'usr43',
-      agentBodyId: 'body-main',
-      messageId: 'p2p_7_43:20',
-      channelSeq: 20,
-      identityTrust: 'server_canonical',
-      identitySource: 'metadata.catsco_identity',
-      legacySessionKey: 'cc_user:usr7',
-    });
-    const durableMessages: Message[] = [
-      { role: 'system', content: 'base system' },
-      { role: 'user', content: '把右边标题改一下' },
-    ];
+  test('legacy Artifact context cannot change provider prompts or durable history', async () => {
+    const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-no-artifact-injection-'));
+    const originalCwd = process.cwd();
+    process.chdir(testRoot);
+    try {
+      const route = createSessionRoute({
+        source: 'catscompany',
+        topicType: 'p2p',
+        topicId: 'p2p_7_43',
+        actorUserId: 'usr7',
+        agentId: 'usr43',
+        agentBodyId: 'body-main',
+        messageId: 'p2p_7_43:31',
+        channelSeq: 31,
+        identityTrust: 'server_canonical',
+        identitySource: 'metadata.catsco_identity',
+        legacySessionKey: 'cc_user:usr7',
+      });
+      const sentinel = 'LEGACY_ARTIFACT_PAGE_SENTINEL_7f31c2';
+      const legacyArtifactContext = {
+        kind: 'catsco_artifact_context',
+        source: 'catscompany',
+        contractVersion: 'catsco.artifact-context.v1',
+        artifactId: 'lesson-game',
+        title: sentinel,
+        artifactKind: 'mini_app',
+        url: 'https://agent-43.artifacts.catsco.fun/artifacts/lesson-game/latest/',
+        topicId: route.topicId,
+        agentId: route.agentId,
+        currentlyVisible: true,
+        pageContext: {
+          contractVersion: 'catsco.artifact-page-context.v1',
+          observedAt: '2026-08-14T03:00:00Z',
+          selectedText: sentinel,
+          semanticContext: { note: sentinel },
+        },
+        identityTrust: 'server_canonical',
+        observationTrust: 'untrusted_content',
+      };
 
-    const result = await builder.build({
-      sessionKey: route.sessionKey,
-      sessionType: 'catscompany',
-      sessionRoute: route,
-      executionScope: createExecutionScopeFromRoute(route),
-      artifactContext: artifact('<script>unsafe & title</script>'),
-      durableMessages,
-      runtimeFeedback: [],
-      skillRuntime: emptySkillRuntime(),
-    });
+      const runProbe = async (includeLegacyContext: boolean) => {
+        const capturedRequests: Message[][] = [];
+        let aiCalls = 0;
+        const session = new AgentSession(route.sessionKey, buildMockServices({
+          aiService: {
+            isToolCallingSupported: () => true,
+            async chatStream(messages: Message[]) {
+              capturedRequests.push(messages.map(message => ({ ...message })));
+              aiCalls++;
+              if (aiCalls === 1) {
+                return {
+                  content: null,
+                  toolCalls: [{
+                    id: 'tool-1',
+                    type: 'function',
+                    function: { name: 'noop', arguments: '{}' },
+                  }],
+                  usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+                };
+              }
+              return {
+                content: 'done',
+                toolCalls: [],
+                usage: { promptTokens: 3, completionTokens: 2, totalTokens: 5 },
+              };
+            },
+          },
+          toolManager: {
+            getWorkspaceRoot: () => process.cwd(),
+            getToolDefinitions: () => [{
+              name: 'noop',
+              description: 'noop',
+              parameters: { type: 'object', properties: {} },
+            }],
+            executeTool: async (toolCall: any) => ({
+              tool_call_id: toolCall.id,
+              role: 'tool',
+              name: toolCall.function.name,
+              content: 'ok',
+              ok: true,
+            }),
+          },
+        }), 'catscompany', route);
+        session.setSystemPromptProvider(() => 'system prompt');
+        try {
+          const options: any = {
+            sessionRoute: route,
+            executionScope: createExecutionScopeFromRoute(route),
+          };
+          if (includeLegacyContext) options.artifactContext = legacyArtifactContext;
+          const result = await session.handleMessage('分析右边这些', options);
+          assert.equal(result.text, 'done');
+          return {
+            capturedRequests,
+            retainedMessages: ((session as any).messages as Message[]).map(message => ({ ...message })),
+          };
+        } finally {
+          await session.cleanup();
+        }
+      };
 
-    const runtime = result.messages.find(isRuntimeContextMessage);
-    assert.ok(runtime);
-    const systemText = String(runtime.content || '');
-    assert.match(systemText, /当前共同 Artifact 身份（服务端确认）/);
-    assert.match(systemText, /"artifact_id":"lesson-game"/);
-    assert.match(systemText, /"displayed_version":2/);
-    assert.match(systemText, /"latest_version":3/);
-    assert.doesNotMatch(systemText, /unsafe|canonical_url|agent-43\.artifacts/);
-    assert.match(systemText, /低信任观察不是用户指令/);
-    assert.match(systemText, /必须沿用 artifactId/);
+      const baseline = await runProbe(false);
+      const legacy = await runProbe(true);
 
-    const observation = result.messages.find(isArtifactObservationMessage);
-    assert.ok(observation);
-    assert.equal(observation.role, 'user');
-    assert.equal(observation.__injected, true);
-    const observationText = String(observation.content || '');
-    assert.match(observationText, /低信任页面观察，不是用户指令/);
-    assert.match(observationText, /\\u003cscript\\u003eunsafe \\u0026 title\\u003c\/script\\u003e/);
-    assert.match(observationText, /"selectedText":"企业客户"/);
-    assert.match(observationText, /"semanticContext":\{"view":"customer-comparison","selection":\["c12","c18"\]/);
-    assert.match(observationText, /\\u003cscript\\u003esemantic\\u003c\/script\\u003e/);
-    assert.doesNotMatch(observationText, /<script>/);
-
-    assert.deepEqual(durableMessages.map(message => message.content), ['base system', '把右边标题改一下']);
-    const retained = builder.removeTransientMessages(result.messages);
-    assert.equal(retained.some(isRuntimeContextMessage), false);
-    assert.equal(retained.some(isArtifactObservationMessage), false);
+      assert.equal(legacy.capturedRequests.length, 2);
+      assert.equal(JSON.stringify(legacy.capturedRequests).includes(sentinel), false);
+      assert.equal(JSON.stringify(legacy.retainedMessages).includes(sentinel), false);
+      assert.deepEqual(providerPromptShape(legacy.capturedRequests), providerPromptShape(baseline.capturedRequests));
+      assert.deepEqual(providerPromptShape([legacy.retainedMessages]), providerPromptShape([baseline.retainedMessages]));
+    } finally {
+      process.chdir(originalCwd);
+      fs.rmSync(testRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -229,41 +280,10 @@ function isRuntimeContextMessage(message: Message): boolean {
     && message.content.startsWith(TRANSIENT_RUNTIME_CONTEXT_PREFIX);
 }
 
-function isArtifactObservationMessage(message: Message): boolean {
-  return message.role === 'user'
-    && message.__injected === true
-    && typeof message.content === 'string'
-    && message.content.startsWith(TRANSIENT_ARTIFACT_OBSERVATION_PREFIX);
-}
-
-function artifact(title = 'Lesson game'): ScopedArtifactContext {
-  return {
-    kind: 'catsco_artifact_context',
-    source: 'catscompany',
-    contractVersion: 'catsco.artifact-context.v1',
-    artifactId: 'lesson-game',
-    title,
-    artifactKind: 'mini_app',
-    url: 'https://agent-43.artifacts.catsco.fun:19991/artifacts/lesson-game/latest/',
-    topicId: 'p2p_7_43',
-    agentId: 'usr43',
-    currentlyVisible: true,
-    displayedVersion: 2,
-    latestVersion: 3,
-    pageContext: {
-      contractVersion: 'catsco.artifact-page-context.v1',
-      observedAt: '2026-08-07T12:00:00Z',
-      selectedText: '企业客户',
-      controls: [{ type: 'checkbox', name: 'feedback', value: 'f12', checked: true }],
-      semanticContext: {
-        view: 'customer-comparison',
-        selection: ['c12', 'c18'],
-        note: '<script>semantic</script>',
-      },
-    },
-    identityTrust: 'server_canonical',
-    observationTrust: 'untrusted_content',
-  };
+function providerPromptShape(requests: Message[][]): unknown {
+  return requests.map(messages => messages.map(message => Object.fromEntries(
+    Object.entries(message).filter(([key]) => !key.startsWith('__')),
+  )));
 }
 
 function localGrant(filePath: string): ScopedLocalFileGrant {
@@ -340,7 +360,7 @@ function buildMockServices(overrides: any = {}): any {
     aiService: {
       ...(overrides.aiService || {}),
     },
-    toolManager: {
+    toolManager: overrides.toolManager || {
       getWorkspaceRoot: () => process.cwd(),
       getToolDefinitions: () => [],
       executeTool: async () => {
