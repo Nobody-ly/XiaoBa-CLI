@@ -220,6 +220,7 @@ jobs:
           INTERRUPTED_RUNS_JSON: ${{ steps.prior_runs.outputs.runs }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
           WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
+          WORKER_IMAGE_PROJECT_ID: ${{ vars.CTYUN_IMAGE_PROJECT_ID || '0' }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -230,6 +231,9 @@ jobs:
           $runs = @($env:INTERRUPTED_RUNS_JSON | ConvertFrom-Json)
           if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
             throw 'CTYUN_WORKER_PROJECT_ID is required for interrupted image cleanup'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_IMAGE_PROJECT_ID)) {
+            throw 'CTYUN_IMAGE_PROJECT_ID is required for interrupted image cleanup'
           }
           $recentRuns = [Collections.Generic.List[object]]::new()
           $historicalRuns = [Collections.Generic.List[object]]::new()
@@ -268,7 +272,8 @@ jobs:
               '-CleanupTimeoutMinutes', [string]$cleanupTimeoutMinutes,
               '-ApiTimeoutSeconds', [string]$apiTimeoutSeconds,
               '-RegionID', $env:WORKER_REGION_ID,
-              '-ProjectID', $env:WORKER_PROJECT_ID,
+              '-BuilderProjectID', $env:WORKER_PROJECT_ID,
+              '-ImageProjectID', $env:WORKER_IMAGE_PROJECT_ID,
               '-AzName', $env:WORKER_AZ_NAME,
               '-BaseImageID', $env:WORKER_BASE_IMAGE_ID,
               '-FlavorID', $env:WORKER_FLAVOR_ID,
@@ -356,6 +361,7 @@ jobs:
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
           WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
+          WORKER_IMAGE_PROJECT_ID: ${{ vars.CTYUN_IMAGE_PROJECT_ID || '0' }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -366,6 +372,9 @@ jobs:
           $currentAttempt = [int]$env:GITHUB_RUN_ATTEMPT
           if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
             throw 'CTYUN_WORKER_PROJECT_ID is required for rerun cleanup'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_IMAGE_PROJECT_ID)) {
+            throw 'CTYUN_IMAGE_PROJECT_ID is required for rerun cleanup'
           }
           $rerunDeadline = [DateTimeOffset]::UtcNow.AddMinutes(45)
           $rerunFailures = [Collections.Generic.List[string]]::new()
@@ -390,7 +399,8 @@ jobs:
               '-CleanupTimeoutMinutes', '15',
               '-ApiTimeoutSeconds', '90',
               '-RegionID', $env:WORKER_REGION_ID,
-              '-ProjectID', $env:WORKER_PROJECT_ID,
+              '-BuilderProjectID', $env:WORKER_PROJECT_ID,
+              '-ImageProjectID', $env:WORKER_IMAGE_PROJECT_ID,
               '-AzName', $env:WORKER_AZ_NAME,
               '-BaseImageID', $env:WORKER_BASE_IMAGE_ID,
               '-FlavorID', $env:WORKER_FLAVOR_ID,
@@ -422,6 +432,7 @@ jobs:
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
           WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
+          WORKER_IMAGE_PROJECT_ID: ${{ vars.CTYUN_IMAGE_PROJECT_ID || '0' }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -436,6 +447,9 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
             throw 'CTYUN_WORKER_PROJECT_ID is required for image bake'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_IMAGE_PROJECT_ID)) {
+            throw 'CTYUN_IMAGE_PROJECT_ID is required for image bake'
           }
           ./ops/ctyun-worker-image/New-CatsCoWorkerImage.ps1 `
             -Mode Create `
@@ -452,7 +466,8 @@ jobs:
             -CleanupTimeoutMinutes 40 `
             -ApiTimeoutSeconds 90 `
             -RegionID $env:WORKER_REGION_ID `
-            -ProjectID $env:WORKER_PROJECT_ID `
+            -BuilderProjectID $env:WORKER_PROJECT_ID `
+            -ImageProjectID $env:WORKER_IMAGE_PROJECT_ID `
             -AzName $env:WORKER_AZ_NAME `
             -BaseImageID $env:WORKER_BASE_IMAGE_ID `
             -FlavorID $env:WORKER_FLAVOR_ID `
@@ -480,14 +495,14 @@ jobs:
           CTYUN_AK: ${{ secrets.CTYUN_AK }}
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
-          WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
+          WORKER_IMAGE_PROJECT_ID: ${{ vars.CTYUN_IMAGE_PROJECT_ID || '0' }}
           WORKER_PROTECTED_IMAGE_IDS: ${{ vars.CTYUN_WORKER_PROTECTED_IMAGE_IDS }}
         run: |
           ./ops/ctyun-worker-image/Manage-WorkerImages.ps1 `
             -Action Prune `
             -Keep 6 `
             -RegionID $env:WORKER_REGION_ID `
-            -ProjectID $env:WORKER_PROJECT_ID `
+            -ProjectID $env:WORKER_IMAGE_PROJECT_ID `
             -ProtectedImageIDs $env:WORKER_PROTECTED_IMAGE_IDS
 
       - name: Reconcile this attempt after a failed bake
@@ -499,6 +514,7 @@ jobs:
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
           WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
+          WORKER_IMAGE_PROJECT_ID: ${{ vars.CTYUN_IMAGE_PROJECT_ID || '0' }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -508,6 +524,9 @@ jobs:
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
             throw 'CTYUN_WORKER_PROJECT_ID is required for failed-bake cleanup'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_IMAGE_PROJECT_ID)) {
+            throw 'CTYUN_IMAGE_PROJECT_ID is required for failed-bake cleanup'
           }
           ./ops/ctyun-worker-image/New-CatsCoWorkerImage.ps1 `
             -Mode Cleanup `
@@ -520,7 +539,8 @@ jobs:
             -ApiTimeoutSeconds 90 `
             -WaitForLateResources `
             -RegionID $env:WORKER_REGION_ID `
-            -ProjectID $env:WORKER_PROJECT_ID `
+            -BuilderProjectID $env:WORKER_PROJECT_ID `
+            -ImageProjectID $env:WORKER_IMAGE_PROJECT_ID `
             -AzName $env:WORKER_AZ_NAME `
             -BaseImageID $env:WORKER_BASE_IMAGE_ID `
             -FlavorID $env:WORKER_FLAVOR_ID `

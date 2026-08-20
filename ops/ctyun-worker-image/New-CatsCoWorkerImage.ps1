@@ -24,7 +24,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SecurityGroupID,
 
-    [string]$ProjectID = "0",
+    [Alias("ProjectID")]
+    [string]$BuilderProjectID = "0",
+    [string]$ImageProjectID = "0",
     [string]$SourceRef = "HEAD",
     [string]$ImageName = "",
     [string]$ArtifactPath = "",
@@ -393,7 +395,7 @@ function Find-ImageByName {
         "--regionID", $RegionID,
         "--imageVisibilityCode", "0",
         "--imageName", $Name,
-        "--projectID", $ProjectID,
+        "--projectID", $ImageProjectID,
         "--pageNo", "1",
         "--pageSize", "200"
     )
@@ -623,7 +625,7 @@ function Remove-KeyPair {
         $details = Invoke-Ctyun @(
             "ecs", "GetEcsKeypairDetails",
             "--regionID", $RegionID,
-            "--projectID", $ProjectID,
+            "--projectID", $BuilderProjectID,
             "--keyPairName", $script:KeyPairName,
             "--pageNo", "1",
             "--pageSize", "10"
@@ -681,7 +683,7 @@ function Remove-KeyPair {
         $details = Invoke-Ctyun @(
             "ecs", "GetEcsKeypairDetails",
             "--regionID", $RegionID,
-            "--projectID", $ProjectID,
+            "--projectID", $BuilderProjectID,
             "--keyPairName", $script:KeyPairName,
             "--pageNo", "1",
             "--pageSize", "10"
@@ -896,7 +898,7 @@ function Invoke-ExactBakeCleanup {
                 $keyDetails = Invoke-Ctyun @(
                     "ecs", "GetEcsKeypairDetails",
                     "--regionID", $RegionID,
-                    "--projectID", $ProjectID,
+                    "--projectID", $BuilderProjectID,
                     "--keyPairName", $script:KeyPairName,
                     "--pageNo", "1",
                     "--pageSize", "10"
@@ -1073,6 +1075,8 @@ $plan = [ordered]@{
     temporaryImageName = $script:ImageWorkName
     bakeID = $script:BakeID
     builderName = $script:BuilderName
+    builderProjectID = $BuilderProjectID
+    imageProjectID = $ImageProjectID
     regionID = $RegionID
     azName = $AzName
     baseImageID = $BaseImageID
@@ -1159,7 +1163,7 @@ try {
     $existingKeyPairResponse = Invoke-Ctyun @(
         "ecs", "GetEcsKeypairDetails",
         "--regionID", $RegionID,
-        "--projectID", $ProjectID,
+        "--projectID", $BuilderProjectID,
         "--keyPairName", $script:KeyPairName,
         "--pageNo", "1",
         "--pageSize", "10"
@@ -1175,7 +1179,7 @@ try {
     Invoke-Ctyun @(
         "ecs", "ImportEcsKeypair",
         "--regionID", $RegionID,
-        "--projectID", $ProjectID,
+        "--projectID", $BuilderProjectID,
         "--keyPairName", $script:KeyPairName,
         "--keyPairDescription", "Temporary CatsCo image builder",
         "--publicKey", $publicKey
@@ -1188,7 +1192,7 @@ try {
     $keyPairResponse = Invoke-Ctyun @(
         "ecs", "GetEcsKeypairDetails",
         "--regionID", $RegionID,
-        "--projectID", $ProjectID,
+        "--projectID", $BuilderProjectID,
         "--keyPairName", $script:KeyPairName,
         "--pageNo", "1",
         "--pageSize", "10"
@@ -1276,7 +1280,7 @@ runcmd:
     $createResponse = Invoke-Ctyun @(
         "ecs", "CreateEcsInstance",
         "--regionID", $RegionID,
-        "--projectID", $ProjectID,
+        "--projectID", $BuilderProjectID,
         "--clientToken", ([guid]::NewGuid().ToString()),
         "--azName", $AzName,
         "--displayName", $script:BuilderName,
@@ -1325,7 +1329,7 @@ runcmd:
     $imageResponse = Invoke-Ctyun @(
         "ims", "CreateImage",
         "--regionID", $RegionID,
-        "--projectID", $ProjectID,
+        "--projectID", $ImageProjectID,
         "--instanceID", $script:BuilderID,
         "--imageName", $script:ImageWorkName,
         "--description", $bakeDescription,
