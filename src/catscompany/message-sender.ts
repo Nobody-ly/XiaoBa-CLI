@@ -228,7 +228,12 @@ export class MessageSender {
   }
 
   async reply(topic: string, text: string): Promise<void> {
-    const segments = this.splitText(text, MAX_MSG_LENGTH);
+    const normalized = typeof text === 'string' ? text.trim() : '';
+    if (!normalized) {
+      Logger.info(`Reply skipped: empty or whitespace-only text (topic=${topic})`);
+      return;
+    }
+    const segments = this.splitText(normalized, MAX_MSG_LENGTH);
     for (const seg of segments) {
       await this.sendText(topic, seg);
     }
@@ -336,3 +341,4 @@ function buildClientMessageID(): string {
   const random = Math.random().toString(36).slice(2, 10);
   return `catsco-${Date.now()}-${random}`;
 }
+

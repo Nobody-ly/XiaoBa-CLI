@@ -153,4 +153,20 @@ describe('CatsCompany MessageSender reply length handling', () => {
     assert.equal(sent[1].content, second);
     assert.equal(sent.map(item => item.content).join('\n'), text);
   });
+
+  test('does not send anything for empty or whitespace-only replies', async () => {
+    for (const text of ['', '   ', '\n', '\t \n']) {
+      const sent: any[] = [];
+      const sender = new MessageSender({
+        sendStructuredMessage: async (payload: any) => {
+          sent.push(payload);
+          return sent.length;
+        },
+      } as any, 'https://app.example.test', 'cc_test');
+
+      await sender.reply('p2p_1_2', text);
+
+      assert.equal(sent.length, 0, `expected no messages for input ${JSON.stringify(text)}`);
+    }
+  });
 });
