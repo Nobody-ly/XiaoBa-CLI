@@ -10,8 +10,11 @@ export type { UploadResult } from './upload';
 export interface CatsClientConfig {
   serverUrl: string;
   apiKey: string;
+  botUid?: string;
   bodyId?: string;
   installationId?: string;
+  runtimeCredential?: string;
+  runtimeCredentialExpiresAt?: number;
   deviceRegistration?: CatsDeviceRegistration;
   httpBaseUrl?: string;
   connectTimeoutMs?: number;
@@ -81,6 +84,42 @@ export interface CatsThinToolRpcMessage {
   error?: CatsDeviceRpcError;
   created_at?: number;
   expires_at?: number;
+}
+
+export interface CatsSkillMutationGrantMessage {
+  id?: string;
+  type: 'request' | 'result';
+  request_id: string;
+  client_request_id?: string;
+  source_topic_id?: string;
+  source_message_id?: number;
+  local_skill_id?: string;
+  operation?: 'create' | 'replace';
+  candidate_content_hash?: string;
+  candidate_size_bytes?: number;
+  expected_definition_revision?: number;
+  expected_previous_content_hash?: string;
+  before_reference?: Record<string, unknown>;
+  grant?: string;
+  expires_at?: number;
+  actor_user_id?: string;
+  agent_id?: string;
+  runtime_body_id?: string;
+  error?: CatsDeviceRpcError;
+}
+
+export interface CatsSkillMutationGrantRequest {
+  request_id?: string;
+  client_request_id: string;
+  source_topic_id: string;
+  source_message_id: number;
+  local_skill_id: string;
+  operation: 'create' | 'replace';
+  candidate_content_hash: string;
+  candidate_size_bytes: number;
+  expected_definition_revision: number;
+  expected_previous_content_hash?: string;
+  before_reference?: Record<string, unknown>;
 }
 
 export interface MessageContext {
@@ -210,6 +249,7 @@ export class CatsClient extends EventEmitter {
   private pendingAcks = new Map<string, PendingAck>();
   private pendingDeviceRpc = new Map<string, PendingDeviceRpc>();
   private pendingThinToolRpc = new Map<string, PendingThinToolRpc>();
+  private pendingSkillMutationGrants = new Map<string, PendingSkillMutationGrant>();
   private pingTimer: NodeJS.Timeout | null = null;
   private pongTimer: NodeJS.Timeout | null = null;
   private connectTimer: NodeJS.Timeout | null = null;
@@ -247,6 +287,16 @@ export class CatsClient extends EventEmitter {
       process.env.CATSCOMPANY_INSTALLATION_ID,
       bodyId,
     );
+    const configuredCredentialExpiresAt = Number(this.config.runtimeCredentialExpiresAt);
+    const configuredRuntimeCredential = !Number.isFinite(configuredCredentialExpiresAt)
+      || configuredCredentialExpiresAt > Date.now()
+      ? this.config.runtimeCredential
+      : undefined;
+    const runtimeCredential = firstNonEmpty(
+      configuredRuntimeCredential,
+      process.env.CATSCO_RUNTIME_CREDENTIAL,
+      process.env.CATSCOMPANY_RUNTIME_CREDENTIAL,
+    );
 
     Logger.info(`[CatsCompany] 正在连接: ${this.config.serverUrl}, apiKey=${maskSecret(this.config.apiKey)}, bodyId=${bodyId}`);
     this.supportsClientMessageDedupe = false;
@@ -256,6 +306,7 @@ export class CatsClient extends EventEmitter {
         'X-API-Key': this.config.apiKey,
         'X-CatsCo-Body-ID': bodyId,
         'X-CatsCo-Installation-ID': installationId,
+        ...(runtimeCredential ? { 'X-CatsCo-Runtime-Credential': runtimeCredential } : {}),
       },
     });
     this.startConnectTimeout(bodyId);
@@ -306,6 +357,10 @@ export class CatsClient extends EventEmitter {
       this.rejectPendingThinToolRpc(new CatsSendError(
         'timeout',
         'WebSocket closed before receiving Thin Tool RPC result'
+      ));
+      this.rejectPendingSkillMutationGrants(new CatsSendError(
+        'timeout',
+        'WebSocket closed before receiving a Skill mutation grant result'
       ));
       if (!this.closed) this.scheduleReconnect();
     });
@@ -359,6 +414,8 @@ export class CatsClient extends EventEmitter {
       this.handleDeviceRpcMessage(msg.device_rpc);
     } else if (msg.thin_tool_rpc) {
       this.handleThinToolRpcMessage(msg.thin_tool_rpc);
+    } else if (msg.skill_mutation_grant) {
+      this.handleSkillMutationGrantMessage(msg.skill_mutation_grant);
     } else if (msg.data) {
       Logger.info(
         `[CatsCompany] 收到消息: topic=${msg.data.topic || '-'}, ` +
@@ -459,6 +516,49 @@ export class CatsClient extends EventEmitter {
       return;
     }
     this.emit('thin_tool_rpc_request', message);
+  }
+
+  private handleSkillMutationGrantMessage(raw: any): void {
+    const message = normalizeSkillMutationGrantMessage(raw);
+    if (!message) {
+      Logger.warning('[CatsCompany] Received an invalid Skill mutation grant message; ignored');
+      return;
+    }
+    if (message.type !== 'result') return;
+    const pending = this.pendingSkillMutationGrants.get(message.request_id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingSkillMutationGrants.delete(message.request_id);
+      if (
+        !message.error
+        && (
+          message.client_request_id !== pending.request.client_request_id
+          || !this.skillMutationGrantResultMatchesRuntime(message)
+        )
+      ) {
+        pending.reject(new CatsSendError(
+          'ack',
+          `Skill mutation grant ${message.request_id} result does not match the pending candidate`,
+          409,
+        ));
+      } else {
+        pending.resolve(message);
+      }
+    }
+    this.emit('skill_mutation_grant_result', message);
+  }
+
+  private skillMutationGrantResultMatchesRuntime(message: CatsSkillMutationGrantMessage): boolean {
+    const expectedAgentID = normalizeCatsUID(this.config.botUid);
+    const expectedBodyID = firstNonEmpty(
+      this.config.bodyId,
+      process.env.CATSCO_BODY_ID,
+      process.env.CATSCOMPANY_BODY_ID,
+      process.env.CATSCO_DEVICE_ID,
+      process.env.CATSCOMPANY_DEVICE_ID,
+    );
+    return (!expectedAgentID || normalizeCatsUID(message.agent_id) === expectedAgentID)
+      && (!expectedBodyID || message.runtime_body_id === expectedBodyID);
   }
 
   private resolvePendingDeviceRpc(
@@ -727,6 +827,81 @@ export class CatsClient extends EventEmitter {
     Logger.info(`[CatsCompany][thin_tool_rpc] result acked by server: request=${requestID}, msg=${msgId}`);
   }
 
+  async requestSkillMutationGrant(
+    request: CatsSkillMutationGrantRequest,
+    timeoutMs = 15_000,
+  ): Promise<CatsSkillMutationGrantMessage> {
+    const requestID = String(request.request_id || buildSkillMutationGrantRequestID()).trim();
+    const clientRequestID = String(request.client_request_id || '').trim();
+    const sourceTopicID = String(request.source_topic_id || '').trim();
+    const localSkillID = String(request.local_skill_id || '').trim();
+    const candidateHash = String(request.candidate_content_hash || '').trim().toLowerCase();
+    const expectedPreviousHash = String(request.expected_previous_content_hash || '').trim().toLowerCase();
+    if (
+      !requestID
+      || !clientRequestID
+      || !sourceTopicID
+      || !Number.isSafeInteger(request.source_message_id)
+      || request.source_message_id <= 0
+      || !localSkillID
+      || (request.operation !== 'create' && request.operation !== 'replace')
+      || !/^[a-f0-9]{64}$/.test(candidateHash)
+      || !Number.isSafeInteger(request.candidate_size_bytes)
+      || request.candidate_size_bytes <= 0
+      || !Number.isSafeInteger(request.expected_definition_revision)
+      || request.expected_definition_revision < 0
+      || (expectedPreviousHash !== '' && !/^[a-f0-9]{64}$/.test(expectedPreviousHash))
+    ) {
+      throw new Error('Skill mutation grant request is invalid');
+    }
+    if (this.pendingSkillMutationGrants.has(requestID)) {
+      throw new CatsSendError('ack', `Skill mutation grant request_id already pending: ${requestID}`, 409);
+    }
+    const msgId = `${++this.msgId}`;
+    // Keep the client request boundary explicit. Runtime identity and grant
+    // fields are server-issued result fields and must never be injectable by
+    // callers through an `as any` or plain JavaScript object.
+    const message: CatsSkillMutationGrantMessage = {
+      request_id: requestID,
+      client_request_id: clientRequestID,
+      source_topic_id: sourceTopicID,
+      source_message_id: request.source_message_id,
+      local_skill_id: localSkillID,
+      operation: request.operation,
+      candidate_content_hash: candidateHash,
+      candidate_size_bytes: request.candidate_size_bytes,
+      expected_definition_revision: request.expected_definition_revision,
+      ...(expectedPreviousHash ? { expected_previous_content_hash: expectedPreviousHash } : {}),
+      ...(request.before_reference ? { before_reference: request.before_reference } : {}),
+      id: msgId,
+      type: 'request',
+    };
+    const resultPromise = new Promise<CatsSkillMutationGrantMessage>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSkillMutationGrants.delete(requestID);
+        reject(new CatsSendError(
+          'timeout',
+          `Skill mutation grant ${requestID} did not receive a result in ${timeoutMs}ms`,
+        ));
+      }, timeoutMs);
+      this.pendingSkillMutationGrants.set(requestID, { request: message, resolve, reject, timer });
+    });
+    try {
+      // CatsCo returns a direct skill_mutation_grant result rather than a
+      // separate ctrl ack, so this path intentionally waits only for that
+      // candidate-bound response.
+      this.sendOrThrow({ skill_mutation_grant: message });
+    } catch (error) {
+      const pending = this.pendingSkillMutationGrants.get(requestID);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingSkillMutationGrants.delete(requestID);
+      }
+      throw error;
+    }
+    return resultPromise;
+  }
+
   private sendEnvelopeWithAck(
     msgId: string,
     envelope: Record<string, unknown>,
@@ -893,6 +1068,14 @@ export class CatsClient extends EventEmitter {
     }
   }
 
+  private rejectPendingSkillMutationGrants(err: Error): void {
+    for (const [requestID, pending] of this.pendingSkillMutationGrants.entries()) {
+      clearTimeout(pending.timer);
+      this.pendingSkillMutationGrants.delete(requestID);
+      pending.reject(err);
+    }
+  }
+
   private forceReconnect(reason: string): void {
     Logger.warning(`[CatsCompany] ${reason}，主动重建 WebSocket 连接`);
     if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
@@ -1023,6 +1206,60 @@ interface PendingThinToolRpc {
   timer: NodeJS.Timeout;
   acknowledged: boolean;
   result?: CatsThinToolRpcMessage;
+}
+
+interface PendingSkillMutationGrant {
+  request: CatsSkillMutationGrantMessage;
+  resolve: (message: CatsSkillMutationGrantMessage) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+function normalizeSkillMutationGrantMessage(raw: any): CatsSkillMutationGrantMessage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const type = String(raw.type || '').trim();
+  const requestID = String(raw.request_id || '').trim();
+  if (type !== 'result' || !requestID) return undefined;
+  const message = { ...raw, type, request_id: requestID } as CatsSkillMutationGrantMessage;
+  if (message.error) {
+    const code = String(message.error.code || '').trim();
+    const text = String(message.error.message || '').trim();
+    if (!code || !text) return undefined;
+    message.error = { code, message: text };
+  } else {
+    const grant = String(message.grant || '').trim();
+    const clientRequestID = String(message.client_request_id || '').trim();
+    const actorUserID = String(message.actor_user_id || '').trim();
+    const agentID = String(message.agent_id || '').trim();
+    const runtimeBodyID = String(message.runtime_body_id || '').trim();
+    const expiresAt = Number(message.expires_at);
+    if (
+      !grant
+      || !clientRequestID
+      || !actorUserID
+      || !agentID
+      || !runtimeBodyID
+      || !Number.isFinite(expiresAt)
+      || expiresAt <= Date.now()
+    ) {
+      return undefined;
+    }
+    message.grant = grant;
+    message.client_request_id = clientRequestID;
+    message.actor_user_id = actorUserID;
+    message.agent_id = agentID;
+    message.runtime_body_id = runtimeBodyID;
+    message.expires_at = expiresAt;
+  }
+  return message;
+}
+
+function buildSkillMutationGrantRequestID(): string {
+  return `skill_mutation_grant_${crypto.randomUUID()}`;
+}
+
+function normalizeCatsUID(value: unknown): string {
+  return String(value || '').trim().replace(/^usr(?=\d+$)/i, '');
 }
 
 function inferHttpBaseUrl(serverUrl: string): string | undefined {

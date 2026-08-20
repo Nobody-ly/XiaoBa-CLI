@@ -170,12 +170,14 @@ test('legacy speaker_default fallback still uses Device RPC when runtime routes 
   assert.deepEqual(capturedArgs, { path: 'C:\\Users\\Alice\\Desktop', pattern: '*' });
 });
 
-test('chat-triggered execute_shell is denied before local or remote execution', async () => {
-  let rpcCalls = 0;
+test('remote execute_shell rejects unconfirmed dangerous commands before routing', async () => {
+  let capturedCommand = '';
   const context = catsContext({
     thinToolRpc: {
-      executeTool: async () => {
-        rpcCalls += 1;
+      executeTool: async request => {
+        capturedCommand = String(request.args.command || '');
+        assert.equal(request.toolName, 'execute_shell');
+        assert.equal(request.targetDeviceId, 'dev-alice-win');
         return { ok: true, content: 'remote shell ok' };
       },
     },
@@ -188,22 +190,55 @@ test('chat-triggered execute_shell is denied before local or remote execution', 
 
   assert.equal(result.ok, false);
   assert.equal(result.ok ? '' : result.errorCode, 'PERMISSION_DENIED');
-  assert.match(result.ok ? '' : result.message, /isolated Skill candidate workspace/);
-  assert.equal(rpcCalls, 0);
+  assert.equal(capturedCommand, '');
 });
 
-test('local CLI execute_shell remains available', () => {
-  const route = resolveExecutionRoute({
-    workingDirectory: process.cwd(),
-    conversationHistory: [],
-    surface: 'cli',
-  }, {
-    toolName: 'execute_shell',
-    operation: 'execute_shell',
+test('remote execute_shell forwards explicitly confirmed dangerous commands', async () => {
+  let capturedArgs: Record<string, unknown> | undefined;
+  const context = catsContext({
+    thinToolRpc: {
+      executeTool: async request => {
+        capturedArgs = request.args;
+        assert.equal(request.toolName, 'execute_shell');
+        assert.equal(request.targetDeviceId, 'dev-alice-win');
+        return { ok: true, content: 'remote shell ok' };
+      },
+    },
   });
 
-  assert.equal(route.ok, true);
-  assert.equal(route.ok && route.mode, 'local');
+  const result = await new ShellTool().execute({
+    command: 'Remove-Item -Recurse -Force C:\\Temp\\xiaoba-routing-test',
+    target: 'Alice',
+    confirm_dangerous: true,
+  }, context);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok && result.content, 'remote shell ok');
+  assert.deepEqual(capturedArgs, {
+    command: 'Remove-Item -Recurse -Force C:\\Temp\\xiaoba-routing-test',
+    confirm_dangerous: true,
+  });
+  assert.match(result.targetContext || '', /target: Alice/);
+});
+
+test('Device RPC receiver applies the same explicit confirmation rule', async () => {
+  const context = catsContext({
+    workingDirectory: process.cwd(),
+    workspaceRoot: process.cwd(),
+    deviceRpcReceiver: true,
+  });
+  const command = 'Remove-Item -Recurse -Force .\\xiaoba-nonexistent-danger-test';
+
+  const blocked = await new ShellTool().execute({ command }, context);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.ok ? '' : blocked.errorCode, 'PERMISSION_DENIED');
+
+  const confirmed = await new ShellTool().execute({ command, confirm_dangerous: true }, context);
+  assert.notEqual(confirmed.ok ? undefined : confirmed.errorCode, 'PERMISSION_DENIED');
+
+  const extreme = await new ShellTool().execute({ command: 'rm -rf /', confirm_dangerous: true }, context);
+  assert.equal(extreme.ok, false);
+  assert.equal(extreme.ok ? '' : extreme.errorCode, 'PERMISSION_DENIED');
 });
 
 test('Device RPC receiver always executes locally and does not route again', () => {

@@ -79,6 +79,7 @@ import { registerPetRoutes } from './pet';
 import { registerTurnErrorRoutes } from './turn-errors';
 import { registerCacheTraceRoutes } from './cache-trace';
 import type { DashboardAuthStatus } from '../auth';
+import type { CatsConnectorAutoStart } from '../cats-connector-autostart';
 import { SkillHubService } from '../../skillhub/service';
 import {
   computeLocalSkillContentHash,
@@ -2200,6 +2201,7 @@ async function getCatsCoAuthForSkillHub(): Promise<{
 export interface DashboardApiRouterOptions {
   getAuthStatus?: () => DashboardAuthStatus;
   modelsDevFetch?: typeof fetch;
+  catsConnectorAutoStart?: CatsConnectorAutoStart;
 }
 
 export function createApiRouter(
@@ -3532,6 +3534,7 @@ export function createApiRouter(
         persistent: true,
       }, undefined, { timeoutMs: 10000 });
       persistCatsUserSession(state, login);
+      options.catsConnectorAutoStart?.invalidateAndSchedule('register', 0, { force: true });
       res.json({
         ok: true,
         user: {
@@ -3561,6 +3564,7 @@ export function createApiRouter(
         { timeoutMs: 10000 },
       );
       persistCatsUserSession(state, login);
+      options.catsConnectorAutoStart?.invalidateAndSchedule('login', 0, { force: true });
       res.json({
         ok: true,
         user: {
@@ -3575,7 +3579,12 @@ export function createApiRouter(
   });
 
   router.post('/cats/auth/logout', (_req, res) => {
+    const connector = serviceManager.getService('catscompany');
+    if (connector?.status === 'running') {
+      serviceManager.stop('catscompany');
+    }
     const removed = createCatsCoLocalConfigService({ runtimeRoot: runtimeDataRoot() }).clearAccount();
+    options.catsConnectorAutoStart?.invalidateAndSchedule('logout');
     res.json({ ok: true, removed });
   });
 
@@ -3598,6 +3607,9 @@ export function createApiRouter(
         serverUrl,
       };
       persistCatsUserSession(nextState, login);
+      // Electron also requests an immediate bootstrap. The delayed safety run
+      // covers other deep-link clients and is coalesced by the controller.
+      options.catsConnectorAutoStart?.invalidateAndSchedule('desktop-connect', 1000);
       res.json({
         ok: true,
         user: {
@@ -3612,6 +3624,28 @@ export function createApiRouter(
       const payload = catsErrorResponse(e);
       res.status(payload.status).json(payload.body);
     }
+  });
+
+  router.get('/cats/bootstrap/status', (_req, res) => {
+    const controller = options.catsConnectorAutoStart;
+    if (!controller) {
+      return res.json({
+        stage: 'idle',
+        trigger: 'unavailable',
+        attempt: 0,
+        message: 'Connector 自动启动控制器未启用',
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    return res.json(controller.getSnapshot());
+  });
+
+  router.post('/cats/bootstrap', (req, res) => {
+    const controller = options.catsConnectorAutoStart;
+    if (!controller) return res.status(503).json({ error: 'Connector auto-start controller is unavailable' });
+    const trigger = String(req.body?.trigger || 'manual').trim() || 'manual';
+    const snapshot = controller.schedule(trigger, 0, { force: true });
+    return res.status(202).json({ ok: true, ...snapshot });
   });
 
   router.post('/cats/connector/start', async (_req, res) => {
@@ -3978,6 +4012,10 @@ export function createApiRouter(
       const targetBot = bots.find((bot: any) => String(bot.id || bot.uid || '') === botUid);
       if (!targetBot) return res.status(404).json({ error: 'Bot not found' });
 
+      const previousWeixinStatus = getWeixinChannelStatus({
+        runtimeRoot: runtimeDataRoot(),
+        env: process.env,
+      });
       const apiKey = await getCatsBotApiKey(state, botUid, targetBot);
       const result = await commitCatsBotBindingAndStartConnector(serviceManager, state, {
         userUid,
@@ -3990,6 +4028,19 @@ export function createApiRouter(
         bindingSource: 'explicit-switch',
       });
       const botName = String(targetBot.display_name || targetBot.username || 'Bot');
+      const weixinRequiresRebind = Boolean(
+        previousWeixinStatus.binding?.agentUid
+        && previousWeixinStatus.binding.agentUid !== botUid,
+      );
+      let weixinStopped = false;
+      if (weixinRequiresRebind && serviceManager.getService('weixin')?.status === 'running') {
+        try {
+          serviceManager.stop('weixin');
+          weixinStopped = true;
+        } catch (error: any) {
+          result.warnings.push(`Agent 已切换，但微信服务停止失败：${String(error?.message || error)}`);
+        }
+      }
 
       res.json({
         ok: true,
@@ -4005,8 +4056,10 @@ export function createApiRouter(
         preflight: result.preflight,
         connectorStarted: result.connectorStarted,
         connectorRestarted: result.connectorRestarted,
+        weixinRequiresRebind,
+        weixinStopped,
         warnings: result.warnings.length > 0 ? result.warnings : undefined,
-        message: `已切换到机器人 "${botName}"`,
+        message: `已切换到 Agent "${botName}"`,
       });
     } catch (e: any) {
       const payload = catsErrorResponse(e);

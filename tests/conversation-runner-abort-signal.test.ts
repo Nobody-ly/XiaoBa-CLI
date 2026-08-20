@@ -225,6 +225,85 @@ test('ConversationRunner executes a tool only once after a transient model retry
   assert.equal(toolExecutions, 1);
 });
 
+test('ConversationRunner does not repeat a completed tool when the following model request retries', async () => {
+  const service = new AIService({
+    provider: 'openai',
+    apiUrl: 'https://primary.example.test/v1',
+    apiKey: 'primary-key',
+    model: 'primary-model',
+    openaiApiMode: 'responses',
+  });
+  let modelCalls = 0;
+  (service as any).provider = {
+    chat: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          content: '',
+          toolCalls: [{
+            id: 'call_once_before_retry',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ file_path: 'a.txt' }),
+            },
+          }],
+        };
+      }
+      if (modelCalls === 2) {
+        throw Object.assign(new Error('terminal Responses failure'), {
+          code: 'internal_server_error',
+          error: {
+            code: 'internal_server_error',
+            message: 'websocket: close 1006 (abnormal closure): unexpected EOF',
+          },
+        });
+      }
+      return {
+        content: 'done',
+        toolCalls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      };
+    },
+  };
+  (service as any).sleepWithAbort = async () => {};
+
+  let toolExecutions = 0;
+  const toolExecutor: ToolExecutor = {
+    getToolDefinitions() {
+      return [{
+        name: 'read_file',
+        description: 'Read a file',
+        parameters: {
+          type: 'object',
+          properties: { file_path: { type: 'string' } },
+          required: ['file_path'],
+        },
+      }];
+    },
+    async executeTool(toolCall: ToolCall): Promise<ToolResult> {
+      toolExecutions += 1;
+      return {
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        name: toolCall.function.name,
+        content: 'file content',
+        ok: true,
+      };
+    },
+  };
+  const runner = new ConversationRunner(service, toolExecutor, {
+    stream: false,
+    enableCompression: false,
+  });
+
+  const result = await runner.run([{ role: 'user', content: 'read it' }]);
+
+  assert.equal(result.response, 'done');
+  assert.equal(modelCalls, 3);
+  assert.equal(toolExecutions, 1);
+});
+
 async function waitFor(predicate: () => boolean, maxAttempts = 50): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     if (predicate()) return;

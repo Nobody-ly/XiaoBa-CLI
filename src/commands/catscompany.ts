@@ -19,6 +19,7 @@ import { CloudBotModelRuntimeReloadController } from '../bot-definition/runtime-
 import { createBotDefinitionSyncService } from '../bot-definition/service';
 import { resolveRunnableCloudDefinition } from '../bot-definition/cloud-sync';
 import { getPromptReconcileCoordinator } from '../bot-definition/prompt-sync';
+import { provisionCatsCoRuntimeCredential } from '../catscompany/runtime-credential';
 
 const CONNECTOR_OWNER_POLL_MS = 2000;
 const CLOUD_MODEL_POLL_MS = 5000;
@@ -63,7 +64,7 @@ export async function catscompanyCommand(): Promise<void> {
     config: resolvedRuntime.connector,
   };
 
-  const connectorConfig = resolved.config;
+  let connectorConfig = resolved.config;
   if (!connectorConfig) {
     Logger.error(`CatsCo 配置缺失：${resolved.missing.join(', ') || 'unknown'}。`);
     Logger.error('请先在 Dashboard 登录 CatsCo 并选择/绑定机器人，或设置兼容环境变量。');
@@ -93,6 +94,19 @@ export async function catscompanyCommand(): Promise<void> {
     Logger.warning('已跳过第二条 CatsCo WebSocket 连接，避免同一设备重复连接互相挤下线。');
     process.exitCode = 2;
     return;
+  }
+
+  try {
+    const provisioned = await provisionCatsCoRuntimeCredential(connectorConfig, resolvedRuntime.auth);
+    if (provisioned.runtimeCredential && !connectorConfig.runtimeCredential) {
+      Logger.info('CatsCo Runtime 已取得受限 Skill mutation grant 凭证。');
+    }
+    connectorConfig = provisioned;
+  } catch (error) {
+    // Backward compatibility is intentional: an old/unavailable CatsCo server
+    // must not take ordinary chat offline. Without the separate credential the
+    // connection remains unable to request a Skill mutation grant.
+    Logger.warning(`CatsCo Runtime 凭证暂不可用，继续以只读 Skill 权限连接: ${errorMessage(error)}`);
   }
 
   let bot = new CatsCompanyBot(connectorConfig);
@@ -135,7 +149,7 @@ export async function catscompanyCommand(): Promise<void> {
   if (ownerPid) {
     ownerWatchTimer = setInterval(() => {
       if (isProcessAlive(ownerPid)) return;
-      Logger.warning(`CatsCo Dashboard owner process 已退出，正在关闭孤儿 connector。ownerPid=${ownerPid}`);
+      Logger.warning(`CatsCo Connector owner process 已退出，正在关闭孤儿 connector。ownerPid=${ownerPid}`);
       void shutdown();
     }, CONNECTOR_OWNER_POLL_MS);
   }

@@ -54,6 +54,7 @@ describe('CatsCo runtime config resolver', () => {
         CATSCO_HTTP_BASE_URL: 'https://env.example',
         CATSCO_API_KEY: 'env-api-key',
         CATSCO_BOT_UID: 'bot-env',
+        CATSCO_RUNTIME_CREDENTIAL: 'runtime-credential-env',
       },
     });
 
@@ -63,6 +64,7 @@ describe('CatsCo runtime config resolver', () => {
     assert.equal(resolved.connector?.bodyId, 'body-typed');
     assert.equal(resolved.connector?.installationId, 'install-typed');
     assert.equal(resolved.connector?.runtimeRole, 'server');
+    assert.equal(resolved.connector?.runtimeCredential, 'runtime-credential-env');
     assert.equal(resolved.auth.token, 'env-user-token');
     assert.equal(resolved.auth.uid, 'user-typed');
     assert.equal(resolved.auth.botUid, 'bot-typed');

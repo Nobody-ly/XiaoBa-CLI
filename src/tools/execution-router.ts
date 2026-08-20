@@ -3,12 +3,21 @@ import type { TargetRoute, ToolExecutionContext, ToolExecutionResult } from '../
 import { normalizeTargetText } from '../catscompany/runtime-context';
 import { executeRemoteDeviceRpcTool } from './device-rpc-tool';
 import { TOOL_TARGET_CONTEXT_PREFIX, TOOL_TARGET_CONTEXT_SUFFIX } from './tool-target-context';
-import { isChatTriggeredContext } from '../bot-skills/formal-workspace-policy';
+import {
+  resolveTrustedBotSkillScriptInvocation,
+  type TrustedBotSkillScriptInvocation,
+} from '../bot-skills/trusted-script-execution';
 
 export type ExecutionTargetId = 'agent_self' | string;
 
 export type ExecutionRoute =
-  | { ok: true; mode: 'local'; target: ExecutionTargetId; label: string }
+  | {
+      ok: true;
+      mode: 'local';
+      target: ExecutionTargetId;
+      label: string;
+      trustedSkillScript?: TrustedBotSkillScriptInvocation;
+    }
   | {
       ok: true;
       mode: 'remote';
@@ -47,16 +56,18 @@ export function resolveExecutionRoute(
     toolName: string;
     operation: DeviceGrantOperation;
     target?: unknown;
+    command?: unknown;
+    cwd?: unknown;
   },
 ): ExecutionRoute {
-  if (options.operation === 'execute_shell' && isChatTriggeredContext(context)) {
-    return {
-      ok: false,
-      errorCode: 'PERMISSION_DENIED',
-      message: 'Chat-triggered shell execution is disabled until an isolated Skill candidate workspace is available.',
-    };
+  let trustedSkillScript: TrustedBotSkillScriptInvocation | undefined;
+  if (options.operation === 'execute_shell') {
+    const decision = resolveTrustedBotSkillScriptInvocation(options.command, context, {
+      cwd: options.cwd,
+      target: options.target,
+    });
+    if (decision.ok) trustedSkillScript = decision.invocation;
   }
-
   if (context.deviceRpcReceiver) {
     return { ok: true, mode: 'local', target: 'speaker_default', label: 'current Device RPC receiver' };
   }
@@ -70,6 +81,7 @@ export function resolveExecutionRoute(
       mode: 'local',
       target: 'agent_self',
       label: findTargetLabel(context, 'agent_self') || 'XiaoBa local computer',
+      ...(trustedSkillScript ? { trustedSkillScript } : {}),
     };
   }
 

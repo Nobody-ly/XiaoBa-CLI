@@ -4,14 +4,14 @@ import { describe, test } from 'node:test';
 import * as assert from 'node:assert';
 import * as vm from 'node:vm';
 
-const dashboardHtml = readFileSync(join(process.cwd(), 'dashboard/index.html'), 'utf8');
+const connectorClient = readFileSync(join(process.cwd(), 'dashboard/connector.js'), 'utf8');
 
 function extractDashboardAuthClient(): string {
-  const start = dashboardHtml.indexOf("const DASHBOARD_API_KEY_STORAGE_KEY = 'catsco.dashboardApiKey';");
-  const end = dashboardHtml.indexOf('    function formatDashboardApiError', start);
+  const start = connectorClient.indexOf("const DASHBOARD_API_KEY_STORAGE_KEY = 'catsco.dashboardApiKey';");
+  const end = connectorClient.indexOf('  const state = {', start);
   assert.ok(start >= 0, 'dashboard auth client start marker should exist');
   assert.ok(end > start, 'dashboard auth client end marker should exist');
-  return dashboardHtml.slice(start, end);
+  return connectorClient.slice(start, end);
 }
 
 function deferred<T>() {

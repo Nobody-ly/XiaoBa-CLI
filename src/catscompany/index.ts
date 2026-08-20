@@ -3,6 +3,8 @@ import {
   MessageContext,
   type CatsAgentContextMessage,
   type CatsDeviceRpcMessage,
+  type CatsSkillMutationGrantMessage,
+  type CatsSkillMutationGrantRequest,
   type CatsThinToolRpcMessage,
 } from './client';
 import { CatsCompanyConfig, ParsedCatsMessage, CatsFileInfo, type CatsCompanyRuntimeRole } from './types';
@@ -186,6 +188,7 @@ export const CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperati
   SKILLHUB_THIN_RPC_TOOLS.workspace,
   SKILLHUB_THIN_RPC_TOOLS.share,
   SKILLHUB_THIN_RPC_TOOLS.finalize,
+  SKILLHUB_THIN_RPC_TOOLS.delete,
   SKILLHUB_THIN_RPC_TOOLS.switchBot,
 ];
 
@@ -487,8 +490,11 @@ export class CatsCompanyBot {
     this.bot = new CatsClient({
       serverUrl: config.serverUrl,
       apiKey: config.apiKey,
+      botUid: config.botUid,
       bodyId: config.bodyId,
       installationId: config.installationId,
+      runtimeCredential: config.runtimeCredential,
+      runtimeCredentialExpiresAt: config.runtimeCredentialExpiresAt,
       deviceRegistration,
       httpBaseUrl: config.httpBaseUrl,
     });
@@ -602,6 +608,21 @@ export class CatsCompanyBot {
       && this.cloudSessionRestorePromises.size === 0
       && this.subAgentCompletionBatches.size === 0
       && this.sessionManager.isIdle();
+  }
+
+  /**
+   * Internal SDK boundary for the future dedicated mutation tool. This does
+   * not expose a model tool or write a Skill by itself; it only requests the
+   * candidate-bound authorization established by CatsCo.
+   */
+  requestSkillMutationGrant(
+    request: CatsSkillMutationGrantRequest,
+    timeoutMs?: number,
+  ): Promise<CatsSkillMutationGrantMessage> {
+    if (this.shuttingDown) {
+      return Promise.reject(new Error('CatsCo Runtime is shutting down'));
+    }
+    return this.bot.requestSkillMutationGrant(request, timeoutMs);
   }
 
   private async registerCurrentDevice(): Promise<void> {

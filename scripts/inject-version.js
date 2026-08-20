@@ -60,16 +60,6 @@ function updateJsonVersion(filePath, version) {
   fs.writeFileSync(filePath, JSON.stringify(json, null, 2) + '\n');
 }
 
-function replaceInFile(filePath, pattern, replacement) {
-  if (!fs.existsSync(filePath)) {
-    return;
-  }
-
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const next = content.replace(pattern, replacement);
-  fs.writeFileSync(filePath, next);
-}
-
 const version = resolveVersion();
 
 console.log(`Injecting version: ${version}`);
@@ -79,12 +69,5 @@ console.log('Updated package.json');
 
 updateJsonVersion(path.join(rootDir, 'package-lock.json'), version);
 console.log('Updated package-lock.json');
-
-replaceInFile(
-  path.join(rootDir, 'dashboard', 'index.html'),
-  /sidebar-brand-ver">v[\d.]+</,
-  `sidebar-brand-ver">v${version}<`
-);
-console.log('Updated dashboard/index.html');
 
 console.log('Version injection complete.');

@@ -351,19 +351,6 @@ describe('dashboard connected SkillHub API', () => {
     assert.equal(session.baseUrl, cloudBaseUrl);
   });
 
-  test('SkillHub install buttons do not embed registry data in inline handlers', () => {
-    const html = fs.readFileSync(path.join(originalCwd, 'dashboard/index.html'), 'utf8');
-    assert.match(html, /data-skillhub-install="true"/);
-    assert.match(html, /addEventListener\('click', handleSkillHubInstallClick\)/);
-    assert.doesNotMatch(html, /onclick="installSkillHubSkill/);
-    assert.match(html, /data-skillhub-versions="true"/);
-    assert.match(html, /data-skillhub-yank-version="true"/);
-    assert.match(html, /addEventListener\('click', handleSkillHubVersionsClick\)/);
-    assert.match(html, /addEventListener\('click', handleSkillHubYankVersionClick\)/);
-    assert.doesNotMatch(html, /onclick="showSkillHubVersions/);
-    assert.doesNotMatch(html, /onclick="yankOwnSkillHubVersion/);
-  });
-
   async function startDashboard(): Promise<void> {
     const app = express();
     app.use(express.json({ limit: '25mb' }));

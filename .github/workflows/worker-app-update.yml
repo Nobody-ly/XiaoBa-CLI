@@ -50,7 +50,11 @@ jobs:
       - name: Build deterministic worker artifact
         run: |
           mkdir -p release/worker
-          node scripts/build-linux-worker-artifact.mjs > release/worker/build-manifest.json
+          node scripts/build-linux-worker-artifact.mjs \
+            --manifest-output release/worker/build-manifest.json
+          jq -e '
+            .artifactPath | type == "string" and length > 0
+          ' release/worker/build-manifest.json >/dev/null
       # P2 guard: only strict vX.Y.Z release tags may reach production workers
       # (e.g. v1.0.8-fork-volc-dual-bucket-fix-... must never deploy).
       - name: Validate release tag is strict SemVer

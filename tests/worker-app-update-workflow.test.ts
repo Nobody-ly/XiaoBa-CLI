@@ -66,6 +66,18 @@ test("worker app update workflow serializes deployments and uses a prod environm
   assert.match(workflow, /cancel-in-progress: false/);
 });
 
+test("worker build manifest is isolated from command stdout", () => {
+  assert.match(
+    workflow,
+    /build-linux-worker-artifact\.mjs \\\s*--manifest-output release\/worker\/build-manifest\.json/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /build-linux-worker-artifact\.mjs > release\/worker\/build-manifest\.json/,
+  );
+  assert.match(workflow, /jq -e '[\s\S]*?' release\/worker\/build-manifest\.json/);
+});
+
 test("worker app update workflow pins runner and node toolchain", () => {
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   assert.match(workflow, /NODE_VERSION: ["']22\.23\.1["']/);

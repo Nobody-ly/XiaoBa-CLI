@@ -19,6 +19,26 @@ const legacyTests = [
   'tests/tool-gateway-catsco.test.ts',
 ];
 
+const skillHubPhase1Tests = [
+  'tests/skillhub-phase1-compatibility.test.ts',
+  'tests/dashboard-skillhub-connected-api.test.ts',
+  'tests/catscompany-skillhub-rpc.test.ts',
+  'tests/bot-definition-skills.test.ts',
+  'tests/bot-skill-workspace.test.ts',
+  'tests/bot-skills-sync.test.ts',
+  'tests/bot-skills-security.test.ts',
+  'tests/execution-router-clean.test.ts',
+  'tests/trusted-bot-skill-script-execution.test.ts',
+  'tests/tool-result-read-file-local-grants.test.ts',
+  'tests/tool-result-read-tool.test.ts',
+  'tests/tool-result-send-file-tool.test.ts',
+  'tests/tool-result-write-tool.test.ts',
+  'tests/glob-tool.test.ts',
+  'tests/import-file.test.ts',
+  'tests/catscompany-device-rpc-tools.test.ts',
+  'tests/safety.test.ts',
+];
+
 const args = process.argv.slice(2);
 const suite = args.find(arg => !arg.startsWith('--')) || 'runtime';
 const listOnly = args.includes('--list');
@@ -33,6 +53,7 @@ const runtimeTests = allTests.filter(file => !legacySet.has(file));
 
 const suites = {
   runtime: runtimeTests,
+  'skillhub-phase1': skillHubPhase1Tests,
   legacy: legacyTests,
   all: allTests,
 };

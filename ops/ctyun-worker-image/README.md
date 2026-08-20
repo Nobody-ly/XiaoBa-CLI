@@ -10,9 +10,11 @@ session, skill installation, or runtime `.env`.
 - Only stable `vX.Y.Z` tags whose commit is contained in `main` may bake an
   image automatically. Manual runs are restricted to `main` and default to
   not baking until the operator explicitly checks the input.
-- The source-free worker artifact stays on the GitHub runner and is copied
-  directly to the disposable builder over SSH. It is never uploaded to TOS,
-  a public release bucket, or a GitHub Actions artifact.
+- The source-free worker artifact and pinned preparation script are staged as
+  private, per-run TOS objects with short-lived signed URLs. The private
+  builder downloads them through cloud-init, and the workflow deletes both
+  objects after the bake. They are never public or retained as GitHub Actions
+  artifacts.
 - A Tianyi Cloud private ECS image is baked only for a stable release selected
   for provisioning, or when the base OS/system dependencies change.
 - `CTYUN_AUTO_BAKE_WORKER_IMAGE=true` makes every stable tag bake an image;
@@ -88,8 +90,9 @@ after the worker has claimed its bot identity.
 ## Local Bake
 
 `New-CatsCoWorkerImage.ps1` defaults to plan mode. Execute mode creates a new
-temporary on-demand ECS named `catsco-img-*`, copies in a checked source-free
-artifact, stops that temporary instance, and creates a uniquely named
+temporary on-demand ECS named `catsco-img-*` without a public IP. Cloud-init
+downloads the checked source-free artifact through a short-lived private URL,
+prepares the system, powers the builder off, and creates a uniquely named
 `catsco-bake-*` image. After the image is active and its source builder has been
 verified, the script publishes it under the stable `catsco-worker-*` name with
 a pending bake marker, deletes the builder and its temporary key pair, and only
@@ -116,12 +119,20 @@ pwsh ops/ctyun-worker-image/New-CatsCoWorkerImage.ps1 `
   -SecurityGroupID '<security-group-id>'
 ```
 
-Run the same command with `-Mode Create`, `-ArtifactPath`, and
-`-ArtifactSha256` only after reviewing the plan. The machine running it needs
-`ctyun-cli`, Git, OpenSSH, SCP, `ssh-keygen`, and GNU `timeout`.
+Run the same command with `-Mode Create`, `-ArtifactPath`,
+`-ArtifactSha256`, `-ArtifactUrl`, `-PrepareScriptUrl`, and
+`-PrepareScriptSha256` only after reviewing the plan. Both URLs must be HTTPS
+and remain valid until cloud-init downloads the inputs. The
+machine running it needs `ctyun-cli`, Git, `ssh-keygen`, and GNU `timeout`.
 
-The builder verifies the artifact checksum again before extracting it. Remote
-transfer, preparation, and every Tianyi Cloud API call have hard timeouts. The
+The bake must use the same Tianyi enterprise project as the virtual-worker
+network/NAT resources. Set `CTYUN_WORKER_PROJECT_ID` in the protected release
+environment and pass it as `-ProjectID`; do not use a virtual-worker/bot ID as
+the project ID. Builders intentionally use `-extIP 0` and rely on the selected
+private subnet's NAT gateway for HTTPS downloads.
+
+The builder verifies the artifact checksum again before extracting it. Builder
+preparation and every Tianyi Cloud API call have hard timeouts. The
 whole bake also has a deadline separate from its cleanup deadline, while the
 GitHub job keeps additional time in reserve for compensating cleanup. The script resolves a newly
 ordered instance by both the order resource ID and its exact temporary name,

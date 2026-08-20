@@ -24,6 +24,8 @@ env:
   NODE_VERSION: "22.23.1"
   CTYUN_CLI_VERSION: v0.1.1
   CTYUN_CLI_PACKAGE_SHA256: 93272c3fd377a6f642a89cb326fa2f4a3d2fab7dfc9587e49906527230b767fa
+  TOS_WORKER_BUCKET: catsco-worker-release
+  TOS_WORKER_REGION: cn-guangzhou
 
 jobs:
   image:
@@ -97,6 +99,45 @@ jobs:
           artifact="${artifacts[0]}"
           echo "path=$artifact" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$artifact" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Stage private artifact for the builder
+        id: artifact_transport
+        timeout-minutes: 15
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
+          WORKER_ARTIFACT_PATH: ${{ steps.artifact_meta.outputs.path }}
+          WORKER_ARTIFACT_SHA256: ${{ steps.artifact_meta.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+          aws configure set default.s3.addressing_style virtual
+          endpoint="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
+          key="update/worker/.bake/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/$(basename "$WORKER_ARTIFACT_PATH")"
+          script_key="update/worker/.bake/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/prepare-image.sh"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "script_key=$script_key" >> "$GITHUB_OUTPUT"
+          aws s3 cp "$WORKER_ARTIFACT_PATH" "s3://${TOS_WORKER_BUCKET}/${key}" \
+            --endpoint-url "$endpoint" --acl private \
+            --metadata "sha256=${WORKER_ARTIFACT_SHA256}" --only-show-errors
+          script_sha="$(sha256sum ops/ctyun-worker-image/prepare-image.sh | awk '{print $1}')"
+          aws s3 cp ops/ctyun-worker-image/prepare-image.sh \
+            "s3://${TOS_WORKER_BUCKET}/${script_key}" \
+            --endpoint-url "$endpoint" --acl private \
+            --metadata "sha256=${script_sha}" --only-show-errors
+          url="$(aws s3 presign "s3://${TOS_WORKER_BUCKET}/${key}" \
+            --endpoint-url "$endpoint" --expires-in 21600)"
+          script_url="$(aws s3 presign "s3://${TOS_WORKER_BUCKET}/${script_key}" \
+            --endpoint-url "$endpoint" --expires-in 21600)"
+          echo "::add-mask::$url"
+          echo "::add-mask::$script_url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "script_url=$script_url" >> "$GITHUB_OUTPUT"
+          echo "script_sha256=$script_sha" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned Tianyi Cloud CLI package
         timeout-minutes: 3
@@ -178,6 +219,7 @@ jobs:
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           INTERRUPTED_RUNS_JSON: ${{ steps.prior_runs.outputs.runs }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
+          WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -186,6 +228,9 @@ jobs:
           WORKER_SECURITY_GROUP_ID: ${{ vars.CTYUN_WORKER_SECURITY_GROUP_ID }}
         run: |
           $runs = @($env:INTERRUPTED_RUNS_JSON | ConvertFrom-Json)
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
+            throw 'CTYUN_WORKER_PROJECT_ID is required for interrupted image cleanup'
+          }
           $recentRuns = [Collections.Generic.List[object]]::new()
           $historicalRuns = [Collections.Generic.List[object]]::new()
           $blockingFailures = [Collections.Generic.List[string]]::new()
@@ -223,6 +268,7 @@ jobs:
               '-CleanupTimeoutMinutes', [string]$cleanupTimeoutMinutes,
               '-ApiTimeoutSeconds', [string]$apiTimeoutSeconds,
               '-RegionID', $env:WORKER_REGION_ID,
+              '-ProjectID', $env:WORKER_PROJECT_ID,
               '-AzName', $env:WORKER_AZ_NAME,
               '-BaseImageID', $env:WORKER_BASE_IMAGE_ID,
               '-FlavorID', $env:WORKER_FLAVOR_ID,
@@ -309,6 +355,7 @@ jobs:
           CTYUN_AK: ${{ secrets.CTYUN_AK }}
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
+          WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -317,6 +364,9 @@ jobs:
           WORKER_SECURITY_GROUP_ID: ${{ vars.CTYUN_WORKER_SECURITY_GROUP_ID }}
         run: |
           $currentAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
+            throw 'CTYUN_WORKER_PROJECT_ID is required for rerun cleanup'
+          }
           $rerunDeadline = [DateTimeOffset]::UtcNow.AddMinutes(45)
           $rerunFailures = [Collections.Generic.List[string]]::new()
           foreach ($previousAttempt in 1..($currentAttempt - 1)) {
@@ -340,6 +390,7 @@ jobs:
               '-CleanupTimeoutMinutes', '15',
               '-ApiTimeoutSeconds', '90',
               '-RegionID', $env:WORKER_REGION_ID,
+              '-ProjectID', $env:WORKER_PROJECT_ID,
               '-AzName', $env:WORKER_AZ_NAME,
               '-BaseImageID', $env:WORKER_BASE_IMAGE_ID,
               '-FlavorID', $env:WORKER_FLAVOR_ID,
@@ -370,6 +421,7 @@ jobs:
           CTYUN_AK: ${{ secrets.CTYUN_AK }}
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
+          WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -378,12 +430,21 @@ jobs:
           WORKER_SECURITY_GROUP_ID: ${{ vars.CTYUN_WORKER_SECURITY_GROUP_ID }}
           WORKER_ARTIFACT_PATH: ${{ steps.artifact_meta.outputs.path }}
           WORKER_ARTIFACT_SHA256: ${{ steps.artifact_meta.outputs.sha256 }}
+          WORKER_ARTIFACT_URL: ${{ steps.artifact_transport.outputs.url }}
+          WORKER_PREPARE_SCRIPT_URL: ${{ steps.artifact_transport.outputs.script_url }}
+          WORKER_PREPARE_SCRIPT_SHA256: ${{ steps.artifact_transport.outputs.script_sha256 }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
+            throw 'CTYUN_WORKER_PROJECT_ID is required for image bake'
+          }
           ./ops/ctyun-worker-image/New-CatsCoWorkerImage.ps1 `
             -Mode Create `
             -SourceRef $env:GITHUB_SHA `
             -ArtifactPath $env:WORKER_ARTIFACT_PATH `
             -ArtifactSha256 $env:WORKER_ARTIFACT_SHA256 `
+            -ArtifactUrl $env:WORKER_ARTIFACT_URL `
+            -PrepareScriptUrl $env:WORKER_PREPARE_SCRIPT_URL `
+            -PrepareScriptSha256 $env:WORKER_PREPARE_SCRIPT_SHA256 `
             -BuildNumber $env:GITHUB_RUN_NUMBER `
             -BuildAttempt $env:GITHUB_RUN_ATTEMPT `
             -BuildIdentity $env:GITHUB_RUN_ID `
@@ -391,6 +452,7 @@ jobs:
             -CleanupTimeoutMinutes 40 `
             -ApiTimeoutSeconds 90 `
             -RegionID $env:WORKER_REGION_ID `
+            -ProjectID $env:WORKER_PROJECT_ID `
             -AzName $env:WORKER_AZ_NAME `
             -BaseImageID $env:WORKER_BASE_IMAGE_ID `
             -FlavorID $env:WORKER_FLAVOR_ID `
@@ -436,6 +498,7 @@ jobs:
           CTYUN_AK: ${{ secrets.CTYUN_AK }}
           CTYUN_SK: ${{ secrets.CTYUN_SK }}
           WORKER_REGION_ID: ${{ vars.CTYUN_WORKER_REGION_ID }}
+          WORKER_PROJECT_ID: ${{ vars.CTYUN_WORKER_PROJECT_ID }}
           WORKER_AZ_NAME: ${{ vars.CTYUN_WORKER_AZ_NAME }}
           WORKER_BASE_IMAGE_ID: ${{ vars.CTYUN_WORKER_BASE_IMAGE_ID }}
           WORKER_FLAVOR_ID: ${{ vars.CTYUN_WORKER_FLAVOR_ID }}
@@ -443,6 +506,9 @@ jobs:
           WORKER_SUBNET_ID: ${{ vars.CTYUN_WORKER_SUBNET_ID }}
           WORKER_SECURITY_GROUP_ID: ${{ vars.CTYUN_WORKER_SECURITY_GROUP_ID }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WORKER_PROJECT_ID)) {
+            throw 'CTYUN_WORKER_PROJECT_ID is required for failed-bake cleanup'
+          }
           ./ops/ctyun-worker-image/New-CatsCoWorkerImage.ps1 `
             -Mode Cleanup `
             -SourceRef $env:GITHUB_SHA `
@@ -454,9 +520,32 @@ jobs:
             -ApiTimeoutSeconds 90 `
             -WaitForLateResources `
             -RegionID $env:WORKER_REGION_ID `
+            -ProjectID $env:WORKER_PROJECT_ID `
             -AzName $env:WORKER_AZ_NAME `
             -BaseImageID $env:WORKER_BASE_IMAGE_ID `
             -FlavorID $env:WORKER_FLAVOR_ID `
             -VpcID $env:WORKER_VPC_ID `
             -SubnetID $env:WORKER_SUBNET_ID `
             -SecurityGroupID $env:WORKER_SECURITY_GROUP_ID
+
+      - name: Remove staged private artifact
+        if: ${{ always() && steps.artifact_transport.outputs.key != '' }}
+        timeout-minutes: 10
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
+          STAGED_ARTIFACT_KEY: ${{ steps.artifact_transport.outputs.key }}
+          STAGED_SCRIPT_KEY: ${{ steps.artifact_transport.outputs.script_key }}
+        run: |
+          set -euo pipefail
+          endpoint="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
+          for key in "$STAGED_ARTIFACT_KEY" "$STAGED_SCRIPT_KEY"; do
+            aws s3 rm "s3://${TOS_WORKER_BUCKET}/${key}" \
+              --endpoint-url "$endpoint" --only-show-errors
+            if aws s3api head-object --bucket "$TOS_WORKER_BUCKET" \
+              --key "$key" --endpoint-url "$endpoint" >/dev/null 2>&1; then
+              echo "staged bake object still exists after cleanup: $key" >&2
+              exit 1
+            fi
+          done

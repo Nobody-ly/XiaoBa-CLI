@@ -536,32 +536,21 @@ describe("Tianyi Cloud worker image pipeline", () => {
     );
   });
 
-  test("remote transfer and image preparation cannot run indefinitely", () => {
-    assert.match(imageOrchestrator, /ArtifactTransferTimeoutMinutes/);
-    assert.match(imageOrchestrator, /RemoteBuildTimeoutMinutes/);
+  test("private builder bootstrap is bounded and does not require inbound SSH", () => {
     assert.match(imageOrchestrator, /ApiTimeoutSeconds/);
     assert.match(
       imageOrchestrator,
       /"timeout"[\s\S]*?"ctyun-cli"/,
     );
-    assert.match(imageOrchestrator, /ServerAliveInterval=15/);
-    assert.match(imageOrchestrator, /--kill-after=120s/);
-    // Wait-ForSsh must probe via the reported status text, not the exit code
-    // of `cloud-init status --wait` (Tianyi Ubuntu images return exit code 2
-    // from --wait even when status is done).
-    assert.match(
-      imageOrchestrator,
-      /cloud-init status 2>\/dev\/null \| grep -q '\^status: done'/,
-    );
-    // The probe must not invoke `cloud-init status --wait` as the remote
-    // command (only the explanatory comment may mention it).
-    assert.doesNotMatch(
-      imageOrchestrator,
-      /"root@\$IP"[^"]*cloud-init status --wait/,
-    );
+    assert.match(imageOrchestrator, /"--extIP", "0"/);
+    assert.match(imageOrchestrator, /"--userData", \$userData/);
+    assert.match(imageOrchestrator, /userData exceeds Tianyi Cloud's 16384-character limit/);
+    assert.match(imageOrchestrator, /curl --fail --silent --show-error/);
+    assert.match(imageOrchestrator, /shutdown -h now/);
+    assert.doesNotMatch(imageOrchestrator, /Wait-ForSsh|\bscp\b|"--extIP", "1"/);
   });
 
-  test("workflow is restricted, secret-scoped, and never publishes the artifact", () => {
+  test("workflow is restricted and stages only a temporary private artifact", () => {
     assert.match(workflow, /\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
     assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
     assert.match(workflow, /default: false/);
@@ -576,8 +565,14 @@ describe("Tianyi Cloud worker image pipeline", () => {
       /WORKER_ARTIFACT_PATH: \$\{\{ steps\.artifact_meta\.outputs\.path \}\}/,
     );
     assert.match(workflow, /-ArtifactPath \$env:WORKER_ARTIFACT_PATH/);
+    assert.match(workflow, /-ArtifactUrl \$env:WORKER_ARTIFACT_URL/);
+    assert.match(workflow, /-PrepareScriptUrl \$env:WORKER_PREPARE_SCRIPT_URL/);
+    assert.match(workflow, /-PrepareScriptSha256 \$env:WORKER_PREPARE_SCRIPT_SHA256/);
     assert.match(workflow, /-BuildNumber \$env:GITHUB_RUN_NUMBER/);
     assert.match(workflow, /-BuildIdentity \$env:GITHUB_RUN_ID/);
+    assert.match(workflow, /WORKER_PROJECT_ID: \$\{\{ vars\.CTYUN_WORKER_PROJECT_ID \}\}/);
+    assert.match(workflow, /-ProjectID \$env:WORKER_PROJECT_ID/);
+    assert.match(workflow, /CTYUN_WORKER_PROJECT_ID is required/);
     assert.match(workflow, /timeout-minutes: 360/);
     assert.match(workflow, /-BakeTimeoutMinutes 150/);
     assert.match(workflow, /-CleanupTimeoutMinutes 40/);
@@ -603,10 +598,12 @@ describe("Tianyi Cloud worker image pipeline", () => {
       workflow,
       /steps\.prior_runs\.outputs\.runs[\s\S]*INTERRUPTED_RUNS_JSON/,
     );
-    assert.doesNotMatch(
-      workflow,
-      /TOS_|aws s3|presign|upload-artifact|public-read/,
-    );
+    assert.match(workflow, /Stage private artifact for the builder/);
+    assert.match(workflow, /aws s3 presign/);
+    assert.match(workflow, /--acl private/);
+    assert.match(workflow, /Remove staged private artifact/);
+    assert.match(workflow, /aws s3 rm/);
+    assert.doesNotMatch(workflow, /public-read|upload-artifact/);
     assert.doesNotMatch(workflow, /^    env:\s*\n\s+CTYUN_AK:/m);
     assert.match(
       workflow,
@@ -704,6 +701,10 @@ if (operation === "ims ListImage") {
 } else if (operation === "ecs CreateEcsInstance") {
   state.instanceExists = true;
   state.instanceName = value("--instanceName");
+  state.instanceStatus = "stopped";
+  state.createExtIP = value("--extIP");
+  state.createUserData = value("--userData");
+  state.createHadBandwidth = args.includes("--bandwidth");
   returnObj = { masterResourceID: "resource-1" };
 } else if (operation === "ecs ListEcsInstances") {
   if (state.listInstancesFailures > 0) {
@@ -747,8 +748,6 @@ if (operation === "ims ListImage") {
         }]
       : [],
   };
-} else if (operation === "ecs StopEcsInstance") {
-  state.instanceStatus = "stopped";
 } else if (operation === "ims CreateImage") {
   state.imageExists = true;
   state.imageName = value("--imageName");
@@ -839,28 +838,6 @@ fs.writeFileSync(output + ".pub", "ssh-rsa AAAA catsco-test");
       );
       writeCommand(
         sandbox,
-        "ssh",
-        `
-import fs from "node:fs";
-const args = process.argv.slice(2);
-const probeFile = process.env.FAKE_SSH_PROBE;
-if (probeFile && args.includes("cloud-init")) {
-  // Simulate Tianyi Ubuntu images where 'cloud-init status --wait' returns
-  // exit 2 (module error) while the system is usable; Wait-ForSsh must probe
-  // via 'cloud-init status | grep done' and succeed on the last read.
-  let n = 0;
-  try { n = Number(fs.readFileSync(probeFile, "utf8") || "0"); } catch {}
-  if (n > 0) {
-    fs.writeFileSync(probeFile, String(n - 1));
-    process.exit(2);
-  }
-}
-process.exit(0);
-`,
-      );
-      writeCommand(sandbox, "scp", "process.exit(0);");
-      writeCommand(
-        sandbox,
         "timeout",
         `
 import { spawnSync } from "node:child_process";
@@ -899,6 +876,12 @@ process.exit(result.status ?? 1);
             artifactPath,
             "-ArtifactSha256",
             artifactSha,
+            "-ArtifactUrl",
+            "https://example.test/private-worker?signature=test",
+            "-PrepareScriptUrl",
+            "https://example.test/prepare-image.sh?signature=test",
+            "-PrepareScriptSha256",
+            crypto.createHash("sha256").update("prepare-image").digest("hex"),
             "-BuildNumber",
             buildNumber,
             "-BuildAttempt",
@@ -934,9 +917,6 @@ process.exit(result.status ?? 1);
               FAKE_CTYUN_STATE: statePath,
               FAKE_CTYUN_LOG: logPath,
               FAKE_CTYUN_SCENARIO: scenario,
-              // Optional SSH cloud-init probe failure counter (absent file =
-              // no failures). Scenarios write an initial count to it.
-              FAKE_SSH_PROBE: path.join(sandbox, "ssh-probe"),
             },
           },
         );
@@ -1021,6 +1001,24 @@ process.exit(result.status ?? 1);
       assert.equal(finalState.imageExists, false);
       assert.equal(finalState.instanceName, "catsco-img-000999-01");
       assert.equal(finalState.instanceStatus, "stopped");
+      assert.equal(finalState.createExtIP, "0");
+      assert.equal(finalState.createHadBandwidth, false);
+      assert.ok(finalState.createUserData.length <= 16384);
+      const bootstrap = Buffer.from(finalState.createUserData, "base64").toString("utf8");
+      assert.match(bootstrap, /#cloud-config/);
+      assert.match(bootstrap, /write_files:/);
+      assert.match(bootstrap, /runcmd:/);
+      assert.match(bootstrap, /catsco-image-bootstrap\.sh/);
+      const contentMatch = bootstrap.match(/    content: ([A-Za-z0-9+/=]+)\n/);
+      assert.ok(contentMatch, "cloud-config must contain base64 bootstrap content");
+      const decodedBootstrap = Buffer.from(contentMatch[1], "base64").toString("utf8");
+      assert.match(decodedBootstrap, /curl --fail --silent --show-error/);
+      assert.match(decodedBootstrap, /shutdown -h now/);
+      assert.match(decodedBootstrap, new RegExp(artifactSha));
+      assert.match(decodedBootstrap, /sha256sum --check --strict/);
+      assert.doesNotMatch(bootstrap, /example\.test\/private-worker/);
+      assert.doesNotMatch(bootstrap, /example\.test\/prepare-image/);
+      assert.doesNotMatch(bootstrap, /\bscp\b|\bssh\b/);
       assert.equal(finalState.imageSourceServerID, "instance-1");
       assert.match(
         finalState.imageName,
@@ -1739,43 +1737,6 @@ process.exit(result.status ?? 1);
       // bake path, just like the instance and key pair.
       assert.equal(notSupportState.imageExists, false);
 
-      // Tianyi Ubuntu images finish cloud-init in a 'done' state but
-      // 'cloud-init status --wait' returns exit code 2 (module error), which
-      // used to fail every Wait-ForSsh probe and time out the bake. Wait-ForSsh
-      // now greps the reported status text instead, so the bake proceeds as
-      // soon as SSH + root key auth work.
-      fs.writeFileSync(path.join(sandbox, "ssh-probe"), "2");
-      fs.writeFileSync(logPath, "");
-      fs.writeFileSync(
-        statePath,
-        JSON.stringify({
-          instanceExists: false,
-          keyExists: false,
-          keyPairName: "",
-          imageExists: false,
-          imageName: "",
-          imageDescription: "",
-          imageSourceServerID: "",
-          imageStatus: "error",
-          instanceName: "",
-          instanceStatus: "running",
-        }),
-      );
-      const sshProbeResult = runBake(
-        "1018",
-        "catsco-worker-sshprobe",
-        "success",
-      );
-      assert.equal(
-        sshProbeResult.status,
-        0,
-        `${sshProbeResult.stdout}\n${sshProbeResult.stderr}`,
-      );
-      assert.match(sshProbeResult.stdout, /"result":\s*"created"/);
-      const sshProbeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-      assert.equal(sshProbeState.imageExists, true);
-      assert.equal(sshProbeState.instanceExists, false);
-      assert.equal(sshProbeState.keyExists, false);
     } finally {
       fs.rmSync(sandbox, { recursive: true, force: true });
     }

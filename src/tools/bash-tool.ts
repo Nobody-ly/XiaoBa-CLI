@@ -68,6 +68,7 @@ export class ShellTool implements Tool {
       'Windows 目标上 command 会作为 PowerShell 脚本执行，可直接写多行 PowerShell，无需再套一层 powershell -Command。',
       '命令从当前目录启动；每次调用都是新的 shell 进程，只有最终当前目录会保留到后续工具调用。',
       '环境变量、alias、函数和已激活虚拟环境不会自动跨调用保留；需要时在同一条 command 中显式设置。',
+      '当前 Bot 已启用且完整性校验通过的 SkillHub Node 脚本会优先以 shell=false 直接执行；其他命令继续走普通 execute_shell 路径，并遵守既有设备授权和危险命令策略。',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -127,12 +128,13 @@ export class ShellTool implements Tool {
       toolName: this.definition.name,
       operation: 'execute_shell',
       target: args.target,
+      command,
+      cwd,
     });
     if (!route.ok) {
       return { ok: false, errorCode: route.errorCode, message: route.message };
     }
-    const remoteResult = await executeRouteIfRemote(context, route, 'execute_shell', 'execute_shell', args);
-    if (remoteResult) return remoteResult;
+    const trustedSkillScript = route.mode === 'local' ? route.trustedSkillScript : undefined;
 
     const toolPermission = isToolAllowed(this.definition.name);
     if (!toolPermission.allowed) {
@@ -140,14 +142,15 @@ export class ShellTool implements Tool {
     }
 
     const commandPermission = isBashCommandAllowed(command, {
-      confirmed: context.deviceRpcReceiver || confirm_dangerous === true,
-      env: context.deviceRpcReceiver
-        ? { ...process.env, GAUZ_BASH_ALLOW_DANGEROUS: 'true' }
-        : process.env,
+      confirmed: confirm_dangerous === true,
+      env: process.env,
     });
     if (!commandPermission.allowed) {
       return { ok: false, errorCode: 'PERMISSION_DENIED', message: `Execution blocked: ${commandPermission.reason}` };
     }
+
+    const remoteResult = await executeRouteIfRemote(context, route, 'execute_shell', 'execute_shell', args);
+    if (remoteResult) return remoteResult;
 
     if (description) {
       Logger.info(`Executing command: ${description}`);
@@ -168,21 +171,37 @@ export class ShellTool implements Tool {
       runtimeEnvironment.env,
       context.artifactContextRef,
     );
-    const wrapped = this.wrapCommandWithDirectoryProbe(command);
+    const scopedRuntimeEnvironment = {
+      ...runtimeEnvironment,
+      env: commandEnvironment,
+    };
+    const wrapped = trustedSkillScript ? undefined : this.wrapCommandWithDirectoryProbe(command);
 
     try {
-      const { stdout, stderr } = await this.executeWrappedCommand(
-        wrapped,
-        executionDirectory.directory,
-        commandEnvironment,
-        timeout,
-        context.abortSignal,
-      );
+      const { stdout, stderr } = trustedSkillScript
+        ? await this.executeTrustedSkillScript(
+          trustedSkillScript.args,
+          executionDirectory.directory,
+          scopedRuntimeEnvironment,
+          timeout,
+          context.abortSignal,
+        )
+        : await this.executeWrappedCommand(
+          wrapped!,
+          executionDirectory.directory,
+          commandEnvironment,
+          timeout,
+          context.abortSignal,
+        );
 
-      const parsedStdout = this.extractDirectoryProbe(stdout || '', wrapped.marker);
-      const parsedStderr = this.extractDirectoryProbe(stderr || '', wrapped.marker);
+      const parsedStdout = wrapped
+        ? this.extractDirectoryProbe(stdout || '', wrapped.marker)
+        : { output: stdout || '' };
+      const parsedStderr = wrapped
+        ? this.extractDirectoryProbe(stderr || '', wrapped.marker)
+        : { output: stderr || '' };
       const cwdAfter = this.updateCurrentDirectory(
-        this.readDirectoryProbe(wrapped) || parsedStdout.directory || parsedStderr.directory,
+        (wrapped ? this.readDirectoryProbe(wrapped) : undefined) || parsedStdout.directory || parsedStderr.directory,
         context,
         cwdBefore,
       ) || cwdBefore;
@@ -228,10 +247,14 @@ export class ShellTool implements Tool {
       };
     } catch (error: any) {
       const executionTime = Date.now() - startTime;
-      const parsedStdout = this.extractDirectoryProbe(error.stdout || '', wrapped.marker);
-      const parsedStderr = this.extractDirectoryProbe(error.stderr || '', wrapped.marker);
+      const parsedStdout = wrapped
+        ? this.extractDirectoryProbe(error.stdout || '', wrapped.marker)
+        : { output: String(error.stdout || '') };
+      const parsedStderr = wrapped
+        ? this.extractDirectoryProbe(error.stderr || '', wrapped.marker)
+        : { output: String(error.stderr || '') };
       const cwdAfter = this.updateCurrentDirectory(
-        this.readDirectoryProbe(wrapped) || parsedStdout.directory || parsedStderr.directory,
+        (wrapped ? this.readDirectoryProbe(wrapped) : undefined) || parsedStdout.directory || parsedStderr.directory,
         context,
         cwdBefore,
       ) || cwdBefore;
@@ -285,8 +308,95 @@ export class ShellTool implements Tool {
         }),
       };
     } finally {
-      this.cleanupWrappedCommand(wrapped);
+      if (wrapped) this.cleanupWrappedCommand(wrapped);
     }
+  }
+
+  private executeTrustedSkillScript(
+    args: string[],
+    cwd: string,
+    runtimeEnvironment: ReturnType<typeof resolveRuntimeEnvironment>,
+    timeout: number,
+    signal?: AbortSignal,
+  ): Promise<ShellOutput> {
+    const executable = runtimeEnvironment.binaries.node.executable;
+    if (!executable) {
+      return Promise.reject(new Error('The verified Skill requires Node.js, but no trusted Node.js runtime is available.'));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(new Error('Command aborted by user'));
+    }
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(executable, args, {
+        cwd,
+        env: runtimeEnvironment.env,
+        windowsHide: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      const maxBuffer = 10 * 1024 * 1024;
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let settled = false;
+
+      const finish = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abortHandler);
+        fn();
+      };
+      const decode = (chunks: Buffer[]) => process.platform === 'win32'
+        ? this.decodeWindowsOutput(Buffer.concat(chunks))
+        : Buffer.concat(chunks).toString('utf8');
+      const fail = (error: any) => {
+        finish(() => {
+          try { child.kill(); } catch {}
+          error.stdout = decode(stdoutChunks);
+          error.stderr = decode(stderrChunks);
+          reject(error);
+        });
+      };
+      const timer = setTimeout(() => {
+        const error: any = new Error(`Command timed out after ${timeout}ms`);
+        error.killed = true;
+        error.signal = 'SIGTERM';
+        fail(error);
+      }, timeout);
+      const abortHandler = () => fail(new Error('Command aborted by user'));
+      signal?.addEventListener('abort', abortHandler, { once: true });
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        const buffer = Buffer.from(chunk);
+        stdoutBytes += buffer.length;
+        if (stdoutBytes > maxBuffer) return fail(new Error(`stdout maxBuffer exceeded (${maxBuffer} bytes)`));
+        stdoutChunks.push(buffer);
+      });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        const buffer = Buffer.from(chunk);
+        stderrBytes += buffer.length;
+        if (stderrBytes > maxBuffer) return fail(new Error(`stderr maxBuffer exceeded (${maxBuffer} bytes)`));
+        stderrChunks.push(buffer);
+      });
+      child.on('error', fail);
+      child.on('close', (code: number | null, closeSignal: NodeJS.Signals | null) => {
+        if (settled) return;
+        const stdout = decode(stdoutChunks);
+        const stderr = decode(stderrChunks);
+        finish(() => {
+          if (code === 0) return resolve({ stdout, stderr });
+          const error: any = new Error(`Command failed with exit code ${code}`);
+          error.code = code ?? undefined;
+          error.signal = closeSignal ?? undefined;
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(error);
+        });
+      });
+    });
   }
 
   private wrapCommandWithDirectoryProbe(command: string): WrappedCommand {

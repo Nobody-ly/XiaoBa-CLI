@@ -21,6 +21,7 @@ if (shouldDisableHardwareAcceleration()) {
 const DASHBOARD_PORT = resolveDashboardPort(process.env.XIAOBA_DASHBOARD_PORT);
 const DEEP_LINK_PROTOCOL = 'catsco';
 const TRUSTED_DEEP_LINK_BASE_ORIGINS = new Set(['https://app.catsco.cc']);
+const CATSCO_WEBAPP_URL = 'https://app.catsco.cc';
 let mainWindow = null;
 let tray = null;
 let autoUpdater = null;
@@ -112,6 +113,37 @@ function showMainWindow() {
     mainWindow.focus();
   } else {
     createWindow();
+  }
+}
+
+function readStoredCatsCoSession() {
+  try {
+    const configPath = path.join(process.cwd(), '.xiaoba', 'catsco.json');
+    if (!fs.existsSync(configPath)) return null;
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const token = String(config?.account?.token || '').trim();
+    const uid = String(config?.account?.uid || '').trim();
+    return token && uid ? { token, uid } : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function shouldShowDashboardAtStartup() {
+  if (process.env.XIAOBA_SHOW_DASHBOARD === '1') return true;
+  if (!readStoredCatsCoSession()) return true;
+
+  try {
+    const dashboardApiKey = String(process.env.DASHBOARD_API_KEY || '').trim();
+    const response = await fetch(`http://127.0.0.1:${DASHBOARD_PORT}/api/cats/status`, {
+      headers: dashboardApiKey ? { 'X-API-Key': dashboardApiKey } : {},
+    });
+    if (!response.ok) return true;
+    const status = await response.json();
+    return status?.authStatus !== 'valid' || status?.connected !== true;
+  } catch (_error) {
+    // Fail open to the Dashboard if the local status check cannot complete.
+    return true;
   }
 }
 
@@ -212,14 +244,18 @@ async function processDeepLink(value) {
   };
   const localApiBase = `http://127.0.0.1:${DASHBOARD_PORT}/api`;
   await postLocalJson(`${localApiBase}/cats/desktop-connect`, desktopConnectBody);
-  await postLocalJson(`${localApiBase}/cats/setup`, {});
+  await postLocalJson(`${localApiBase}/cats/bootstrap`, { trigger: 'desktop-connect' });
   showMainWindow();
 }
 
 async function postLocalJson(url, body) {
+  const dashboardApiKey = String(process.env.DASHBOARD_API_KEY || '').trim();
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(dashboardApiKey ? { 'X-API-Key': dashboardApiKey } : {}),
+    },
     body: JSON.stringify(body || {}),
   });
   if (!response.ok) {
@@ -559,13 +595,13 @@ function stopDashboardServer() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
-    title: 'CatsCo Dashboard',
+    width: 780,
+    height: 560,
+    minWidth: 680,
+    minHeight: 480,
+    title: 'CatsCo Connector',
     titleBarStyle: 'hiddenInset',
-    backgroundColor: '#0f1117',
+    backgroundColor: '#edf3ef',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -575,8 +611,37 @@ function createWindow() {
 
   mainWindow.loadURL(`http://127.0.0.1:${DASHBOARD_PORT}`);
 
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isTrustedDashboardUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 1100,
+          height: 760,
+          minWidth: 820,
+          minHeight: 560,
+          title: 'CatsCo Diagnostics',
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+          },
+        },
+      };
+    }
+    try {
+      const target = new URL(url);
+      if (target.protocol === 'https:' && target.origin === 'https://app.catsco.cc') {
+        void shell.openExternal(target.toString());
+      }
+    } catch (_error) {
+      // Ignore malformed or untrusted external URLs.
+    }
+    return { action: 'deny' };
+  });
+
   mainWindow.on('close', (event) => {
-    if (app.isQuitting || !readCloseToTrayPreference()) return;
+    if (app.isQuitting) return;
     event.preventDefault();
     mainWindow.hide();
     notifyWindowHidden();
@@ -659,6 +724,20 @@ ipcMain.handle('catsco:select-files', async (event) => {
     .filter(Boolean);
 });
 
+ipcMain.handle('catsco:hide-window', async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (owner !== mainWindow) return false;
+  owner.hide();
+  return true;
+});
+
+ipcMain.handle('catsco:open-webapp', async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (owner !== mainWindow) return false;
+  await shell.openExternal(CATSCO_WEBAPP_URL);
+  return true;
+});
+
 function getRuntimeDataRootForMenu() {
   return process.env.XIAOBA_USER_DATA_DIR
     || process.env.CATSCO_USER_DATA_DIR
@@ -681,7 +760,6 @@ function openAttachmentCacheDirectory() {
 }
 
 function createApplicationMenu() {
-  const closeToTray = readCloseToTrayPreference();
   const quit = () => {
     app.isQuitting = true;
     app.quit();
@@ -749,10 +827,8 @@ function createApplicationMenu() {
         {
           label: '点 × 后隐藏到后台',
           type: 'checkbox',
-          checked: closeToTray,
-          click: (menuItem) => {
-            writeCloseToTrayPreference(menuItem.checked);
-          },
+          visible: false,
+          checked: true,
         },
         { type: 'separator' },
         { label: '最小化', role: 'minimize' },
@@ -789,12 +865,13 @@ function createTray() {
   tray = new Tray(createTrayIcon());
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: '打开 CatsCo Dashboard', click: showMainWindow },
+    { label: '打开 CatsCo Connector', click: showMainWindow },
+    { label: '打开 CatsCo WebApp', click: () => shell.openExternal(CATSCO_WEBAPP_URL) },
     { type: 'separator' },
     { label: '退出 CatsCo', click: () => { app.isQuitting = true; app.quit(); }} ,
   ]);
 
-  tray.setToolTip('CatsCo Dashboard');
+  tray.setToolTip('CatsCo Connector');
   tray.setContextMenu(contextMenu);
   tray.on('click', () => {
     showMainWindow();
@@ -875,8 +952,8 @@ app.whenReady().then(async () => {
     await startServer();
     dashboardServerReady = true;
     createApplicationMenu();
-    createWindow();
     createTray();
+    if (await shouldShowDashboardAtStartup()) createWindow();
     enqueueDeepLinkFromArgv(process.argv);
     scheduleDeepLinkDrain();
     
