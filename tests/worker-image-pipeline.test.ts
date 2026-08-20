@@ -571,8 +571,11 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(workflow, /-BuildNumber \$env:GITHUB_RUN_NUMBER/);
     assert.match(workflow, /-BuildIdentity \$env:GITHUB_RUN_ID/);
     assert.match(workflow, /WORKER_PROJECT_ID: \$\{\{ vars\.CTYUN_WORKER_PROJECT_ID \}\}/);
-    assert.match(workflow, /-ProjectID \$env:WORKER_PROJECT_ID/);
+    assert.match(workflow, /WORKER_IMAGE_PROJECT_ID: \$\{\{ vars\.CTYUN_IMAGE_PROJECT_ID \|\| '0' \}\}/);
+    assert.match(workflow, /-BuilderProjectID \$env:WORKER_PROJECT_ID/);
+    assert.match(workflow, /-ImageProjectID \$env:WORKER_IMAGE_PROJECT_ID/);
     assert.match(workflow, /CTYUN_WORKER_PROJECT_ID is required/);
+    assert.match(workflow, /CTYUN_IMAGE_PROJECT_ID is required/);
     assert.match(workflow, /timeout-minutes: 360/);
     assert.match(workflow, /-BakeTimeoutMinutes 150/);
     assert.match(workflow, /-CleanupTimeoutMinutes 40/);
