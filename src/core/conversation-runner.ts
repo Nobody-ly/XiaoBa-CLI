@@ -198,7 +198,7 @@ export interface RunnerOptions {
   runtimeTransientProvider?: RuntimeTransientProvider;
   /** Internal id that ties all messages created by one externally visible user turn together. */
   episodeId?: string;
-  /** Main-Agent-only continuation compaction. Branch and subagent runners omit it. */
+  /** Optional continuation compaction for callers that opt in. */
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   /** Persists a successful continuation checkpoint before execution resumes. */
   onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
