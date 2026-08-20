@@ -1225,7 +1225,7 @@ try {
         [Text.Encoding]::UTF8.GetBytes($PrepareScriptUrl)
     )
     $artifactName = "catsco-worker-$releaseId-linux-x64.tar.gz"
-    $bootstrap = @"
+    $bootstrapScript = @"
 #!/usr/bin/env bash
 set -Eeuo pipefail
 exec > >(tee -a /var/log/catsco-image-build.log) 2>&1
@@ -1247,7 +1247,28 @@ bash /tmp/prepare-image.sh --finalize
 sync
 shutdown -h now
 "@
-    $userData = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
+    # Tianyi's cloud-init images are more reliable when userData is an
+    # explicit cloud-config document. Keep the actual bootstrap as a decoded
+    # file and invoke it through runcmd so a valid shell shebang is not left
+    # to provider-specific userData handling.
+    $bootstrapBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($bootstrapScript)
+    )
+    $cloudConfig = @"
+#cloud-config
+output:
+  all: '| tee -a /var/log/catsco-image-cloud-init-output.log'
+bootcmd:
+  - [ /bin/sh, -c, "date -Is > /run/catsco-image-bootstrap-started" ]
+write_files:
+  - path: /usr/local/sbin/catsco-image-bootstrap.sh
+    encoding: b64
+    permissions: '0700'
+    content: $bootstrapBase64
+runcmd:
+  - [ /bin/bash, /usr/local/sbin/catsco-image-bootstrap.sh ]
+"@
+    $userData = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cloudConfig))
     if ($userData.Length -gt 16384) {
         throw "Generated builder userData exceeds Tianyi Cloud's 16384-character limit"
     }
