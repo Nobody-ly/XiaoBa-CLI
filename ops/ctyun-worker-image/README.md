@@ -125,6 +125,12 @@ Run the same command with `-Mode Create`, `-ArtifactPath`,
 and remain valid until cloud-init downloads the inputs. The
 machine running it needs `ctyun-cli`, Git, `ssh-keygen`, and GNU `timeout`.
 
+The bake must use the same Tianyi enterprise project as the virtual-worker
+network/NAT resources. Set `CTYUN_WORKER_PROJECT_ID` in the protected release
+environment and pass it as `-ProjectID`; do not use a virtual-worker/bot ID as
+the project ID. Builders intentionally use `-extIP 0` and rely on the selected
+private subnet's NAT gateway for HTTPS downloads.
+
 The builder verifies the artifact checksum again before extracting it. Builder
 preparation and every Tianyi Cloud API call have hard timeouts. The
 whole bake also has a deadline separate from its cleanup deadline, while the
