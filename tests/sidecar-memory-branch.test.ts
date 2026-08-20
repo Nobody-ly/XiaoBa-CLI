@@ -211,6 +211,106 @@ describe('memory sidecar branch', () => {
     assert.match(readBranchLogs(testRoot), /suppressed_observation/);
   });
 
+  test('passes repeated activation delta and treats prior refs as advisory context', async () => {
+    const queue = new InMemorySyntheticObservationQueue();
+    const aiService = new NoInjectMemoryBranchAI();
+    const handle = startMemorySidecarBranch({
+      sessionKey: 'test-session',
+      input: 'original task',
+      recentMessages: [],
+      workingDirectory: testRoot,
+      aiService: aiService as any,
+      queue,
+      activationContext: {
+        taskAnchor: 'original task',
+        deltaSinceLastRun: [{ role: 'user', content: 'newer correction wins' }],
+        previousInjections: [{
+          summary: 'The earlier phase used the same evidence for another conclusion.',
+          refs: ['chat/2026-06-09/demo.jsonl#1'],
+        }],
+      },
+    });
+
+    await handle.done;
+
+    const system = String(aiService.calls[0].find(message => message.role === 'system')?.content || '');
+    const payload = JSON.parse(String(aiService.calls[0].find(message => message.role === 'user')?.content));
+    assert.equal(payload.current_user_input, 'original task');
+    assert.deepEqual(payload.delta_since_last_run, [{ role: 'user', content: 'newer correction wins' }]);
+    assert.deepEqual(payload.previous_injections[0].refs, ['chat/2026-06-09/demo.jsonl#1']);
+    assert.match(system, /refs 黑名单/);
+    assert.match(system, /最新用户内容为准/);
+  });
+
+
+  test('returns recoverable feedback for malformed final arguments and exits after correction', async () => {
+    const queue = new InMemorySyntheticObservationQueue();
+    const aiService = new InvalidThenRecoveringMemoryBranchAI();
+    const handle = startMemorySidecarBranch({
+      sessionKey: 'test-session',
+      input: 'recover malformed final tool call',
+      recentMessages: [],
+      workingDirectory: testRoot,
+      aiService: aiService as any,
+      queue,
+    });
+
+    await handle.done;
+
+    assert.equal(aiService.calls.length, 2);
+    assert.equal(queue.drain().length, 0);
+    const secondCall = aiService.calls[1];
+    const failedCall = secondCall.find(message => message.role === 'assistant')?.tool_calls?.[0];
+    const failedResult = secondCall.find(message => message.role === 'tool');
+    assert.equal(failedCall?.id, failedResult?.tool_call_id);
+    assert.match(readBranchLogs(testRoot), /suppressed_observation/);
+  });
+
+  test('bounds repeated invalid finalization and logs an explicit terminal state', async () => {
+    const queue = new InMemorySyntheticObservationQueue();
+    const aiService = new RepeatedInvalidFinishMemoryBranchAI();
+    const handle = startMemorySidecarBranch({
+      sessionKey: 'test-session',
+      input: 'repeat invalid final tool calls',
+      recentMessages: [],
+      workingDirectory: testRoot,
+      aiService: aiService as any,
+      queue,
+    });
+
+    await handle.done;
+
+    assert.equal(aiService.calls.length, 3);
+    assert.deepEqual(aiService.calls.map(messages => messages.length), [2, 4, 6]);
+    assert.equal(queue.drain().length, 0);
+    const logs = readBranchLogs(testRoot);
+    assert.match(logs, /invalid_finalization_exhausted/);
+    assert.ok(Buffer.byteLength(logs, 'utf8') < 100_000);
+  });
+
+  test('keeps invalid finalization budget across stray-output reminder restarts', async () => {
+    const queue = new InMemorySyntheticObservationQueue();
+    const aiService = new InvalidFinishWithStrayTextMemoryBranchAI();
+    const handle = startMemorySidecarBranch({
+      sessionKey: 'test-session',
+      input: 'bound invalid finalization across reminder restarts',
+      recentMessages: [],
+      workingDirectory: testRoot,
+      aiService: aiService as any,
+      queue,
+    });
+
+    await handle.done;
+
+    assert.equal(aiService.calls.length, 4);
+    assert.deepEqual(aiService.calls.map(messages => messages.length), [2, 4, 6, 8]);
+    assert.equal(queue.drain().length, 0);
+    const logs = readBranchLogs(testRoot);
+    assert.equal(countLogEvents(logs, 'invalid_finalization_exhausted'), 1);
+    assert.equal(countLogEvents(logs, 'suppressed_observation'), 1);
+    assert.equal(countLogEvents(logs, 'cancelled_before_finish'), 0);
+  });
+
   test('treats historical log text as untrusted evidence', async () => {
     const sessionDir = path.join(testRoot, 'logs', 'sessions', 'chat', '2026-06-09');
     fs.mkdirSync(sessionDir, { recursive: true });
