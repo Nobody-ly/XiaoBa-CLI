@@ -545,7 +545,12 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(imageOrchestrator, /"--extIP", "0"/);
     assert.match(imageOrchestrator, /"--userData", \$userData/);
     assert.match(imageOrchestrator, /userData exceeds Tianyi Cloud's 16384-character limit/);
-    assert.match(imageOrchestrator, /curl --fail --silent --show-error/);
+    assert.match(imageOrchestrator, /curl_common=[(]--fail --silent --show-error --location --ipv4/);
+    assert.match(imageOrchestrator, /--connect-timeout 20 --max-time 900/);
+    assert.match(imageOrchestrator, /--retry 8 --retry-all-errors/);
+    assert.match(imageOrchestrator, /phase\(\) \{/);
+    assert.match(imageOrchestrator, /phase download-prepare-script/);
+    assert.match(imageOrchestrator, /phase shutdown/);
     assert.match(imageOrchestrator, /shutdown -h now/);
     assert.doesNotMatch(imageOrchestrator, /Wait-ForSsh|\bscp\b|"--extIP", "1"/);
   });
@@ -891,6 +896,8 @@ process.exit(result.status ?? 1);
             "1",
             "-LateResourceWaitSeconds",
             "10",
+            "-PollIntervalSeconds",
+            "1",
             "-ImageName",
             imageName,
             "-RegionID",
@@ -943,6 +950,8 @@ process.exit(result.status ?? 1);
             "-BuildNumber",
             buildNumber,
             "-BuildAttempt",
+            "1",
+            "-PollIntervalSeconds",
             "1",
             "-ImageName",
             imageName,
@@ -1015,7 +1024,12 @@ process.exit(result.status ?? 1);
       const contentMatch = bootstrap.match(/    content: ([A-Za-z0-9+/=]+)\n/);
       assert.ok(contentMatch, "cloud-config must contain base64 bootstrap content");
       const decodedBootstrap = Buffer.from(contentMatch[1], "base64").toString("utf8");
-      assert.match(decodedBootstrap, /curl --fail --silent --show-error/);
+      assert.match(decodedBootstrap, /curl_common=\(--fail --silent --show-error/);
+      assert.match(decodedBootstrap, /--ipv4/);
+      assert.match(decodedBootstrap, /--connect-timeout 20/);
+      assert.match(decodedBootstrap, /--max-time 900/);
+      assert.match(decodedBootstrap, /phase download-prepare-script/);
+      assert.match(decodedBootstrap, /phase shutdown/);
       assert.match(decodedBootstrap, /shutdown -h now/);
       assert.match(decodedBootstrap, new RegExp(artifactSha));
       assert.match(decodedBootstrap, /sha256sum --check --strict/);
@@ -1516,7 +1530,7 @@ process.exit(result.status ?? 1);
       const stickyResult = runCleanup(
         stickyBuildNumber,
         "catsco-worker-cleanup-sticky",
-        ["-ImageDeleteConfirmMinutes", "1"],
+        ["-ImageDeleteConfirmSeconds", "2"],
       );
       assert.notEqual(stickyResult.status, 0);
       assert.match(
