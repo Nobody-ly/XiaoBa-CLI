@@ -27,6 +27,7 @@ import {
   writeBotSkillLocalMarker,
 } from './local-manifest';
 import { BotPrivateSkillClient } from './private-package-client';
+import { renameBotSkillWorkspaceSync } from './workspace-fs';
 import type {
   BotSkillPackage,
   BotSkillPackageFile,
@@ -189,7 +190,7 @@ export class BotSkillSyncService {
       throw new Error('Interrupted Bot Skill restore has ambiguous active and backup workspaces');
     }
     if (!fs.existsSync(journal.skillsRoot) && fs.existsSync(journal.backup)) {
-      fs.renameSync(journal.backup, journal.skillsRoot);
+      renameBotSkillWorkspaceSync(journal.backup, journal.skillsRoot);
     }
     if (fs.existsSync(journal.stage)) fs.rmSync(journal.stage, { recursive: true, force: true });
     fs.rmSync(journalPath, { force: true });
@@ -953,7 +954,7 @@ export class BotSkillSyncService {
       if (fs.existsSync(this.skillsRoot)) {
         await options.validateScope?.();
         this.writeRestoreJournal({ stage, backup, phase: 'backup_pending' });
-        fs.renameSync(this.skillsRoot, backup);
+        renameBotSkillWorkspaceSync(this.skillsRoot, backup);
         backedUp = true;
         if (options.pendingSnapshot && hasWorkspaceEntries(backup)) {
           const snapshot = snapshotPendingBotSkillWorkspace({
@@ -973,7 +974,7 @@ export class BotSkillSyncService {
       }
       this.writeRestoreJournal({ stage, backup, phase: 'backed_up' });
       this.writeRestoreJournal({ stage, backup, phase: 'activation_pending' });
-      fs.renameSync(stage, this.skillsRoot);
+      renameBotSkillWorkspaceSync(stage, this.skillsRoot);
       activatedStage = true;
       this.writeRestoreJournal({ stage, backup, phase: 'activated' });
       this.acceptCloudDefinition(cloud);
@@ -1002,7 +1003,7 @@ export class BotSkillSyncService {
         fs.rmSync(this.skillsRoot, { recursive: true, force: true });
       }
       if (backedUp && fs.existsSync(backup) && !fs.existsSync(this.skillsRoot)) {
-        fs.renameSync(backup, this.skillsRoot);
+        renameBotSkillWorkspaceSync(backup, this.skillsRoot);
       }
       if (activatedStage) {
         try {
