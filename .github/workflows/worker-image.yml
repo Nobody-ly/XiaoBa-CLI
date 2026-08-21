@@ -117,7 +117,8 @@ jobs:
             --output "$tosutil_zip"
           echo "${TOSUTIL_LINUX_AMD64_SHA256}  $tosutil_zip" | sha256sum --check --strict
           unzip -q "$tosutil_zip" -d "$package_dir/tosutil"
-          tosutil_bin="$(find "$package_dir/tosutil" -type f -name tosutil -perm -u+x | head -n 1)"
+          # GitHub's release ZIP does not preserve the executable bit.
+          tosutil_bin="$(find "$package_dir/tosutil" -type f -name tosutil | head -n 1)"
           test -n "$tosutil_bin"
 
           ctyun_package="$package_dir/ctyun-cli.tar.gz"
@@ -673,7 +674,10 @@ jobs:
             -ProtectedImageIDs $env:WORKER_PROTECTED_IMAGE_IDS
 
       - name: Reconcile this attempt after a failed bake
-        if: ${{ always() && steps.bake.outcome != 'success' }}
+        if: >-
+          ${{ always() &&
+              (steps.bake.outcome == 'failure' ||
+               steps.bake.outcome == 'cancelled') }}
         timeout-minutes: 45
         shell: pwsh
         env:

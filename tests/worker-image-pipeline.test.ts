@@ -607,7 +607,9 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(workflow, /-BakeTimeoutMinutes 150/);
     assert.match(workflow, /-CleanupTimeoutMinutes 40/);
     assert.match(workflow, /-Mode Cleanup/);
-    assert.match(workflow, /steps\.bake\.outcome != 'success'/);
+    assert.match(workflow, /steps\.bake\.outcome == 'failure'/);
+    assert.match(workflow, /steps\.bake\.outcome == 'cancelled'/);
+    assert.doesNotMatch(workflow, /steps\.bake\.outcome != 'success'/);
     assert.match(workflow, /actions: read/);
     assert.match(workflow, /Find interrupted image runs/);
     assert.match(workflow, /per_page=100&page=\$page/);
@@ -645,6 +647,11 @@ describe("Tianyi Cloud worker image pipeline", () => {
     );
     assert.match(workflow, /TOS_JS_SDK_VERSION: 2\.9\.1/);
     assert.match(workflow, /Install pinned cloud CLIs/);
+    assert.match(
+      workflow,
+      /find "\$package_dir\/tosutil" -type f -name tosutil \| head -n 1/,
+    );
+    assert.doesNotMatch(workflow, /-name tosutil -perm -u\+x/);
     assert.match(workflow, /tosutil stat "tos:\/\/\$\{upload_bucket\}"/);
     assert.match(workflow, /tosutil cp "\$WORKER_ARTIFACT_PATH"/);
     assert.match(workflow, /artifact upload start: bytes=/);
