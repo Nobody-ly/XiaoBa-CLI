@@ -321,9 +321,41 @@ export class BotSkillSyncService {
           localReadable = false;
         }
       }
+      const workspaceHasEvidence = fs.existsSync(this.skillsRoot)
+        && (!localReadable || local.length > 0 || hasWorkspaceEntries(this.skillsRoot));
       const localChanged = !localReadable || (base
         ? !localMatchesBase(local, base)
-        : this.workspaceExisted && fs.existsSync(this.skillsRoot));
+        : workspaceHasEvidence);
+
+      // An explicit empty Cloud Definition is a valid deletion only when the
+      // active workspace still matches its verified Base. Without a Base, or
+      // after Local changed, replacing a non-empty workspace with an empty
+      // stage would turn a first migration / unresolved edit into silent data
+      // removal. Keep Local active and record recoverable evidence instead.
+      if (
+        cloud.skills.length === 0
+        && workspaceHasEvidence
+        && (!base || localChanged)
+      ) {
+        const snapshot = snapshotPendingBotSkillWorkspace({
+          runtimeRoot: this.runtimeRoot,
+          botId: this.botId,
+          sourcePath: this.skillsRoot,
+          recordedSourcePath: this.skillsRoot,
+          reason: base ? 'activation_local_changed' : 'activation_without_base',
+          ...(base ? { baseRevision: base.definitionRevision } : {}),
+          cloudRevision: cloud.revision,
+        });
+        return {
+          ...this.featureUnavailable(),
+          cloudRevision: cloud.revision,
+          localPendingEvidence: {
+            path: snapshot.path,
+            fingerprint: snapshot.fingerprint,
+            fileCount: snapshot.fileCount,
+          },
+        };
+      }
 
       if (
         verifiedExisting
@@ -923,7 +955,7 @@ export class BotSkillSyncService {
         this.writeRestoreJournal({ stage, backup, phase: 'backup_pending' });
         fs.renameSync(this.skillsRoot, backup);
         backedUp = true;
-        if (options.pendingSnapshot) {
+        if (options.pendingSnapshot && hasWorkspaceEntries(backup)) {
           const snapshot = snapshotPendingBotSkillWorkspace({
             runtimeRoot: this.runtimeRoot,
             botId: this.botId,
@@ -1116,6 +1148,16 @@ function botSkillRefEqual(left: BotSkillRef, right: BotSkillRef): boolean {
 function isPrivateSkillReference(skillId: string): boolean {
   const value = String(skillId || '');
   return value.startsWith('priv_') || value.startsWith('private/');
+}
+
+function hasWorkspaceEntries(workspaceRoot: string): boolean {
+  try {
+    return fs.readdirSync(workspaceRoot).length > 0;
+  } catch {
+    // If the workspace cannot be inspected, keep the conservative
+    // data-preserving behavior and treat it as containing evidence.
+    return true;
+  }
 }
 
 function comparePackageFiles(left: BotSkillPackageFile, right: BotSkillPackageFile): number {
