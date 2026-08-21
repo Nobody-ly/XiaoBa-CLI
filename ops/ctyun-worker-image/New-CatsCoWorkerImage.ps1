@@ -132,6 +132,39 @@ function Wait-PollInterval {
     Start-Sleep -Seconds $seconds
 }
 
+function Convert-BootstrapResponseContent {
+    param([AllowNull()][object]$Content)
+
+    if ($null -eq $Content) {
+        return ""
+    }
+    if ($Content -is [byte[]]) {
+        $payload = [Text.Encoding]::UTF8.GetString([byte[]]$Content)
+    } else {
+        $payload = [string]$Content
+    }
+    # Some object stores return a UTF-8 BOM even when the object was written
+    # without one. ConvertFrom-Json accepts whitespace, but not a BOM prefix.
+    return $payload.TrimStart([char]0xFEFF)
+}
+
+function Write-BootstrapPayloadDiagnostic {
+    param(
+        [AllowNull()][object]$Content,
+        [Parameter(Mandatory = $true)][int]$Attempt
+    )
+
+    $payload = Convert-BootstrapResponseContent -Content $Content
+    $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+    $hash = ([Security.Cryptography.SHA256]::Create()).ComputeHash($bytes)
+    $hex = (-join ($bytes | Select-Object -First 32 | ForEach-Object { $_.ToString("x2") }))
+    $type = if ($null -eq $Content) { "null" } else { $Content.GetType().FullName }
+    Write-BakeProgress -Phase "builder-bootstrap-read" -Detail (
+        "parse_attempt={0} content_type={1} bytes={2} sha256={3} prefix_hex={4}" -f
+        $Attempt, $type, $bytes.Length, (-join ($hash | ForEach-Object { $_.ToString("x2") })), $hex
+    ) -Force
+}
+
 function Test-BootstrapStatus {
     if ([string]::IsNullOrWhiteSpace($BootstrapStatusGetUrl)) {
         return
@@ -143,16 +176,38 @@ function Test-BootstrapStatus {
     }
 
     $payload = ""
-    try {
-        $response = Invoke-WebRequest `
-            -Uri $BootstrapStatusGetUrl `
-            -Method Get `
-            -TimeoutSec 15 `
-            -Headers @{ "Cache-Control" = "no-cache" }
-        $payload = [string]$response.Content
-    } catch {
-        # A status object does not exist until cloud-init starts. Network and
-        # 404 failures are handled by the bounded missing/stale checks below.
+    $status = $null
+    $responseContent = $null
+    $malformed = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $responseContent = $null
+        try {
+            $response = Invoke-WebRequest `
+                -Uri $BootstrapStatusGetUrl `
+                -Method Get `
+                -TimeoutSec 15 `
+                -Headers @{ "Cache-Control" = "no-cache" }
+            $responseContent = $response.Content
+            $payload = Convert-BootstrapResponseContent -Content $responseContent
+        } catch {
+            $payload = ""
+        }
+
+        if ([string]::IsNullOrWhiteSpace($payload)) {
+            $malformed = $false
+            break
+        }
+        try {
+            $status = $payload | ConvertFrom-Json
+            $malformed = $false
+            break
+        } catch {
+            $malformed = $true
+            Write-BootstrapPayloadDiagnostic -Content $responseContent -Attempt $attempt
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds 1
+            }
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($payload)) {
@@ -160,9 +215,7 @@ function Test-BootstrapStatus {
             $script:LastBootstrapPayload = $payload
             $script:LastBootstrapUpdateAt = $now
         }
-        try {
-            $status = $payload | ConvertFrom-Json
-        } catch {
+        if ($malformed -or $null -eq $status) {
             throw "Builder bootstrap returned malformed status telemetry"
         }
         $state = ([string]$status.state).ToLowerInvariant()

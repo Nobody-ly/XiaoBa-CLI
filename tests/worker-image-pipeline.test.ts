@@ -565,6 +565,13 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(imageOrchestrator, /Builder bootstrap failed/);
     assert.match(imageOrchestrator, /Builder bootstrap heartbeat is stale/);
     assert.match(imageOrchestrator, /Builder bootstrap status is unreachable or stale/);
+    assert.match(imageOrchestrator, /Convert-BootstrapResponseContent/);
+    assert.match(imageOrchestrator, /UTF8\.GetString\(\[byte\[\]\]\$Content\)/);
+    assert.match(imageOrchestrator, /TrimStart\(\[char\]0xFEFF\)/);
+    assert.match(imageOrchestrator, /parse_attempt=/);
+    assert.match(imageOrchestrator, /prefix_hex=/);
+    assert.match(imageOrchestrator, /for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\)/);
+    assert.match(imageOrchestrator, /Start-Sleep -Seconds 1/);
     assert.match(imageOrchestrator, /-MonitorBootstrap/);
     assert.match(imageOrchestrator, /shutdown -h now/);
     assert.doesNotMatch(imageOrchestrator, /Wait-ForSsh|\bscp\b|"--extIP", "1"/);
@@ -573,6 +580,95 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(imagePreparer, /image_phase kernel-upgrade/);
     assert.match(imagePreparer, /image_phase worker-validate/);
     assert.match(workflow, /CTYUN_WORKER_BASE_IMAGE_HARDENED/);
+  });
+
+  test("bootstrap telemetry decodes UTF-8 content and retries transient malformed reads", () => {
+    const helperStart = imageOrchestrator.indexOf(
+      "function Convert-BootstrapResponseContent",
+    );
+    const helperEnd = imageOrchestrator.indexOf(
+      "function Invoke-External",
+      helperStart,
+    );
+    assert.ok(helperStart >= 0 && helperEnd > helperStart);
+
+    const sandbox = fs.mkdtempSync(
+      path.join(os.tmpdir(), "catsco-bootstrap-telemetry-"),
+    );
+    try {
+      const harnessPath = path.join(sandbox, "telemetry-test.ps1");
+      fs.writeFileSync(
+        harnessPath,
+        `${imageOrchestrator.slice(helperStart, helperEnd)}
+function Write-BakeProgress {
+    param([string]$Phase, [string]$Detail = "", [switch]$Force)
+    $script:Diagnostics.Add("$Phase $Detail")
+}
+function Start-Sleep { param([int]$Seconds) }
+function Invoke-WebRequest {
+    $index = [Math]::Min($script:RequestCount, $script:Responses.Count - 1)
+    $content = $script:Responses[$index]
+    $script:RequestCount++
+    return [pscustomobject]@{ Content = $content }
+}
+function Reset-Monitor([object[]]$Responses) {
+    $script:Responses = $Responses
+    $script:RequestCount = 0
+    $script:Diagnostics = [Collections.Generic.List[string]]::new()
+    $script:BootstrapMonitorStartedAt = $null
+    $script:LastBootstrapPayload = ""
+    $script:LastBootstrapUpdateAt = $null
+    $script:LastBootstrapPhase = ""
+    $script:StartedAt = Get-Date
+    $script:LastProgressAt = [DateTime]::MinValue
+    $script:OperationDeadline = $null
+    $script:CleanupDeadline = $null
+    $script:InCleanup = $false
+    $global:BootstrapStatusGetUrl = "https://example.test/status"
+    $global:BootstrapStaleSeconds = 60
+    $global:BootstrapStartTimeoutMinutes = 5
+}
+
+$valid = '{"state":"running","phase":"download-worker-artifact","exit_code":0,"line":0}'
+if ((Convert-BootstrapResponseContent -Content $valid) -ne $valid) {
+    throw "string telemetry changed during decoding"
+}
+$withBom = [byte[]]([Text.Encoding]::UTF8.GetPreamble() + [Text.Encoding]::UTF8.GetBytes($valid))
+if ((Convert-BootstrapResponseContent -Content $withBom) -ne $valid) {
+    throw "byte telemetry or BOM was not decoded"
+}
+
+Reset-Monitor -Responses @('{"state":', [Text.Encoding]::UTF8.GetBytes($valid))
+Test-BootstrapStatus
+if ($script:RequestCount -ne 2 -or $script:LastBootstrapPhase -ne 'download-worker-artifact') {
+    throw "transient malformed telemetry did not recover"
+}
+if (-not ($script:Diagnostics -match 'content_type=System.String')) {
+    throw "malformed telemetry diagnostic was not emitted"
+}
+
+Reset-Monitor -Responses @('{"state":')
+$failure = $null
+try { Test-BootstrapStatus } catch { $failure = $_.Exception.Message }
+if ($script:RequestCount -ne 3 -or $failure -ne 'Builder bootstrap returned malformed status telemetry') {
+    throw "persistent malformed telemetry was not bounded to three reads"
+}
+`,
+        "utf8",
+      );
+      const result = spawnSync(
+        "pwsh",
+        ["-NoProfile", "-NonInteractive", "-File", harnessPath],
+        { cwd: root, encoding: "utf8", timeout: 30_000 },
+      );
+      assert.equal(
+        result.status,
+        0,
+        `telemetry harness failed\n${result.stdout}\n${result.stderr}`,
+      );
+    } finally {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    }
   });
 
   test("workflow is restricted and stages only a temporary private artifact", () => {
