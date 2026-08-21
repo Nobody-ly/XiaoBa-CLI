@@ -667,6 +667,10 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(workflow, /tosutil presign/);
     assert.match(workflow, /method: "PUT"/);
     assert.match(workflow, /TOS SDK did not return a valid presigned PUT URL/);
+    assert.match(workflow, /runner-status-preflight/);
+    assert.match(workflow, /heartbeat PUT\/GET preflight/);
+    assert.match(workflow, /probe_readback/);
+    assert.match(workflow, /tosutil rm "tos:\/\/\$\{TOS_WORKER_BUCKET\}\/\$\{status_key\}"/);
     assert.match(workflow, /bootstrap-status\.json/);
     assert.match(workflow, /-acl=private/);
     assert.match(workflow, /Remove staged private artifact/);
