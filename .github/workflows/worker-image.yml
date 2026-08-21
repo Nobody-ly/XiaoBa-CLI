@@ -24,6 +24,9 @@ env:
   NODE_VERSION: "22.23.1"
   CTYUN_CLI_VERSION: v0.1.1
   CTYUN_CLI_PACKAGE_SHA256: 93272c3fd377a6f642a89cb326fa2f4a3d2fab7dfc9587e49906527230b767fa
+  TOSUTIL_VERSION: v4.1.2
+  TOSUTIL_LINUX_AMD64_SHA256: 40bbb4636b0182715b9832310463be7ba58f9b1db26a7aa008cd2e873e5c9310
+  TOS_JS_SDK_VERSION: 2.9.1
   # Image-bake staging is isolated from versioned worker releases. These
   # buckets stay empty between runs; only run-scoped .bake objects are removed.
   TOS_WORKER_BUCKET: catsco-worker-image-bake-gz
@@ -96,6 +99,67 @@ jobs:
         timeout-minutes: 20
         run: npm ci --prefer-offline --no-audit --fund=false
 
+      - name: Install pinned cloud CLIs
+        timeout-minutes: 5
+        shell: bash
+        env:
+          TOS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
+          TOS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          package_dir="$(mktemp -d)"
+          trap 'rm -rf "$package_dir"' EXIT
+
+          tosutil_zip="$package_dir/tosutil-linux-amd64.zip"
+          curl --fail --silent --show-error --location \
+            --retry 4 --retry-all-errors \
+            "https://github.com/volcengine/tosutil/releases/download/${TOSUTIL_VERSION}/tosutil-linux-amd64.zip" \
+            --output "$tosutil_zip"
+          echo "${TOSUTIL_LINUX_AMD64_SHA256}  $tosutil_zip" | sha256sum --check --strict
+          unzip -q "$tosutil_zip" -d "$package_dir/tosutil"
+          tosutil_bin="$(find "$package_dir/tosutil" -type f -name tosutil -perm -u+x | head -n 1)"
+          test -n "$tosutil_bin"
+
+          ctyun_package="$package_dir/ctyun-cli.tar.gz"
+          curl --fail --silent --show-error --location \
+            --retry 4 --retry-all-errors \
+            "https://huabei-2.zos.ctyun.cn/ctyun-cli/${CTYUN_CLI_VERSION}/ctyun-cli-${CTYUN_CLI_VERSION}-linux-amd64-setup.tar.gz" \
+            --output "$ctyun_package"
+          echo "${CTYUN_CLI_PACKAGE_SHA256}  $ctyun_package" | sha256sum --check --strict
+          tar -xzf "$ctyun_package" -C "$package_dir"
+          test -x "$package_dir/ctyun-cli"
+
+          install -d "$HOME/.local/bin"
+          install -m 0755 "$tosutil_bin" "$HOME/.local/bin/tosutil"
+          install -m 0755 "$package_dir/ctyun-cli" "$HOME/.local/bin/ctyun-cli"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          tosutil_hk_config="$RUNNER_TEMP/tosutil-worker-bake-hk.conf"
+          tosutil_gz_config="$RUNNER_TEMP/tosutil-worker-bake-gz.conf"
+          : > "$tosutil_hk_config"
+          : > "$tosutil_gz_config"
+          "$HOME/.local/bin/tosutil" config \
+            -e "tos-${TOS_WORKER_UPLOAD_REGION}.volces.com" \
+            -re "$TOS_WORKER_UPLOAD_REGION" \
+            -i "$TOS_ACCESS_KEY_ID" -k "$TOS_SECRET_ACCESS_KEY" \
+            -conf="$tosutil_hk_config" >/dev/null
+          "$HOME/.local/bin/tosutil" config \
+            -e "tos-${TOS_WORKER_REGION}.volces.com" \
+            -re "$TOS_WORKER_REGION" \
+            -i "$TOS_ACCESS_KEY_ID" -k "$TOS_SECRET_ACCESS_KEY" \
+            -conf="$tosutil_gz_config" >/dev/null
+          echo "TOSUTIL_HK_CONFIG=$tosutil_hk_config" >> "$GITHUB_ENV"
+          echo "TOSUTIL_GZ_CONFIG=$tosutil_gz_config" >> "$GITHUB_ENV"
+
+          tos_sdk_dir="$RUNNER_TEMP/tos-js-sdk"
+          npm install --prefix "$tos_sdk_dir" --no-save --ignore-scripts \
+            "@volcengine/tos-sdk@${TOS_JS_SDK_VERSION}" \
+            --no-audit --fund=false >/dev/null
+          echo "TOS_JS_SDK_DIR=$tos_sdk_dir" >> "$GITHUB_ENV"
+
+          "$HOME/.local/bin/tosutil" version
+          "$HOME/.local/bin/ctyun-cli" version
+
       - name: Build CatsCo
         timeout-minutes: 8
         run: npm run build
@@ -119,51 +183,38 @@ jobs:
       - name: Validate dedicated bake buckets
         timeout-minutes: 5
         shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          endpoint="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
           upload_bucket="$TOS_WORKER_BUCKET"
-          upload_endpoint="$endpoint"
+          upload_config="$TOSUTIL_GZ_CONFIG"
           if [[ -n "${TOS_WORKER_UPLOAD_BUCKET}" && "${TOS_WORKER_UPLOAD_BUCKET}" != "${TOS_WORKER_BUCKET}" ]]; then
             upload_bucket="$TOS_WORKER_UPLOAD_BUCKET"
-            upload_endpoint="https://tos-s3-${TOS_WORKER_UPLOAD_REGION}.volces.com"
+            upload_config="$TOSUTIL_HK_CONFIG"
           fi
 
           # Bucket acceleration, the HK -> GZ replication rule, and the
           # prefix-scoped three-day lifecycle are persistent TOS infrastructure.
           # The bake only validates the buckets here and owns its run objects.
-          for spec in "$upload_bucket $upload_endpoint" "$TOS_WORKER_BUCKET $endpoint"; do
-            read -r bucket bucket_endpoint <<<"$spec"
-            aws s3api head-bucket --bucket "$bucket" \
-              --endpoint-url "$bucket_endpoint" >/dev/null
-            echo "dedicated bake bucket ready: $bucket"
-          done
+          tosutil stat "tos://${upload_bucket}" -conf="$upload_config" >/dev/null
+          tosutil stat "tos://${TOS_WORKER_BUCKET}" -conf="$TOSUTIL_GZ_CONFIG" >/dev/null
+          echo "dedicated bake buckets ready: $upload_bucket -> $TOS_WORKER_BUCKET"
 
       - name: Stage private artifact for the builder
         id: artifact_transport
         timeout-minutes: 30
         shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
+          TOS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
+          TOS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
           WORKER_ARTIFACT_PATH: ${{ steps.artifact_meta.outputs.path }}
           WORKER_ARTIFACT_SHA256: ${{ steps.artifact_meta.outputs.sha256 }}
         run: |
           set -euo pipefail
-          if ! command -v aws >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y awscli
-          fi
-          aws configure set default.s3.addressing_style virtual
-          endpoint="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
-          upload_endpoint="$endpoint"
           upload_bucket="$TOS_WORKER_BUCKET"
+          upload_config="$TOSUTIL_GZ_CONFIG"
           if [[ -n "${TOS_WORKER_UPLOAD_BUCKET}" && "${TOS_WORKER_UPLOAD_BUCKET}" != "${TOS_WORKER_BUCKET}" ]]; then
             upload_bucket="$TOS_WORKER_UPLOAD_BUCKET"
-            upload_endpoint="https://tos-s3-${TOS_WORKER_UPLOAD_REGION}.volces.com"
+            upload_config="$TOSUTIL_HK_CONFIG"
           fi
           key="update/worker/.bake/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/$(basename "$WORKER_ARTIFACT_PATH")"
           script_key="update/worker/.bake/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}/prepare-image.sh"
@@ -173,26 +224,32 @@ jobs:
           echo "status_key=$status_key" >> "$GITHUB_OUTPUT"
 
           # --- 1. Upload to the upload-near bucket (US runner -> Hong Kong) ---
-          aws s3 cp "$WORKER_ARTIFACT_PATH" "s3://${upload_bucket}/${key}" \
-            --endpoint-url "$upload_endpoint" --acl private \
-            --metadata "sha256=${WORKER_ARTIFACT_SHA256}" --only-show-errors
+          artifact_size="$(stat --format='%s' "$WORKER_ARTIFACT_PATH")"
+          echo "artifact upload start: bytes=$artifact_size bucket=$upload_bucket key=$key"
+          upload_started="$(date +%s)"
+          tosutil cp "$WORKER_ARTIFACT_PATH" "tos://${upload_bucket}/${key}" \
+            -acl=private -meta="sha256:${WORKER_ARTIFACT_SHA256}" \
+            -vchecksum -threshold=52428800 -p=8 -ps=16777216 \
+            -conf="$upload_config"
+          echo "artifact upload complete: seconds=$(( $(date +%s) - upload_started ))"
           script_sha="$(sha256sum ops/ctyun-worker-image/prepare-image.sh | awk '{print $1}')"
-          aws s3 cp ops/ctyun-worker-image/prepare-image.sh \
-            "s3://${upload_bucket}/${script_key}" \
-            --endpoint-url "$upload_endpoint" --acl private \
-            --metadata "sha256=${script_sha}" --only-show-errors
+          tosutil cp ops/ctyun-worker-image/prepare-image.sh \
+            "tos://${upload_bucket}/${script_key}" \
+            -acl=private -meta="sha256:${script_sha}" -vchecksum \
+            -conf="$upload_config"
 
           # --- 2. Wait for cross-region replication into the consumption bucket ---
           # TOS replicates upload bucket -> worker bucket server-side; the
           # builder downloads from the worker bucket, so block until visible.
           if [[ "$upload_bucket" != "$TOS_WORKER_BUCKET" ]]; then
             deadline=$(( $(date +%s) + ${TOS_WORKER_REPLICATION_TIMEOUT_SECONDS} ))
+            replication_started="$(date +%s)"
             pending=1
             while (( $(date +%s) < deadline )); do
-              if aws s3api head-object --bucket "$TOS_WORKER_BUCKET" --key "$key" \
-                  --endpoint-url "$endpoint" >/dev/null 2>&1 \
-                && aws s3api head-object --bucket "$TOS_WORKER_BUCKET" --key "$script_key" \
-                  --endpoint-url "$endpoint" >/dev/null 2>&1; then
+              if tosutil stat "tos://${TOS_WORKER_BUCKET}/${key}" \
+                  -conf="$TOSUTIL_GZ_CONFIG" >/dev/null 2>&1 \
+                && tosutil stat "tos://${TOS_WORKER_BUCKET}/${script_key}" \
+                  -conf="$TOSUTIL_GZ_CONFIG" >/dev/null 2>&1; then
                 pending=0; break
               fi
               echo "waiting for cross-region replication: $key"
@@ -202,111 +259,58 @@ jobs:
               echo "error: cross-region replication did not surface staged objects in $TOS_WORKER_BUCKET within ${TOS_WORKER_REPLICATION_TIMEOUT_SECONDS}s; check the TOS replication rule ($upload_bucket -> $TOS_WORKER_BUCKET)" >&2
               exit 1
             fi
+            echo "cross-region replication complete: seconds=$(( $(date +%s) - replication_started ))"
             # Upload-time metadata is replicated along with the object.
             # Staging is single-use: the upload hop object is now redundant,
             # drop it immediately (the final cleanup step still sweeps both
             # buckets, and the 3-day lifecycle rule is the safety net).
-            aws s3 rm "s3://${upload_bucket}/${key}" \
-              --endpoint-url "$upload_endpoint" --only-show-errors || true
-            aws s3 rm "s3://${upload_bucket}/${script_key}" \
-              --endpoint-url "$upload_endpoint" --only-show-errors || true
+            tosutil rm "tos://${upload_bucket}/${key}" -f -conf="$upload_config" || true
+            tosutil rm "tos://${upload_bucket}/${script_key}" -f -conf="$upload_config" || true
           fi
 
           # --- 3. Presigned URLs against the consumption bucket (builder side) ---
-          url="$(aws s3 presign "s3://${TOS_WORKER_BUCKET}/${key}" \
-            --endpoint-url "$endpoint" --expires-in 21600)"
-          script_url="$(aws s3 presign "s3://${TOS_WORKER_BUCKET}/${script_key}" \
-            --endpoint-url "$endpoint" --expires-in 21600)"
-          status_get_url="$(aws s3 presign "s3://${TOS_WORKER_BUCKET}/${status_key}" \
-            --endpoint-url "$endpoint" --expires-in 21600)"
+          presign_get() {
+            tosutil presign "tos://${TOS_WORKER_BUCKET}/$1" \
+              -vp=6h -conf="$TOSUTIL_GZ_CONFIG" | awk '/^https?:/{print; exit}'
+          }
+          url="$(presign_get "$key")"
+          script_url="$(presign_get "$script_key")"
+          status_get_url="$(presign_get "$status_key")"
+          for signed_url in "$url" "$script_url" "$status_get_url"; do
+            if [[ "$signed_url" != https://* ]]; then
+              echo "error: tosutil did not return a valid presigned GET URL" >&2
+              exit 1
+            fi
+          done
 
-          # --- 4. Presigned PUT URL via botocore (RFC3986-correct signing) ---
-          # The previous hand-rolled AWS4 signer left '/' unescaped in
-          # X-Amz-Credential and TOS rejected every bootstrap status PUT,
-          # which surfaced as "did not publish initial status within 5 minutes".
-          status_put_url="$(python3 - "$status_key" <<'PY'
-          import os
-          import sys
-
-          try:
-              import boto3
-          except ImportError:
-              boto3 = None
-          key = sys.argv[1]
-          region = os.environ["TOS_WORKER_REGION"]
-          bucket = os.environ["TOS_WORKER_BUCKET"]
-          access_key = os.environ["AWS_ACCESS_KEY_ID"]
-          secret_key = os.environ["AWS_SECRET_ACCESS_KEY"]
-          endpoint = f"https://tos-s3-{region}.volces.com"
-          if boto3 is None:
-              # Fallback: corrected hand-rolled signer (all query values
-              # percent-encoded per RFC3986, '/' included).
-              import datetime
-              import hashlib
-              import hmac
-              import urllib.parse
-
-              host = f"{bucket}.tos-s3-{region}.volces.com"
-              now = datetime.datetime.now(datetime.timezone.utc)
-              amz_date = now.strftime("%Y%m%dT%H%M%SZ")
-              date_stamp = now.strftime("%Y%m%d")
-              scope = f"{date_stamp}/{region}/s3/aws4_request"
-              credential = f"{access_key}/{scope}"
-              canonical_uri = "/" + "/".join(
-                  urllib.parse.quote(part, safe="-_.~") for part in key.split("/")
-              )
-              params = {
-                  "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-                  "X-Amz-Credential": credential,
-                  "X-Amz-Date": amz_date,
-                  "X-Amz-Expires": "21600",
-                  "X-Amz-SignedHeaders": "host",
-              }
-              canonical_query = "&".join(
-                  f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
-                  for k, v in sorted(params.items())
-              )
-              canonical_request = "\n".join([
-                  "PUT", canonical_uri, canonical_query, f"host:{host}\n", "host", "UNSIGNED-PAYLOAD"
-              ])
-              string_to_sign = "\n".join([
-                  "AWS4-HMAC-SHA256",
-                  amz_date,
-                  scope,
-                  hashlib.sha256(canonical_request.encode()).hexdigest(),
-              ])
-
-              def sign(key_bytes, message):
-                  return hmac.new(key_bytes, message.encode(), hashlib.sha256).digest()
-
-              signing_key = sign(
-                  sign(sign(sign(("AWS4" + secret_key).encode(), date_stamp), region), "s3"),
-                  "aws4_request",
-              )
-              signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
-              print(f"https://{host}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}")
-          else:
-              from botocore.client import Config as BotoConfig
-              client = boto3.client(
-                  "s3",
-                  endpoint_url=endpoint,
-                  aws_access_key_id=access_key,
-                  aws_secret_access_key=secret_key,
-                  region_name=region,
-                  config=BotoConfig(
-                      signature_version="s3v4",
-                      s3={"addressing_style": "virtual"},
-                  ),
-              )
-              print(
-                  client.generate_presigned_url(
-                      "put_object",
-                      Params={"Bucket": bucket, "Key": key},
-                      ExpiresIn=21600,
-                  )
-              )
-          PY
+          # --- 4. Presigned PUT URL via the official TOS JavaScript SDK. ---
+          status_put_url="$(node - "$status_key" <<'NODE'
+          const path = require("node:path");
+          const { TosClient } = require(path.join(
+            process.env.TOS_JS_SDK_DIR,
+            "node_modules",
+            "@volcengine",
+            "tos-sdk",
+          ));
+          const key = process.argv[2];
+          const client = new TosClient({
+            accessKeyId: process.env.TOS_ACCESS_KEY_ID,
+            accessKeySecret: process.env.TOS_SECRET_ACCESS_KEY,
+            region: process.env.TOS_WORKER_REGION,
+            endpoint: `tos-${process.env.TOS_WORKER_REGION}.volces.com`,
+          });
+          process.stdout.write(client.getPreSignedUrl({
+            bucket: process.env.TOS_WORKER_BUCKET,
+            key,
+            method: "PUT",
+            expires: 21600,
+          }));
+          NODE
           )"
+          if [[ "$status_put_url" != https://* ]]; then
+            echo "error: TOS SDK did not return a valid presigned PUT URL" >&2
+            exit 1
+          fi
           echo "::add-mask::$url"
           echo "::add-mask::$script_url"
           echo "::add-mask::$status_get_url"
@@ -316,26 +320,6 @@ jobs:
           echo "script_sha256=$script_sha" >> "$GITHUB_OUTPUT"
           echo "status_get_url=$status_get_url" >> "$GITHUB_OUTPUT"
           echo "status_put_url=$status_put_url" >> "$GITHUB_OUTPUT"
-
-      - name: Install pinned Tianyi Cloud CLI package
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          package_dir="$(mktemp -d)"
-          trap 'rm -rf "$package_dir"' EXIT
-          package="$package_dir/ctyun-cli.tar.gz"
-          curl --fail --silent --show-error --location \
-            --retry 4 --retry-all-errors \
-            "https://huabei-2.zos.ctyun.cn/ctyun-cli/${CTYUN_CLI_VERSION}/ctyun-cli-${CTYUN_CLI_VERSION}-linux-amd64-setup.tar.gz" \
-            --output "$package"
-          echo "${CTYUN_CLI_PACKAGE_SHA256}  $package" | sha256sum --check --strict
-          tar -xzf "$package" -C "$package_dir"
-          test -x "$package_dir/ctyun-cli"
-          install -d "$HOME/.local/bin"
-          install -m 0755 "$package_dir/ctyun-cli" "$HOME/.local/bin/ctyun-cli"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/ctyun-cli" version
 
       - name: Find interrupted image runs
         id: prior_runs
@@ -736,30 +720,26 @@ jobs:
         timeout-minutes: 10
         shell: bash
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID || secrets.VOLC_TOS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY || secrets.VOLC_TOS_SECRET_ACCESS_KEY }}
           STAGED_ARTIFACT_KEY: ${{ steps.artifact_transport.outputs.key }}
           STAGED_SCRIPT_KEY: ${{ steps.artifact_transport.outputs.script_key }}
           STAGED_STATUS_KEY: ${{ steps.artifact_transport.outputs.status_key }}
         run: |
           set -euo pipefail
-          endpoint="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
           upload_bucket="$TOS_WORKER_BUCKET"
-          upload_endpoint="$endpoint"
+          upload_config="$TOSUTIL_GZ_CONFIG"
           if [[ -n "${TOS_WORKER_UPLOAD_BUCKET}" && "${TOS_WORKER_UPLOAD_BUCKET}" != "${TOS_WORKER_BUCKET}" ]]; then
             upload_bucket="$TOS_WORKER_UPLOAD_BUCKET"
-            upload_endpoint="https://tos-s3-${TOS_WORKER_UPLOAD_REGION}.volces.com"
+            upload_config="$TOSUTIL_HK_CONFIG"
           fi
           # Clean both buckets: the upload hop and the replication target.
           # Lifecycle rules expire any leftovers older than 3 days as a
           # second line of defense.
-          for spec in "$upload_bucket $upload_endpoint" "$TOS_WORKER_BUCKET $endpoint"; do
-            read -r bucket bucket_endpoint <<<"$spec"
+          for spec in "$upload_bucket $upload_config" "$TOS_WORKER_BUCKET $TOSUTIL_GZ_CONFIG"; do
+            read -r bucket bucket_config <<<"$spec"
             for key in "$STAGED_ARTIFACT_KEY" "$STAGED_SCRIPT_KEY" "$STAGED_STATUS_KEY"; do
-              aws s3 rm "s3://${bucket}/${key}" \
-                --endpoint-url "$bucket_endpoint" --only-show-errors
-              if aws s3api head-object --bucket "$bucket" \
-                --key "$key" --endpoint-url "$bucket_endpoint" >/dev/null 2>&1; then
+              tosutil rm "tos://${bucket}/${key}" -f -conf="$bucket_config" || true
+              if tosutil stat "tos://${bucket}/${key}" \
+                  -conf="$bucket_config" >/dev/null 2>&1; then
                 echo "staged bake object still exists after cleanup: $bucket/$key" >&2
                 exit 1
               fi

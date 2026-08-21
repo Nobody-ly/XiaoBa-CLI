@@ -638,16 +638,43 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.doesNotMatch(workflow, /TOS_WORKER_BUCKET: catsco-worker-release\s/);
     assert.doesNotMatch(workflow, /create-bucket|delete-bucket/);
     assert.doesNotMatch(workflow, /put-bucket-lifecycle-configuration/);
-    assert.match(workflow, /aws s3 presign/);
+    assert.match(workflow, /TOSUTIL_VERSION: v4\.1\.2/);
+    assert.match(
+      workflow,
+      /TOSUTIL_LINUX_AMD64_SHA256: 40bbb4636b0182715b9832310463be7ba58f9b1db26a7aa008cd2e873e5c9310/,
+    );
+    assert.match(workflow, /TOS_JS_SDK_VERSION: 2\.9\.1/);
+    assert.match(workflow, /Install pinned cloud CLIs/);
+    assert.match(workflow, /tosutil stat "tos:\/\/\$\{upload_bucket\}"/);
+    assert.match(workflow, /tosutil cp "\$WORKER_ARTIFACT_PATH"/);
+    assert.match(workflow, /artifact upload start: bytes=/);
+    assert.match(workflow, /artifact upload complete: seconds=/);
+    assert.match(workflow, /cross-region replication complete: seconds=/);
+    assert.match(workflow, /-threshold=52428800 -p=8 -ps=16777216/);
+    assert.match(workflow, /tosutil presign/);
+    assert.match(workflow, /method: "PUT"/);
+    assert.match(workflow, /TOS SDK did not return a valid presigned PUT URL/);
     assert.match(workflow, /bootstrap-status\.json/);
-    assert.match(workflow, /X-Amz-SignedHeaders/);
-    assert.match(workflow, /--acl private/);
+    assert.match(workflow, /-acl=private/);
     assert.match(workflow, /Remove staged private artifact/);
-    assert.match(workflow, /aws s3 rm/);
+    assert.match(workflow, /tosutil rm/);
+    assert.match(workflow, /tosutil stat/);
     assert.match(workflow, /STAGED_STATUS_KEY/);
     assert.match(
       workflow,
-      /for spec in "\$upload_bucket \$upload_endpoint" "\$TOS_WORKER_BUCKET \$endpoint"/,
+      /for spec in "\$upload_bucket \$upload_config" "\$TOS_WORKER_BUCKET \$TOSUTIL_GZ_CONFIG"/,
+    );
+    assert.doesNotMatch(workflow, /\baws\s/);
+    assert.doesNotMatch(workflow, /boto3|botocore/);
+    assert.ok(
+      workflow.indexOf("Install pinned cloud CLIs") <
+        workflow.indexOf("Stage private artifact for the builder"),
+      "cloud CLIs must be installed before artifact staging",
+    );
+    assert.ok(
+      workflow.indexOf("Install pinned cloud CLIs") <
+        workflow.indexOf("Remove staged private artifact"),
+      "cloud CLIs must be installed before cleanup",
     );
     assert.doesNotMatch(workflow, /public-read|upload-artifact/);
     assert.doesNotMatch(workflow, /^    env:\s*\n\s+CTYUN_AK:/m);
