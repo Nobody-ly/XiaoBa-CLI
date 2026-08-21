@@ -1114,14 +1114,13 @@ process.exit(result.status ?? 1);
       assert.equal(finalState.createExtIP, "0");
       assert.equal(finalState.createHadBandwidth, false);
       assert.ok(finalState.createUserData.length <= 16384);
-      const bootstrap = Buffer.from(finalState.createUserData, "base64").toString("utf8");
-      assert.match(bootstrap, /#cloud-config/);
-      assert.match(bootstrap, /write_files:/);
-      assert.match(bootstrap, /runcmd:/);
-      assert.match(bootstrap, /catsco-image-bootstrap\.sh/);
-      const contentMatch = bootstrap.match(/    content: ([A-Za-z0-9+/=]+)\n/);
-      assert.ok(contentMatch, "cloud-config must contain base64 bootstrap content");
-      const decodedBootstrap = Buffer.from(contentMatch[1], "base64").toString("utf8");
+      const decodedBootstrap = Buffer.from(
+        finalState.createUserData,
+        "base64",
+      ).toString("utf8");
+      assert.match(decodedBootstrap, /^#!\/usr\/bin\/env bash/);
+      assert.doesNotMatch(decodedBootstrap, /#cloud-config/);
+      assert.match(decodedBootstrap, /catsco-image-bootstrap-started/);
       assert.match(decodedBootstrap, /curl_common=\(--fail --silent --show-error/);
       assert.match(decodedBootstrap, /--ipv4/);
       assert.match(decodedBootstrap, /--connect-timeout 20/);
@@ -1133,10 +1132,10 @@ process.exit(result.status ?? 1);
       assert.match(decodedBootstrap, /shutdown -h now/);
       assert.match(decodedBootstrap, new RegExp(artifactSha));
       assert.match(decodedBootstrap, /sha256sum --check --strict/);
-      assert.doesNotMatch(bootstrap, /example\.test\/private-worker/);
-      assert.doesNotMatch(bootstrap, /example\.test\/prepare-image/);
-      assert.doesNotMatch(bootstrap, /example\.test\/bootstrap-status/);
-      assert.doesNotMatch(bootstrap, /\bscp\b|\bssh\b/);
+      assert.doesNotMatch(decodedBootstrap, /example\.test\/private-worker/);
+      assert.doesNotMatch(decodedBootstrap, /example\.test\/prepare-image/);
+      assert.doesNotMatch(decodedBootstrap, /example\.test\/bootstrap-status/);
+      assert.doesNotMatch(decodedBootstrap, /\bscp\b|\bssh\b/);
       assert.equal(finalState.imageSourceServerID, "instance-1");
       assert.match(
         finalState.imageName,
