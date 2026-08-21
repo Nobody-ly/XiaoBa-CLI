@@ -312,6 +312,23 @@ jobs:
             echo "error: TOS SDK did not return a valid presigned PUT URL" >&2
             exit 1
           fi
+          # Exercise the exact heartbeat PUT/GET path before creating a billed
+          # builder. This turns a bad signature, endpoint, or permission into
+          # a fast staging failure instead of a five-minute bootstrap timeout.
+          probe_payload='{"state":"probe","phase":"runner-status-preflight","exit_code":0,"line":0}'
+          curl --fail --silent --show-error --request PUT \
+            --connect-timeout 10 --max-time 20 --retry 2 --retry-all-errors \
+            --data-binary "$probe_payload" "$status_put_url" >/dev/null
+          probe_readback="$(curl --fail --silent --show-error \
+            --connect-timeout 10 --max-time 20 --retry 2 --retry-all-errors \
+            --header 'Cache-Control: no-cache' "$status_get_url")"
+          if ! jq -e '.state == "probe" and .phase == "runner-status-preflight"' \
+              <<<"$probe_readback" >/dev/null; then
+            echo "error: heartbeat PUT/GET preflight returned unexpected payload" >&2
+            exit 1
+          fi
+          tosutil rm "tos://${TOS_WORKER_BUCKET}/${status_key}" -f \
+            -conf="$TOSUTIL_GZ_CONFIG"
           echo "::add-mask::$url"
           echo "::add-mask::$script_url"
           echo "::add-mask::$status_get_url"
