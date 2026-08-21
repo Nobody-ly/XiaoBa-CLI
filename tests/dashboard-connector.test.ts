@@ -54,6 +54,26 @@ test('Connector local management restores channels and gives logs a full workspa
   assert.doesNotMatch(html, /<details class="diagnostics-panel"/);
 });
 
+test('Connector restores visible desktop update progress and explicit install confirmation', () => {
+  assert.match(html, /id="update-dialog"/);
+  assert.match(html, /role="progressbar"/);
+  assert.match(html, /id="update-current-version"/);
+  assert.match(html, /id="update-available-version"/);
+  assert.match(html, /id="update-speed"/);
+  assert.match(html, /id="update-remaining"/);
+  assert.match(script, /安装并重启/);
+  assert.match(styles, /\.update-dialog::backdrop/);
+  assert.match(styles, /\.update-progress-track\.indeterminate/);
+  assert.match(styles, /\.compact-card \.button\.update-active/);
+  assert.match(script, /下载 \$\{Math\.round\(percent\)\}%/);
+  assert.match(script, /settled\('\/update\/status'\)/);
+  assert.match(script, /setInterval\(\(\) => \{ void refreshUpdateStatus\(\); \}, 1000\)/);
+  assert.match(script, /request\('\/update\/download'/);
+  assert.match(script, /request\('\/update\/install'/);
+  assert.match(script, /previousStage === 'downloading'[\s\S]*\['downloaded', 'error'\]/);
+  assert.match(script, /update-primary-action.*handleUpdatePrimaryAction/s);
+});
+
 test('Connector client uses real lifecycle APIs and remains syntax-valid', () => {
   assert.doesNotThrow(() => new vm.Script(script));
   assert.match(script, /\/cats\/bootstrap\/status/);
