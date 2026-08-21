@@ -422,7 +422,7 @@ jobs:
               esac
             done
             if [[ "$(jq 'length' <<<"$bake_attempts")" -gt 0 ]]; then
-              filtered="$(jq --argjson run "$run" --argjson attempts "$bake_attempts" \
+              filtered="$(jq -c --argjson run "$run" --argjson attempts "$bake_attempts" \
                 '. + [$run + {bake_attempts: $attempts}]' <<<"$filtered")"
             fi
           done < <(jq -c '.[]' <<<"$interrupted")

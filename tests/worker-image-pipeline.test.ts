@@ -622,6 +622,7 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(workflow, /success\|skipped/);
     assert.match(workflow, /retaining fail-safe cleanup/);
     assert.match(workflow, /bake_attempts/);
+    assert.match(workflow, /filtered="\$\(jq -c --argjson run/);
     assert.match(workflow, /foreach \(\$attempt in \$bakeAttempts\)/);
     assert.match(workflow, /foreach \(\$previousAttempt in 1\.\./);
     assert.match(workflow, /Historical image cleanup needs manual attention/);
