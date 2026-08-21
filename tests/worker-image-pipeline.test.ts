@@ -629,6 +629,15 @@ describe("Tianyi Cloud worker image pipeline", () => {
       /steps\.prior_runs\.outputs\.runs[\s\S]*INTERRUPTED_RUNS_JSON/,
     );
     assert.match(workflow, /Stage private artifact for the builder/);
+    assert.match(workflow, /TOS_WORKER_BUCKET: catsco-worker-image-bake-gz/);
+    assert.match(
+      workflow,
+      /TOS_WORKER_UPLOAD_BUCKET: catsco-worker-image-bake-hk/,
+    );
+    assert.match(workflow, /Validate dedicated bake buckets/);
+    assert.doesNotMatch(workflow, /TOS_WORKER_BUCKET: catsco-worker-release\s/);
+    assert.doesNotMatch(workflow, /create-bucket|delete-bucket/);
+    assert.doesNotMatch(workflow, /put-bucket-lifecycle-configuration/);
     assert.match(workflow, /aws s3 presign/);
     assert.match(workflow, /bootstrap-status\.json/);
     assert.match(workflow, /X-Amz-SignedHeaders/);
@@ -636,6 +645,10 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(workflow, /Remove staged private artifact/);
     assert.match(workflow, /aws s3 rm/);
     assert.match(workflow, /STAGED_STATUS_KEY/);
+    assert.match(
+      workflow,
+      /for spec in "\$upload_bucket \$upload_endpoint" "\$TOS_WORKER_BUCKET \$endpoint"/,
+    );
     assert.doesNotMatch(workflow, /public-read|upload-artifact/);
     assert.doesNotMatch(workflow, /^    env:\s*\n\s+CTYUN_AK:/m);
     assert.match(
