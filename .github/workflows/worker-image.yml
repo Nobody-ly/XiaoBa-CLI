@@ -24,13 +24,15 @@ env:
   NODE_VERSION: "22.23.1"
   CTYUN_CLI_VERSION: v0.1.1
   CTYUN_CLI_PACKAGE_SHA256: 93272c3fd377a6f642a89cb326fa2f4a3d2fab7dfc9587e49906527230b767fa
-  TOS_WORKER_BUCKET: catsco-worker-release
+  # Image-bake staging is isolated from versioned worker releases. These
+  # buckets stay empty between runs; only run-scoped .bake objects are removed.
+  TOS_WORKER_BUCKET: catsco-worker-image-bake-gz
   TOS_WORKER_REGION: cn-guangzhou
   # Dual-bucket staging: the GitHub runner uploads to an upload-near bucket
   # (Hong Kong) so the cross-Pacific leg is short, and TOS cross-region
   # replication carries it into the builder-consumed Guangzhou bucket.
   # UPLOAD_BUCKET empty or equal to TOS_WORKER_BUCKET disables the hop.
-  TOS_WORKER_UPLOAD_BUCKET: catsco-worker-release-hk
+  TOS_WORKER_UPLOAD_BUCKET: catsco-worker-image-bake-hk
   TOS_WORKER_UPLOAD_REGION: cn-hongkong
   # Seconds to wait for cross-region replication to surface objects in the
   # consumption bucket before failing the bake.
@@ -114,7 +116,7 @@ jobs:
           echo "path=$artifact" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$artifact" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure upload bucket, replication, and lifecycle rules
+      - name: Validate dedicated bake buckets
         timeout-minutes: 5
         shell: bash
         env:
@@ -130,66 +132,14 @@ jobs:
             upload_endpoint="https://tos-s3-${TOS_WORKER_UPLOAD_REGION}.volces.com"
           fi
 
-          # --- 1. Idempotent upload-hop bucket creation (empty bucket costs nothing;
-          #        objects are single-use and deleted after each bake) ---
-          if ! aws s3api head-bucket --bucket "$upload_bucket" \
-              --endpoint-url "$upload_endpoint" >/dev/null 2>&1; then
-            aws s3api create-bucket --bucket "$upload_bucket" \
-              --endpoint-url "$upload_endpoint" \
-              --create-bucket-configuration "LocationConstraint=${TOS_WORKER_UPLOAD_REGION}"
-            echo "created upload bucket: $upload_bucket"
-          fi
-          # Freshly created buckets take a few seconds to propagate; retry
-          # head-bucket so follow-up configuration calls do not race it.
-          for _ in 1 2 3 4 5 6; do
-            if aws s3api head-bucket --bucket "$upload_bucket" \
-                --endpoint-url "$upload_endpoint" >/dev/null 2>&1; then
-              break
-            fi
-            sleep 10
-          done
-
-          # --- 2. Cross-region replication rule (HK -> GZ). The rule is
-          #        configured once through the TOS console for the account
-          #        (same mechanism as the release pipeline's github-hk ->
-          #        github-release). We probe the API for completeness; the
-          #        staging wait fails with a clear timeout when replication
-          #        is not configured. ---
-          if [[ "$upload_bucket" != "$TOS_WORKER_BUCKET" ]]; then
-            cat > /tmp/tos-bake-replication.json <<EOF
-          {"Role":"","Rules":[{"ID":"replicate-bake-staging","Status":"Enabled","Priority":1,"Filter":{"Prefix":"update/worker/.bake/"},"Destination":{"Bucket":"arn:aws:s3:::$TOS_WORKER_BUCKET"}}]}
-          EOF
-            if aws s3api put-bucket-replication \
-                --bucket "$upload_bucket" --endpoint-url "$upload_endpoint" \
-                --replication-configuration file:///tmp/tos-bake-replication.json 2>/tmp/tos-replication.err; then
-              echo "replication rule set: $upload_bucket -> $TOS_WORKER_BUCKET"
-            else
-              echo "warning: replication API rejected ($(tr '\n' ' ' </tmp/tos-replication.err | cut -c1-300)); ensure a cross-region replication rule ($upload_bucket -> $TOS_WORKER_BUCKET, prefix update/worker/.bake/) exists in the TOS console" >&2
-            fi
-          fi
-
-          # --- 3. Idempotent PutBucketLifecycleConfiguration: bake staging objects
-          #        on either bucket self-expire after 3 days, so abandoned runs
-          #        never accumulate billing. Retries cover bucket-propagation
-          #        NoSuchBucket windows right after creation. ---
-          lifecycle='{"Rules":[{"ID":"expire-bake-staging","Filter":{"Prefix":"update/worker/.bake/"},"Status":"Enabled","Expiration":{"Days":3}}]}'
-          printf '%s' "$lifecycle" > /tmp/tos-bake-lifecycle.json
-          put_lifecycle() {
-            local bucket="$1" bucket_endpoint="$2" attempt
-            for attempt in 1 2 3 4 5 6; do
-              if aws s3api put-bucket-lifecycle-configuration \
-                  --bucket "$bucket" --endpoint-url "$bucket_endpoint" \
-                  --lifecycle-configuration file:///tmp/tos-bake-lifecycle.json; then
-                return 0
-              fi
-              sleep 10
-            done
-            echo "error: lifecycle configuration failed for $bucket" >&2
-            return 1
-          }
+          # Bucket acceleration, the HK -> GZ replication rule, and the
+          # prefix-scoped three-day lifecycle are persistent TOS infrastructure.
+          # The bake only validates the buckets here and owns its run objects.
           for spec in "$upload_bucket $upload_endpoint" "$TOS_WORKER_BUCKET $endpoint"; do
             read -r bucket bucket_endpoint <<<"$spec"
-            put_lifecycle "$bucket" "$bucket_endpoint"
+            aws s3api head-bucket --bucket "$bucket" \
+              --endpoint-url "$bucket_endpoint" >/dev/null
+            echo "dedicated bake bucket ready: $bucket"
           done
 
       - name: Stage private artifact for the builder
