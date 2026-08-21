@@ -1396,10 +1396,20 @@ artifact_url="`$(printf '%s' '$artifactUrlBase64' | base64 -d)"
 prepare_script_url="`$(printf '%s' '$prepareScriptUrlBase64' | base64 -d)"
 status_put_url="`$(printf '%s' '$statusPutUrlBase64' | base64 -d)"
 status_file=/run/catsco-image-bootstrap-phase
+status_lock=/run/catsco-image-bootstrap-status.lock
 heartbeat_pid=''
+acquire_status_lock() {
+  while ! mkdir "`$status_lock" 2>/dev/null; do
+    sleep 0.05
+  done
+}
+release_status_lock() {
+  rmdir "`$status_lock" 2>/dev/null || true
+}
 publish_status() {
   local state="`$1" phase_name="`$2" exit_code="`${3:-0}" line="`${4:-0}"
   [[ -n "`$status_put_url" ]] || return 0
+  acquire_status_lock
   printf '{"state":"%s","phase":"%s","exit_code":%s,"line":%s,"epoch":%s}\n' \
     "`$state" "`$phase_name" "`$exit_code" "`$line" "`$(date +%s)" >/run/catsco-image-bootstrap-status.json
   if curl --fail --silent --request PUT --connect-timeout 10 --max-time 20 \
@@ -1411,6 +1421,7 @@ publish_status() {
     # though the runner only observes the TOS object.
     echo "status publish failed (phase=`$phase_name)" >&2
   fi
+  release_status_lock
 }
 phase() {
   printf '%s\n' "`$1" | tee "`$status_file"
