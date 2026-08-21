@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      reconcile_history:
+        description: Also audit failed image runs older than 24 hours before baking
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -345,10 +350,12 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RECONCILE_HISTORICAL_RUNS: ${{ inputs.reconcile_history || false }}
         run: |
           set -euo pipefail
           responses="$(mktemp)"
           trap 'rm -f "$responses"' EXIT
+          historical_cutoff_epoch="$(date -u -d '24 hours ago' +%s)"
           page=1
           while :; do
             response="$(curl --fail --silent --show-error --location \
@@ -387,6 +394,13 @@ jobs:
           while IFS= read -r run; do
             run_id="$(jq -r '.run_id' <<<"$run")"
             run_attempt="$(jq -r '.attempt' <<<"$run")"
+            run_updated_at="$(jq -r '.updated_at' <<<"$run")"
+            run_updated_epoch="$(date -u -d "$run_updated_at" +%s)"
+            if [[ "$RECONCILE_HISTORICAL_RUNS" != "true" ]] &&
+                (( run_updated_epoch < historical_cutoff_epoch )); then
+              echo "skip historical cloud cleanup: run=$run_id updated_at=$run_updated_at (use reconcile_history for an explicit audit)"
+              continue
+            fi
             bake_attempts='[]'
             for attempt in $(seq 1 "$run_attempt"); do
               jobs_url="https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"
@@ -408,8 +422,21 @@ jobs:
                 ]
                 | first // "unknown"
               ' <<<"$jobs")"
+              cleanup_conclusion="$(jq -r '
+                [
+                  .jobs[]?.steps[]?
+                  | select(.name == "Reconcile this attempt after a failed bake")
+                  | .conclusion
+                ]
+                | first // "unknown"
+              ' <<<"$jobs")"
               case "$bake_conclusion" in
                 failure|cancelled|timed_out|unknown)
+                  if [[ "$cleanup_conclusion" == "success" ]]; then
+                    echo "skip cloud cleanup: run=$run_id attempt=$attempt bake_step=$bake_conclusion reconciliation_step=success"
+                    continue
+                  fi
+                  echo "retain cloud cleanup: run=$run_id attempt=$attempt bake_step=$bake_conclusion reconciliation_step=$cleanup_conclusion"
                   bake_attempts="$(jq --argjson attempt "$attempt" '. + [$attempt]' <<<"$bake_attempts")"
                   ;;
                 success|skipped)
