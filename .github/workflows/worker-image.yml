@@ -366,6 +366,50 @@ jobs:
                 }
             ]
           ' "$responses")"
+          filtered='[]'
+          while IFS= read -r run; do
+            run_id="$(jq -r '.run_id' <<<"$run")"
+            run_attempt="$(jq -r '.attempt' <<<"$run")"
+            bake_attempts='[]'
+            for attempt in $(seq 1 "$run_attempt"); do
+              jobs_url="https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$run_id/attempts/$attempt/jobs?per_page=100"
+              if ! jobs="$(curl --fail --silent --show-error --location \
+                  --retry 4 --retry-all-errors \
+                  --header 'Accept: application/vnd.github+json' \
+                  --header "Authorization: Bearer $GITHUB_TOKEN" \
+                  --header 'X-GitHub-Api-Version: 2022-11-28' \
+                  "$jobs_url")"; then
+                echo "warning: could not inspect bake step for run=$run_id attempt=$attempt; retaining fail-safe cleanup" >&2
+                bake_attempts="$(jq --argjson attempt "$attempt" '. + [$attempt]' <<<"$bake_attempts")"
+                continue
+              fi
+              bake_conclusion="$(jq -r '
+                [
+                  .jobs[]?.steps[]?
+                  | select(.name == "Bake private ECS image")
+                  | .conclusion
+                ]
+                | first // "unknown"
+              ' <<<"$jobs")"
+              case "$bake_conclusion" in
+                failure|cancelled|timed_out|unknown)
+                  bake_attempts="$(jq --argjson attempt "$attempt" '. + [$attempt]' <<<"$bake_attempts")"
+                  ;;
+                success|skipped)
+                  echo "skip cloud cleanup: run=$run_id attempt=$attempt bake_step=$bake_conclusion"
+                  ;;
+                *)
+                  echo "warning: unexpected bake step conclusion '$bake_conclusion' for run=$run_id attempt=$attempt; retaining fail-safe cleanup" >&2
+                  bake_attempts="$(jq --argjson attempt "$attempt" '. + [$attempt]' <<<"$bake_attempts")"
+                  ;;
+              esac
+            done
+            if [[ "$(jq 'length' <<<"$bake_attempts")" -gt 0 ]]; then
+              filtered="$(jq --argjson run "$run" --argjson attempts "$bake_attempts" \
+                '. + [$run + {bake_attempts: $attempts}]' <<<"$filtered")"
+            fi
+          done < <(jq -c '.[]' <<<"$interrupted")
+          interrupted="$filtered"
           if [[ "$(jq 'length' <<<"$interrupted")" -eq 0 ]]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -456,23 +500,24 @@ jobs:
 
           $recentDeadline = [DateTimeOffset]::UtcNow.AddMinutes(45)
           :recentRunLoop foreach ($run in $recentRuns) {
-            $runAttempt = [Math]::Max(1, [int]$run.attempt)
-            foreach ($attempt in 1..$runAttempt) {
+            $bakeAttempts = @($run.bake_attempts | ForEach-Object { [int]$_ })
+            $lastBakeAttempt = ($bakeAttempts | Measure-Object -Maximum).Maximum
+            foreach ($attempt in $bakeAttempts) {
               if ([DateTimeOffset]::UtcNow -ge $recentDeadline) {
                 $blockingFailures.Add(
-                  "Recent cleanup budget exhausted before run=$($run.run_id) attempt=$attempt/$runAttempt"
+                  "Recent cleanup budget exhausted before run=$($run.run_id) attempt=$attempt"
                 )
                 break recentRunLoop
               }
-              Write-Host "Reconciling run $($run.run_id) attempt $attempt/$runAttempt ($($run.conclusion))"
+              Write-Host "Reconciling run $($run.run_id) bake attempt $attempt ($($run.conclusion))"
               $exitCode = Invoke-InterruptedRunCleanup `
                 -Run $run `
                 -Attempt $attempt `
-                -WaitForLate:($attempt -eq $runAttempt) `
+                -WaitForLate:($attempt -eq $lastBakeAttempt) `
                 -Historical:$false
               if ($exitCode -ne 0) {
                 $blockingFailures.Add(
-                  "run=$($run.run_id) attempt=$attempt/$runAttempt conclusion=$($run.conclusion) exit=$exitCode"
+                  "run=$($run.run_id) attempt=$attempt conclusion=$($run.conclusion) exit=$exitCode"
                 )
               }
             }
@@ -480,15 +525,15 @@ jobs:
 
           $historicalDeadline = [DateTimeOffset]::UtcNow.AddMinutes(10)
           :historicalRunLoop foreach ($run in $historicalRuns) {
-            $runAttempt = [Math]::Max(1, [int]$run.attempt)
-            foreach ($attempt in 1..$runAttempt) {
+            $bakeAttempts = @($run.bake_attempts | ForEach-Object { [int]$_ })
+            foreach ($attempt in $bakeAttempts) {
               if ([DateTimeOffset]::UtcNow -ge $historicalDeadline) {
                 $historicalWarnings.Add(
                   "Historical cleanup budget exhausted; remaining attempts require a later run or manual reconciliation"
                 )
                 break historicalRunLoop
               }
-              Write-Host "Reconciling historical run $($run.run_id) attempt $attempt/$runAttempt ($($run.conclusion))"
+              Write-Host "Reconciling historical run $($run.run_id) bake attempt $attempt ($($run.conclusion))"
               $exitCode = Invoke-InterruptedRunCleanup `
                 -Run $run `
                 -Attempt $attempt `
@@ -496,7 +541,7 @@ jobs:
                 -Historical:$true
               if ($exitCode -ne 0) {
                 $message = (
-                  "run=$($run.run_id) attempt=$attempt/$runAttempt " +
+                  "run=$($run.run_id) attempt=$attempt " +
                   "conclusion=$($run.conclusion) exit=$exitCode"
                 )
                 $historicalWarnings.Add($message)

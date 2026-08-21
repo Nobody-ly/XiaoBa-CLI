@@ -616,7 +616,13 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(workflow, /page=\$\(\(page \+ 1\)\)/);
     assert.match(workflow, /jq -cs --arg current/);
     assert.match(workflow, /foreach \(\$run in \$runs\)/);
-    assert.match(workflow, /foreach \(\$attempt in 1\.\.\$runAttempt\)/);
+    assert.match(workflow, /actions\/runs\/\$run_id\/attempts\/\$attempt\/jobs/);
+    assert.match(workflow, /select\(\.name == "Bake private ECS image"\)/);
+    assert.match(workflow, /failure\|cancelled\|timed_out\|unknown/);
+    assert.match(workflow, /success\|skipped/);
+    assert.match(workflow, /retaining fail-safe cleanup/);
+    assert.match(workflow, /bake_attempts/);
+    assert.match(workflow, /foreach \(\$attempt in \$bakeAttempts\)/);
     assert.match(workflow, /foreach \(\$previousAttempt in 1\.\./);
     assert.match(workflow, /Historical image cleanup needs manual attention/);
     assert.match(workflow, /GITHUB_STEP_SUMMARY/);
