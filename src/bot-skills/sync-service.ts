@@ -321,8 +321,7 @@ export class BotSkillSyncService {
           localReadable = false;
         }
       }
-      const workspaceHasEvidence = this.workspaceExisted
-        && fs.existsSync(this.skillsRoot)
+      const workspaceHasEvidence = fs.existsSync(this.skillsRoot)
         && (!localReadable || local.length > 0 || hasWorkspaceEntries(this.skillsRoot));
       const localChanged = !localReadable || (base
         ? !localMatchesBase(local, base)

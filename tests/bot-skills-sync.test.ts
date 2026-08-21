@@ -1865,6 +1865,31 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     assert.equal(readPendingSnapshotIfPresent(fixture.runtimeRoot, fixture.botId), undefined);
   });
 
+  test('activation keeps a local Skill that appears after an initially absent workspace', async () => {
+    const fixture = createFixture(roots);
+    fs.rmSync(fixture.skillsRoot, { recursive: true, force: true });
+    fixture.cloud = { revision: 1, skills: [] };
+    fixture.onCloudRead = () => {
+      writeSkill(fixture.skillsRoot, 'late-local', 'late-local', 'created during activation');
+    };
+
+    const result = await fixture.activate(false);
+
+    assert.equal(result.direction, 'feature_unavailable');
+    assert.equal(result.cloudRevision, 1);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'late-local', 'SKILL.md'), 'utf8'),
+      /created during activation/,
+    );
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.equal(result.localPendingEvidence?.path, snapshot.path);
+    assert.equal(snapshot.manifest.reason, 'activation_without_base');
+    assert.match(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'late-local', 'SKILL.md'), 'utf8'),
+      /created during activation/,
+    );
+  });
+
   test('activation keeps dirty Local when Cloud explicitly becomes empty', async () => {
     const fixture = createFixture(roots);
     writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
@@ -2176,6 +2201,7 @@ function createFixture(
     patchStatus: 200,
     publicDownloadMisses: 0,
     packageDownloads: 0,
+    onCloudRead: undefined as undefined | (() => Promise<void> | void),
     onPackageDownload: undefined as undefined | (() => Promise<void> | void),
     omitSkillsField: false,
     cloudModel: { kind: 'catalog', modelId: 'minimax-m3' } as BotDefinition['model'],
@@ -2236,6 +2262,7 @@ function createFixture(
     const url = new URL(String(input));
     const method = init?.method || 'GET';
     if (url.hostname === 'cats.test' && url.pathname === '/api/bot/definition' && method === 'GET') {
+      await fixture.onCloudRead?.();
       if (fixture.cloudReadStatus !== 200) {
         return Response.json({ error: 'cloud unavailable' }, { status: fixture.cloudReadStatus });
       }
