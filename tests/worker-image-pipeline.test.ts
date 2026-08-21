@@ -1129,6 +1129,8 @@ process.exit(result.status ?? 1);
       assert.match(decodedBootstrap, /phase shutdown/);
       assert.match(decodedBootstrap, /publish_status failed/);
       assert.match(decodedBootstrap, /heartbeat &/);
+      assert.match(decodedBootstrap, /status_lock=\/run\/catsco-image-bootstrap-status\.lock/);
+      assert.match(decodedBootstrap, /acquire_status_lock\(\)/);
       assert.match(decodedBootstrap, /shutdown -h now/);
       assert.match(decodedBootstrap, new RegExp(artifactSha));
       assert.match(decodedBootstrap, /sha256sum --check --strict/);
