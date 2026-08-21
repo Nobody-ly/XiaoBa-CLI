@@ -612,12 +612,23 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.doesNotMatch(workflow, /steps\.bake\.outcome != 'success'/);
     assert.match(workflow, /actions: read/);
     assert.match(workflow, /Find interrupted image runs/);
+    assert.match(workflow, /reconcile_history:/);
+    assert.match(workflow, /RECONCILE_HISTORICAL_RUNS/);
+    assert.match(workflow, /date -u -d '24 hours ago'/);
+    assert.match(workflow, /skip historical cloud cleanup:/);
     assert.match(workflow, /per_page=100&page=\$page/);
     assert.match(workflow, /page=\$\(\(page \+ 1\)\)/);
     assert.match(workflow, /jq -cs --arg current/);
     assert.match(workflow, /foreach \(\$run in \$runs\)/);
     assert.match(workflow, /actions\/runs\/\$run_id\/attempts\/\$attempt\/jobs/);
     assert.match(workflow, /select\(\.name == "Bake private ECS image"\)/);
+    assert.match(
+      workflow,
+      /select\(\.name == "Reconcile this attempt after a failed bake"\)/,
+    );
+    assert.match(workflow, /cleanup_conclusion/);
+    assert.match(workflow, /reconciliation_step=success/);
+    assert.match(workflow, /retain cloud cleanup:/);
     assert.match(workflow, /failure\|cancelled\|timed_out\|unknown/);
     assert.match(workflow, /success\|skipped/);
     assert.match(workflow, /retaining fail-safe cleanup/);

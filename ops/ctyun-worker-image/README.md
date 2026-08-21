@@ -176,10 +176,15 @@ before PowerShell can enter `finally`, including failures that would otherwise
 be hidden behind a later unsuccessful reconciliation run. Cleanup failures
 from runs updated in the last 30 minutes block a new bake, with a bounded
 45-minute strict-recovery budget. A rerun applies the same bounded strict policy
-to all of its previous attempts. Older conflicts are attempted independently
-with a 120-second per-attempt cap and a 10-minute total budget, surfaced as
-workflow warnings and in the job summary, and left for manual reconciliation
-instead of permanently blocking all future image releases.
+to all of its previous attempts. Failed runs from the preceding 24 hours are
+attempted independently with a 120-second per-attempt cap and a 10-minute total
+budget, surfaced as workflow warnings and in the job summary, and left for
+manual reconciliation instead of permanently blocking all future image
+releases. Older runs are not rescanned on every release; use the manual
+`reconcile_history` workflow input for an explicit full-history audit. Attempts
+whose failed bake was already followed by a successful compensating cleanup are
+also skipped, so a known-clean run cannot add the same discovery wait to every
+later bake.
 
 The workflow also pins both GitHub Actions by commit and verifies the exact
 Tianyi CLI package SHA-256 before installing it; it does not execute a remote
