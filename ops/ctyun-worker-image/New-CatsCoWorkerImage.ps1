@@ -1391,6 +1391,7 @@ try {
 set -Eeuo pipefail
 export CATSCO_BASE_IMAGE_HARDENED='$baseImageHardenedValue'
 exec > >(tee -a /var/log/catsco-image-build.log) 2>&1
+date -Is > /run/catsco-image-bootstrap-started
 artifact_url="`$(printf '%s' '$artifactUrlBase64' | base64 -d)"
 prepare_script_url="`$(printf '%s' '$prepareScriptUrlBase64' | base64 -d)"
 status_put_url="`$(printf '%s' '$statusPutUrlBase64' | base64 -d)"
@@ -1465,28 +1466,11 @@ phase shutdown
 publish_status succeeded shutdown
 shutdown -h now
 "@
-    # Tianyi's cloud-init images are more reliable when userData is an
-    # explicit cloud-config document. Keep the actual bootstrap as a decoded
-    # file and invoke it through runcmd so a valid shell shebang is not left
-    # to provider-specific userData handling.
-    $bootstrapBase64 = [Convert]::ToBase64String(
-        [Text.Encoding]::UTF8.GetBytes($bootstrapScript)
-    )
-    $cloudConfig = @"
-#cloud-config
-output:
-  all: '| tee -a /var/log/catsco-image-cloud-init-output.log'
-bootcmd:
-  - [ /bin/sh, -c, "date -Is > /run/catsco-image-bootstrap-started" ]
-write_files:
-  - path: /usr/local/sbin/catsco-image-bootstrap.sh
-    encoding: b64
-    permissions: '0700'
-    content: $bootstrapBase64
-runcmd:
-  - [ /bin/bash, /usr/local/sbin/catsco-image-bootstrap.sh ]
-"@
-    $userData = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cloudConfig))
+    # Tianyi's Ubuntu 24.04 public image executes raw shebang userData but did
+    # not execute an equivalent #cloud-config document in a live no-public-IP
+    # probe. Pass the bootstrap script directly so cloud-init's shell handler
+    # owns the execution path that the platform actually supports.
+    $userData = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrapScript))
     if ($userData.Length -gt 16384) {
         throw "Generated builder userData exceeds Tianyi Cloud's 16384-character limit"
     }

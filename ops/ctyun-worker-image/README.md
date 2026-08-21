@@ -16,8 +16,12 @@ session, skill installation, or runtime `.env`.
   builder downloads them through cloud-init, and the workflow deletes all three
   objects after the bake. They are never public or retained as GitHub Actions
   artifacts.
-- The builder receives only short-lived signed URLs. It writes its current
-  bootstrap phase every 30 seconds to the per-run status object; the runner
+- The builder receives only short-lived signed URLs. Tianyi's Ubuntu 24.04
+  image is given a Base64-encoded raw `#!/usr/bin/env bash` userData script; a
+  live no-public-IP probe confirmed this path executes and powers off, while
+  the same bootstrap wrapped as `#cloud-config` was stored by the API but never
+  executed. The script writes its current bootstrap phase every 30 seconds to
+  the per-run status object; the runner
   prints phase changes live and fails early when bootstrap reports an error,
   does not start, or stops heartbeating. No long-lived TOS credential is placed
   on the builder.
