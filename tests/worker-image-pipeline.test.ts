@@ -59,6 +59,12 @@ describe("Tianyi Cloud worker image pipeline", () => {
       /runtime\/node\/bin\/node .*dist\/index\.js catsco/,
     );
     assert.match(imagePreparer, /catsco-image-packages\.txt/);
+    assert.match(
+      imagePreparer,
+      /catsco-agent ALL=\(ALL:ALL\) NOPASSWD: ALL/,
+    );
+    assert.match(imagePreparer, /chmod 0440 \/etc\/sudoers\.d\/catsco-agent/);
+    assert.match(imagePreparer, /visudo -cf \/etc\/sudoers\.d\/catsco-agent/);
   });
 
   test("finalization removes worker identity and machine identity before imaging", () => {
@@ -538,6 +544,9 @@ describe("Tianyi Cloud worker image pipeline", () => {
 
   test("private builder bootstrap is bounded and does not require inbound SSH", () => {
     assert.match(imageOrchestrator, /ApiTimeoutSeconds/);
+    assert.match(imageOrchestrator, /ProgressIntervalSeconds/);
+    assert.match(imageOrchestrator, /bake-progress/);
+    assert.match(imageOrchestrator, /CATSCO_BASE_IMAGE_HARDENED/);
     assert.match(
       imageOrchestrator,
       /"timeout"[\s\S]*?"ctyun-cli"/,
@@ -553,6 +562,8 @@ describe("Tianyi Cloud worker image pipeline", () => {
     assert.match(imageOrchestrator, /phase shutdown/);
     assert.match(imageOrchestrator, /shutdown -h now/);
     assert.doesNotMatch(imageOrchestrator, /Wait-ForSsh|\bscp\b|"--extIP", "1"/);
+    assert.match(imagePreparer, /platform_hardening=already-satisfied/);
+    assert.match(workflow, /CTYUN_WORKER_BASE_IMAGE_HARDENED/);
   });
 
   test("workflow is restricted and stages only a temporary private artifact", () => {
