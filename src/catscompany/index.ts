@@ -181,14 +181,14 @@ export const CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperatio
   'edit_file',
   'send_file',
   'execute_shell',
-];
-
-export const CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[] = [
-  ...CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES,
   SKILLHUB_THIN_RPC_TOOLS.workspace,
   SKILLHUB_THIN_RPC_TOOLS.share,
   SKILLHUB_THIN_RPC_TOOLS.finalize,
   SKILLHUB_THIN_RPC_TOOLS.delete,
+];
+
+export const CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperation[] = [
+  ...CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES,
   SKILLHUB_THIN_RPC_TOOLS.switchBot,
 ];
 
@@ -510,7 +510,7 @@ export class CatsCompanyBot {
     this.deviceRegistration = deviceRegistration;
     this.skillHubThinRpc = new SkillHubThinRpcHandler({
       isShuttingDown: () => this.shuttingDown,
-      enabled: runtimeRole === 'desktop',
+      allowBotSwitch: runtimeRole === 'desktop',
     });
 
     const runtime = createCatsCompanyRuntime(config.sessionTTL);
