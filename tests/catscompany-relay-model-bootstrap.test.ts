@@ -162,7 +162,7 @@ describe('CatsCo default relay model bootstrap', () => {
     assert.equal(runtime.openaiApiMode, 'chat_completions');
     assert.deepStrictEqual(runtime.capabilities, {
       toolCalling: true,
-      vision: false,
+      vision: true,
       streaming: true,
     });
     assert.equal(runtime.capabilitiesSource, 'static');
