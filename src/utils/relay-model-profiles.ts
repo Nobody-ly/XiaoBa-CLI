@@ -83,7 +83,10 @@ export const RELAY_MODEL_PROFILES: RelayModelProfile[] = [
     modelsDevModel: 'deepseek-v4-flash',
     capabilities: {
       toolCalling: true,
-      vision: false,
+      // Relay rewrites image requests to DeepSeek's
+      // deepseek-v4-flash-vision-exp sibling while keeping this public model
+      // id stable for quotas and runtime configuration.
+      vision: true,
       streaming: true,
     },
   },
