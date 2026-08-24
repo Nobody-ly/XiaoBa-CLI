@@ -33,6 +33,8 @@ export interface TrashBotSkillOptions {
   installName: string;
   deletedByOwnerUid: string;
   now?: () => Date;
+  /** Test-only concurrency hook; production callers must leave this unset. */
+  beforeMove?: () => void;
 }
 
 export interface TrashBotSkillResult {
@@ -42,7 +44,7 @@ export interface TrashBotSkillResult {
 }
 
 /**
- * Creates and verifies a recoverable copy before deleting one active Skill.
+ * Atomically moves one active Skill into a verified recoverable trash entry.
  * Trash is evidence only: Runtime discovery never reads this directory.
  */
 export function trashBotSkill(options: TrashBotSkillOptions): TrashBotSkillResult {
@@ -67,31 +69,31 @@ export function trashBotSkill(options: TrashBotSkillOptions): TrashBotSkillResul
     `.tmp-${backupId}-${process.pid}-${crypto.randomBytes(8).toString('hex')}`,
   );
   const packageRoot = path.join(temporary, 'package');
-  const manifest: TrashedSkillManifest = {
-    schema: TRASH_SCHEMA,
-    backupId,
-    botId,
-    localSkillId,
-    name: String(options.name || '').trim(),
-    installName: normalizeInstallName(options.installName),
-    deletedByOwnerUid,
-    deletedAt,
-    expiresAt,
-    files,
-  };
-
-  fs.mkdirSync(packageRoot, { recursive: true });
+  let sourceMoved = false;
+  fs.mkdirSync(temporary, { recursive: false });
   try {
-    for (const file of files) {
-      const source = path.join(sourcePath, ...file.path.split('/'));
-      const target = path.join(packageRoot, ...file.path.split('/'));
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-      const copied = fileRecord(packageRoot, file.path);
-      if (copied.size !== file.size || copied.sha256 !== file.sha256) {
-        throw new Error(`Deleted Skill backup verification failed: ${file.path}`);
-      }
+    options.beforeMove?.();
+    // sourcePath and trashRoot both live below the same Runtime root. Moving
+    // the directory removes it from discovery atomically without recursively
+    // deleting any file that was not captured by the verified manifest.
+    fs.renameSync(sourcePath, packageRoot);
+    sourceMoved = true;
+    const movedFiles = listFiles(packageRoot);
+    if (!filesEqual(files, movedFiles) || fs.existsSync(sourcePath)) {
+      throw new Error('Skill changed while deletion was being prepared; no files were deleted.');
     }
+    const manifest: TrashedSkillManifest = {
+      schema: TRASH_SCHEMA,
+      backupId,
+      botId,
+      localSkillId,
+      name: String(options.name || '').trim(),
+      installName: normalizeInstallName(options.installName),
+      deletedByOwnerUid,
+      deletedAt,
+      expiresAt,
+      files: movedFiles,
+    };
     fs.writeFileSync(
       path.join(temporary, 'deletion.json'),
       `${JSON.stringify(manifest, null, 2)}\n`,
@@ -99,12 +101,20 @@ export function trashBotSkill(options: TrashBotSkillOptions): TrashBotSkillResul
     );
     fs.renameSync(temporary, finalPath);
     assertTrashEntry(finalPath, manifest);
-    fs.rmSync(sourcePath, { recursive: true, force: false });
     return { backupId, deletedAt, expiresAt };
   } catch (error) {
-    if (fs.existsSync(temporary)) fs.rmSync(temporary, { recursive: true, force: true });
-    // Once the verified backup has been promoted it must remain as recovery
-    // evidence even if deleting the active directory fails.
+    if (sourceMoved && fs.existsSync(packageRoot) && !fs.existsSync(sourcePath)) {
+      try {
+        fs.renameSync(packageRoot, sourcePath);
+        sourceMoved = false;
+      } catch {
+        // If restoration itself fails, preserve the temporary recovery
+        // evidence instead of recursively deleting the moved source.
+      }
+    }
+    if (!sourceMoved && fs.existsSync(temporary)) {
+      fs.rmSync(temporary, { recursive: true, force: true });
+    }
     throw error;
   }
 }

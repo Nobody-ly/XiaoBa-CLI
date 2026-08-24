@@ -23,6 +23,7 @@ import {
   readSkillHubLocalMetadata,
 } from '../src/skillhub/local-skill-metadata';
 import { SkillHubService } from '../src/skillhub/service';
+import { trashBotSkill } from '../src/bot-skills/deleted-skill-trash';
 
 describe('CatsCompany SkillHub thin RPC', () => {
   let runtimeRoot = '';
@@ -209,6 +210,35 @@ describe('CatsCompany SkillHub thin RPC', () => {
       String(secondResult.backup_id),
     )), true);
     assert.equal(fs.existsSync(secondRoot), false);
+  });
+
+  test('restores the active Skill when a file appears after the deletion snapshot', () => {
+    const sourcePath = path.join(runtimeRoot, 'skills', 'concurrent-delete');
+    fs.mkdirSync(sourcePath, { recursive: true });
+    fs.writeFileSync(path.join(sourcePath, 'SKILL.md'), [
+      '---',
+      'name: concurrent-delete',
+      'description: Concurrent deletion regression',
+      '---',
+      '',
+    ].join('\n'));
+
+    assert.throws(() => trashBotSkill({
+      runtimeRoot,
+      botId: '42',
+      sourcePath,
+      localSkillId: 'concurrent-delete-id',
+      name: 'concurrent-delete',
+      installName: 'concurrent-delete',
+      deletedByOwnerUid: '7',
+      now: () => new Date('2026-08-24T00:00:00.000Z'),
+      beforeMove: () => {
+        fs.writeFileSync(path.join(sourcePath, 'created-during-delete.txt'), 'preserve me');
+      },
+    }), /changed while deletion was being prepared/i);
+
+    assert.equal(fs.existsSync(path.join(sourcePath, 'SKILL.md')), true);
+    assert.equal(fs.readFileSync(path.join(sourcePath, 'created-during-delete.txt'), 'utf8'), 'preserve me');
   });
 
   test('deletes an invalid local Skill by its existing marker identity', async () => {
