@@ -61,6 +61,7 @@ describe('CatsCompany SkillHub thin RPC', () => {
     handler = new SkillHubThinRpcHandler({
       runtimeRoot,
       scheduleBotSwitch: (botUid) => scheduledBotUIDs.push(botUid),
+      now: () => new Date('2026-08-24T00:00:00.000Z'),
     });
   });
 
@@ -73,6 +74,27 @@ describe('CatsCompany SkillHub thin RPC', () => {
     for (const toolName of Object.values(SKILLHUB_THIN_RPC_TOOLS)) {
       assert.equal(serverHandler.supports(toolName), false);
     }
+  });
+
+  test('server runtime supports workspace operations but never Bot switching', async () => {
+    const serverHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      allowBotSwitch: false,
+    });
+    assert.equal(serverHandler.supports(SKILLHUB_THIN_RPC_TOOLS.workspace), true);
+    assert.equal(serverHandler.supports(SKILLHUB_THIN_RPC_TOOLS.delete), true);
+    assert.equal(serverHandler.supports(SKILLHUB_THIN_RPC_TOOLS.switchBot), false);
+    await assert.rejects(
+      serverHandler.execute(request({
+        request_id: 'server-switch-denied',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.switchBot,
+        payload: { bot_uid: '44' },
+      })),
+      (error: unknown) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'TOOL_NOT_FOUND'
+      ),
+    );
   });
 
   test('returns only bounded metadata for the active Bot workspace', async () => {
@@ -119,8 +141,74 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(result.schema, 'xiaoba.skillhub.local_delete.v1');
     assert.equal(result.deleted, true);
     assert.equal(result.local_skill_id, selected.localSkillId);
+    assert.equal(result.deleted_at, '2026-08-24T00:00:00.000Z');
+    assert.equal(result.backup_expires_at, '2026-09-23T00:00:00.000Z');
     assert.equal(fs.existsSync(selected.path), false);
     assert.equal(fs.existsSync(sibling.path), true);
+    const backupRoot = path.join(
+      runtimeRoot,
+      'data',
+      'bot-skills',
+      'trash',
+      '42',
+      String(result.backup_id),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(backupRoot, 'package', 'SKILL.md'), 'utf8').includes('# Local Demo'),
+      true,
+    );
+    const deletion = JSON.parse(fs.readFileSync(path.join(backupRoot, 'deletion.json'), 'utf8'));
+    assert.equal(deletion.deletedByOwnerUid, '7');
+    assert.equal(deletion.localSkillId, selected.localSkillId);
+  });
+
+  test('removes only verified expired trash while keeping the active Skill delete recoverable', async () => {
+    const first = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const firstResult = await handler.execute(request({
+      request_id: 'delete-retention-first',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.delete,
+      payload: { bot_uid: '42', local_skill_id: first.localSkillId },
+    }));
+    const firstBackup = path.join(
+      runtimeRoot,
+      'data',
+      'bot-skills',
+      'trash',
+      '42',
+      String(firstResult.backup_id),
+    );
+    assert.equal(fs.existsSync(firstBackup), true);
+
+    const secondRoot = path.join(runtimeRoot, 'skills', 'second-delete');
+    fs.mkdirSync(secondRoot, { recursive: true });
+    fs.writeFileSync(path.join(secondRoot, 'SKILL.md'), [
+      '---',
+      'name: second-delete',
+      'description: Second recoverable delete',
+      '---',
+      '',
+    ].join('\n'));
+    const second = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'))[0];
+    const laterHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      now: () => new Date('2026-09-24T00:00:00.000Z'),
+    });
+    const secondResult = await laterHandler.execute(request({
+      request_id: 'delete-retention-second',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.delete,
+      payload: { bot_uid: '42', local_skill_id: second.localSkillId },
+    }));
+
+    assert.equal(fs.existsSync(firstBackup), false);
+    assert.equal(fs.existsSync(path.join(
+      runtimeRoot,
+      'data',
+      'bot-skills',
+      'trash',
+      '42',
+      String(secondResult.backup_id),
+    )), true);
+    assert.equal(fs.existsSync(secondRoot), false);
   });
 
   test('deletes an invalid local Skill by its existing marker identity', async () => {

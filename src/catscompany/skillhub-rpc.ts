@@ -11,6 +11,7 @@ import {
 import {
   scanBotSkillWorkspace,
 } from '../bot-skills/local-manifest';
+import { trashBotSkill } from '../bot-skills/deleted-skill-trash';
 import { readSkillHubLocalMetadata } from '../skillhub/local-skill-metadata';
 import {
   shareLocalSkillForCatsCo,
@@ -56,6 +57,8 @@ export interface SkillHubThinRpcHandlerOptions {
   finalizeCurrentBotSkill?: typeof finalizeCurrentBotPublicSkillNow;
   isShuttingDown?: () => boolean;
   enabled?: boolean;
+  allowBotSwitch?: boolean;
+  now?: () => Date;
 }
 
 export class SkillHubThinRpcHandler {
@@ -64,6 +67,8 @@ export class SkillHubThinRpcHandler {
   private readonly finalizeCurrentBotSkill: typeof finalizeCurrentBotPublicSkillNow;
   private readonly isShuttingDown: () => boolean;
   private readonly enabled: boolean;
+  private readonly allowBotSwitch: boolean;
+  private readonly now: () => Date;
   private readonly completed = new Map<string, {
     fingerprint: string;
     operation: Promise<Record<string, unknown>>;
@@ -77,10 +82,14 @@ export class SkillHubThinRpcHandler {
     this.finalizeCurrentBotSkill = options.finalizeCurrentBotSkill
       ?? finalizeCurrentBotPublicSkillNow;
     this.enabled = options.enabled !== false;
+    this.allowBotSwitch = options.allowBotSwitch !== false;
+    this.now = options.now ?? (() => new Date());
   }
 
   supports(toolName: string): boolean {
-    return this.enabled && Object.values(SKILLHUB_THIN_RPC_TOOLS).includes(toolName as any);
+    return this.enabled
+      && Object.values(SKILLHUB_THIN_RPC_TOOLS).includes(toolName as any)
+      && (toolName !== SKILLHUB_THIN_RPC_TOOLS.switchBot || this.allowBotSwitch);
   }
 
   async execute(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
@@ -123,6 +132,9 @@ export class SkillHubThinRpcHandler {
 
   private async executeOnce(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
     this.assertOperational(request);
+    if (!this.supports(String(request.tool_name || ''))) {
+      throw new SkillHubThinRpcError('TOOL_NOT_FOUND', 'Unsupported SkillHub device operation.');
+    }
     const payload = recordValue(request.payload);
     const botUid = requiredText(payload.bot_uid, 'bot_uid', 160);
     if (!BOT_UID_PATTERN.test(botUid)) {
@@ -375,7 +387,7 @@ export class SkillHubThinRpcHandler {
     const localSkillId = requiredText(payload.local_skill_id, 'local_skill_id', MAX_NAME_LENGTH);
     const removed = await withCurrentBotSkillWorkspaceWrite((context) => {
       this.assertOperational(request);
-      this.assertRequestScope(request, botUid, true);
+      const scope = this.assertRequestScope(request, botUid, true);
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
 
       const rejected: SkillHubWorkspaceValidationFailure[] = [];
@@ -431,11 +443,21 @@ export class SkillHubThinRpcHandler {
         );
       }
 
-      fs.rmSync(realEntry, { recursive: true, force: false });
+      const backup = trashBotSkill({
+        runtimeRoot: this.runtimeRoot,
+        botId: botUid,
+        sourcePath: realEntry,
+        localSkillId,
+        name: entry.name,
+        installName: entry.installName,
+        deletedByOwnerUid: scope.ownerUid,
+        now: this.now,
+      });
       return {
         localSkillId,
         name: entry.name,
         relativePath: entry.installName,
+        ...backup,
       };
     }, { runtimeRoot: this.runtimeRoot });
 
@@ -446,6 +468,9 @@ export class SkillHubThinRpcHandler {
       name: removed.name,
       relative_path: removed.relativePath,
       deleted: true,
+      backup_id: removed.backupId,
+      deleted_at: removed.deletedAt,
+      backup_expires_at: removed.expiresAt,
     };
   }
 
