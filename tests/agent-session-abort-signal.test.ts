@@ -22,6 +22,52 @@ test('AgentSession does not implicitly sync the Bot Skill workspace after a comp
   assert.equal(scheduledSyncs, 0);
 });
 
+test('AgentSession checkpoint candidate stays disabled by default', () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  try {
+    const session = new AgentSession('user:candidate-disabled', buildMockServices({}), 'catscompany');
+    assert.equal((session as any).useCheckpointCandidates, false);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
+test('AgentSession keeps one candidate slot and clear cancels it', async () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  try {
+    let observedSignal: AbortSignal | undefined;
+    const session = new AgentSession('user:candidate-slot', buildMockServices({}), 'catscompany');
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: 60,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: 60,
+    });
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async (_messages: any[], options: any) => {
+      observedSignal = options.signal;
+      return await new Promise(() => {});
+    };
+
+    (session as any).startCheckpointCandidateIfEligible(0, [{ role: 'user', content: 'root' }]);
+    const firstCandidate = (session as any).checkpointCandidate;
+    (session as any).startCheckpointCandidateIfEligible(0, [{ role: 'user', content: 'root' }]);
+
+    assert.ok(firstCandidate);
+    assert.equal((session as any).checkpointCandidate, firstCandidate);
+    await waitFor(() => Boolean(observedSignal));
+    session.clear();
+    assert.equal(observedSignal?.aborted, true);
+    assert.equal(firstCandidate.status, 'cancelled');
+    assert.equal((session as any).checkpointCandidate, null);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
 test('AgentSession requestInterrupt aborts an in-flight model request', async () => {
   let observedSignal: AbortSignal | undefined;
 

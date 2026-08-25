@@ -68,6 +68,10 @@ import {
   isCheckpointCompactionEnabled,
 } from './checkpoint-compaction';
 import { estimateToolsTokens } from './token-estimator';
+import {
+  CheckpointCandidate,
+  createCheckpointSnapshot,
+} from './checkpoint-candidate';
 import type { SessionRuntimeLogEvent, TurnErrorPayload } from '../utils/session-log-schema';
 
 export type { RuntimeFeedbackInput, RuntimeFeedbackOptions } from './runtime-feedback-inbox';
@@ -214,7 +218,12 @@ export class AgentSession {
   private turnController: AgentTurnController;
   private contextWindowManager: ContextWindowManager;
   private checkpointCompactionCoordinator: CheckpointCompactionCoordinator;
+  private checkpointCandidateCoordinator: CheckpointCompactionCoordinator;
   private readonly useCheckpointCompaction: boolean;
+  private readonly useCheckpointCandidates: boolean;
+  private checkpointCandidate: CheckpointCandidate | null = null;
+  private checkpointCandidateAbortController: AbortController | null = null;
+  private checkpointRevision = 0;
   private skillRuntime: SessionSkillRuntime;
   private runtimeFeedbackInbox = new RuntimeFeedbackInbox();
   private planRuntime = new PlanRuntime();
@@ -246,7 +255,12 @@ export class AgentSession {
       services.aiService,
       { maxContextTokens: contextWindow.promptBudgetTokens },
     );
+    this.checkpointCandidateCoordinator = new CheckpointCompactionCoordinator(
+      services.aiService,
+      { maxContextTokens: contextWindow.promptBudgetTokens, compactionThreshold: 0.6 },
+    );
     this.useCheckpointCompaction = isCheckpointCompactionEnabled();
+    this.useCheckpointCandidates = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED === 'true';
     this.skillRuntime = new SessionSkillRuntime(services.skillManager, key);
     this.lifecycleManager = new SessionLifecycleManager({
       sessionKey: key,
@@ -666,6 +680,7 @@ export class AgentSession {
 
       try {
         const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(this.messages);
+        this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesBeforeCompaction);
         const compactionResult = await this.compactContextIfNeeded(
           messagesBeforeCompaction,
           'pre_turn',
@@ -837,6 +852,9 @@ export class AgentSession {
 
         return { text: errorReply, visibleToUser: true, taskOutcome: 'failed' };
       } finally {
+        if (this.interruptRequested || lifecycleGeneration !== this.lifecycleGeneration) {
+          this.cancelCheckpointCandidate();
+        }
         this.planRuntime.clear();
         scheduleCurrentBotPromptReconcile();
         this.busy = false;
@@ -907,6 +925,7 @@ export class AgentSession {
   /** 重置会话状态（仅清内存，保留历史文件） */
   reset(): void {
     this.lifecycleGeneration++;
+    this.cancelCheckpointCandidate();
     this.planRuntime.clear();
     this.stopSubAgents('父会话 reset');
     this.messages = [];
@@ -921,6 +940,7 @@ export class AgentSession {
   /** 清空历史（同时删除文件），返回本地文件与状态是否都删除成功。 */
   clear(): boolean {
     this.lifecycleGeneration++;
+    this.cancelCheckpointCandidate();
     this.planRuntime.clear();
     this.stopSubAgents('父会话 clear');
     this.messages = [];
@@ -936,6 +956,7 @@ export class AgentSession {
   async summarizeAndDestroy(): Promise<boolean> {
     return this.withLogContext(async () => {
       this.planRuntime.clear();
+      this.cancelCheckpointCandidate();
       this.stopSubAgents('父会话退出');
       if (this.messages.length === 0) return false;
       this.messages = [];
@@ -946,6 +967,7 @@ export class AgentSession {
   /** 过期或退出时清理内存（保存完整 context） */
   async cleanup(options: SessionCleanupOptions = {}): Promise<void> {
     return this.withLogContext(async () => {
+      this.cancelCheckpointCandidate();
       if (options.stopSubAgents) {
         this.stopSubAgents(options.subAgentStopReason || '父会话清理');
       }
@@ -977,6 +999,7 @@ export class AgentSession {
   /** 请求中断当前运行中的对话回合 */
   requestInterrupt(): void {
     this.stopSubAgents('用户请求中止');
+    this.cancelCheckpointCandidate();
     if (!this.busy) return;
     this.interruptRequested = true;
     this.activeAbortController?.abort();
@@ -995,6 +1018,52 @@ export class AgentSession {
   }
 
   // ─── 私有方法 ──────────────────────────────────────
+
+  private startCheckpointCandidateIfEligible(
+    lifecycleGeneration: number,
+    messages: Message[] = this.messages,
+  ): void {
+    if (!this.useCheckpointCompaction || !this.useCheckpointCandidates || this.checkpointCandidate) return;
+    const usage = this.getContextUsageInfo(messages);
+    if (usage.usagePercent < 60 || usage.usagePercent >= 80) return;
+
+    const episodeId = [...messages].reverse().find(message => message.__episodeId)?.__episodeId;
+    const candidate = new CheckpointCandidate(
+      `checkpoint:${this.key}:${this.checkpointRevision + 1}`,
+      createCheckpointSnapshot(
+        this.turnContextBuilder.removeTransientMessages(stripAssistantArtifactsFromMessages(messages)),
+        {
+          revision: ++this.checkpointRevision,
+          episodeId,
+        },
+      ),
+    );
+    const abortController = new AbortController();
+    this.checkpointCandidate = candidate;
+    this.checkpointCandidateAbortController = abortController;
+
+    void candidate.generate(this.checkpointCandidateCoordinator, {
+      sessionKey: this.key,
+      phase: 'pre_turn',
+      episodeId,
+      toolTokens: this.getToolDefinitionTokens(),
+      signal: abortController.signal,
+    }).finally(() => {
+      if (lifecycleGeneration !== this.lifecycleGeneration
+        || this.checkpointCandidate !== candidate) {
+        return;
+      }
+      this.checkpointCandidateAbortController = null;
+      if (candidate.status === 'failed') this.checkpointCandidate = null;
+    });
+  }
+
+  private cancelCheckpointCandidate(): void {
+    this.checkpointCandidate?.cancel();
+    this.checkpointCandidateAbortController?.abort();
+    this.checkpointCandidate = null;
+    this.checkpointCandidateAbortController = null;
+  }
 
   private consumeRuntimeFeedback(inputs: RuntimeFeedbackInput[] = []): string[] {
     return this.runtimeFeedbackInbox.consume(inputs);

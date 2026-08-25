@@ -103,9 +103,9 @@
 - 当前 XiaoBa-CLI 工作区唯一已知未提交文件是本调查文档 `docs/branch-compaction-investigation.md`；未将其它仓库工作区状态作为本项目事实。
 - 本轮未执行远程 fetch。因此本记录不宣称仓库已更新到最新版本。
 
-## 第一轮实现边界
+## 当前实现边界
 
-本轮仅完善纯逻辑的 checkpoint candidate 模块和最小异步适配，不接入 `AgentSession`，不启动后台 branch，不修改运行时压缩算法、阈值、队列或持久化行为。
+已完成纯逻辑 checkpoint candidate、最小异步适配，以及 `AgentSession` 中默认关闭的单候选槽位。不修改运行时压缩算法、现有串行阈值、队列、持久化格式或 transcript 提交行为。
 
 已完成内容：
 
@@ -113,4 +113,6 @@
 - `tests/checkpoint-candidate.test.ts`：snapshot 隔离、匹配提交、revision/episode/boundary 失效、取消后迟到结果、协调器生成失败等测试。
 - candidate 可通过最小 `generate()` 适配复用现有 `CheckpointCompactionCoordinator`；生成只读取 snapshot 副本并保存候选结果，不修改父 transcript、不自动提交。
 
-本轮仍未接入 `AgentSession`、后台 branch、85% 抢占或持久化路径。后续仍需补充 candidate 取消信号的实际生命周期协调、85% 抢占协调、持久化失败回滚测试，以及完整 tool-call 边界测试。
+第三阶段增加了 `AgentSession` 单候选槽位：仅在 `XIAOBA_CHECKPOINT_CANDIDATES_ENABLED=true` 时启用，在 60%–80% 区间启动候选，并在 interrupt/reset/clear/cleanup/exit 时取消。候选结果仍不自动提交，现有 80% 串行压缩路径保持不变。
+
+后续仍需补充 ready candidate 的 CAS 合并与持久化协议、85% 抢占协调、持久化失败回滚测试，以及完整 tool-call 边界测试。
