@@ -105,11 +105,12 @@
 
 ## 第一轮实现边界
 
-本轮仅新增纯逻辑的 checkpoint candidate 模块和单元测试，不接入 `AgentSession`，不启动后台 branch，不修改运行时压缩算法、阈值、队列或持久化行为。
+本轮仅完善纯逻辑的 checkpoint candidate 模块和最小异步适配，不接入 `AgentSession`，不启动后台 branch，不修改运行时压缩算法、阈值、队列或持久化行为。
 
-新增内容：
+已完成内容：
 
 - `src/core/checkpoint-candidate.ts`：不可变 snapshot、durable message hash、revision/episode/boundary 比较、candidate 状态机和 CAS 提交保护。
-- `tests/checkpoint-candidate.test.ts`：snapshot 隔离、匹配提交、revision/episode/boundary 失效、取消后迟到结果等测试。
+- `tests/checkpoint-candidate.test.ts`：snapshot 隔离、匹配提交、revision/episode/boundary 失效、取消后迟到结果、协调器生成失败等测试。
+- candidate 可通过最小 `generate()` 适配复用现有 `CheckpointCompactionCoordinator`；生成只读取 snapshot 副本并保存候选结果，不修改父 transcript、不自动提交。
 
-下一轮接入前仍需补充：candidate 与现有 checkpoint 算法的异步调用适配、85% 抢占协调、持久化失败回滚测试，以及完整 tool-call 边界测试。
+本轮仍未接入 `AgentSession`、后台 branch、85% 抢占或持久化路径。后续仍需补充 candidate 取消信号的实际生命周期协调、85% 抢占协调、持久化失败回滚测试，以及完整 tool-call 边界测试。

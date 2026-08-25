@@ -37,6 +37,47 @@ test('snapshot freezes nested message structures', () => {
   assert.equal((snapshot.messages[0].content as any)[0].source.data, 'abc');
 });
 
+test('candidate generates through the coordinator without mutating the snapshot', async () => {
+  const source = [user('root')];
+  const candidate = new CheckpointCandidate('candidate-generate', createCheckpointSnapshot(source, {
+    revision: 1,
+    episodeId: 'episode-1',
+  }));
+  let requestMessages: Message[] | undefined;
+  const coordinator = {
+    compactIfNeeded: async (messages: Message[], request: any) => {
+      requestMessages = messages;
+      assert.equal(request.phase, 'mid_turn');
+      messages.push(user('coordinator-local-copy'));
+      return { messages: [user('summary')], compacted: true };
+    },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+  }), true);
+  assert.equal(candidate.status, 'ready');
+  assert.deepEqual(candidate.result?.map(message => message.content), ['summary']);
+  assert.deepEqual(requestMessages?.map(message => message.content), ['root', 'coordinator-local-copy']);
+  assert.deepEqual(candidate.snapshot.messages.map(message => message.content), ['root']);
+});
+
+test('candidate generation failure enters failed state', async () => {
+  const candidate = new CheckpointCandidate('candidate-failed', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+  }));
+  const coordinator = {
+    compactIfNeeded: async () => { throw new Error('provider unavailable'); },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+  }), false);
+  assert.equal(candidate.status, 'failed');
+});
+
 test('ready candidate commits when revision and boundary still match', () => {
   const messages = [user('root'), user('before branch')];
   const candidate = new CheckpointCandidate(

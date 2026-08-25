@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { Message } from '../types';
+import type {
+  CheckpointCompactionCoordinator,
+  CheckpointCompactionRequest,
+} from './checkpoint-compaction';
 import { estimateMessagesTokens } from './token-estimator';
 
 export type CheckpointCandidateStatus =
@@ -59,6 +63,29 @@ export class CheckpointCandidate {
     if (this._status !== 'running') return false;
     this._status = 'failed';
     return true;
+  }
+
+  /** Generate a candidate without touching the parent transcript. */
+  async generate(
+    coordinator: Pick<CheckpointCompactionCoordinator, 'compactIfNeeded'>,
+    request: Omit<CheckpointCompactionRequest, 'signal'> & { signal?: AbortSignal },
+  ): Promise<boolean> {
+    if (this._status !== 'running') return false;
+    try {
+      const result = await coordinator.compactIfNeeded([...this.snapshot.messages], {
+        ...request,
+        signal: request.signal,
+      });
+      if (this._status !== 'running') return false;
+      if (!result.compacted) {
+        this.fail();
+        return false;
+      }
+      return this.complete(result.messages);
+    } catch {
+      this.fail();
+      return false;
+    }
   }
 
   cancel(): boolean {
