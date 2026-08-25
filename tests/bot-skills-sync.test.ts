@@ -1880,6 +1880,11 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
 
     assert.equal(result.direction, 'feature_unavailable');
     assert.equal(result.cloudRevision, 1);
+    assert.equal(result.observedRevision, 1);
+    assert.equal(result.desiredRevision, 1);
+    assert.equal(result.appliedRevision, undefined);
+    assert.equal(result.applyStatus, 'deferred');
+    assert.equal(result.errorCode, 'local_workspace_unverified');
     assert.equal(fixture.uploads, 0);
     assert.equal(fixture.patches, 0);
     assert.match(
@@ -1925,6 +1930,10 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
 
     assert.equal(result.direction, 'feature_unavailable');
     assert.equal(result.cloudRevision, 1);
+    assert.equal(result.observedRevision, 1);
+    assert.equal(result.desiredRevision, 1);
+    assert.equal(result.appliedRevision, undefined);
+    assert.equal(result.applyStatus, 'deferred');
     assert.match(
       fs.readFileSync(path.join(fixture.skillsRoot, 'late-local', 'SKILL.md'), 'utf8'),
       /created during activation/,
@@ -1953,6 +1962,9 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     const result = await fixture.activate();
 
     assert.equal(result.direction, 'feature_unavailable');
+    assert.equal(result.applyStatus, 'deferred');
+    assert.equal(result.appliedRevision, undefined);
+    assert.equal(result.errorCode, 'local_workspace_unverified');
     assert.equal(fixture.uploads, 0);
     assert.equal(fixture.patches, 0);
     assert.match(
@@ -1973,6 +1985,10 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     const result = await fixture.activate();
 
     assert.equal(result.direction, 'cloud_to_local');
+    assert.equal(result.applyStatus, 'applied');
+    assert.equal(result.observedRevision, 2);
+    assert.equal(result.desiredRevision, 2);
+    assert.equal(result.appliedRevision, 2);
     assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'local-a')), false);
     assert.deepStrictEqual(fixture.definitionService.read(fixture.botId)?.skills, []);
     assert.deepStrictEqual(
@@ -1992,6 +2008,9 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     const result = await fixture.activate();
 
     assert.equal(result.direction, 'feature_unavailable');
+    assert.equal(result.applyStatus, 'deferred');
+    assert.equal(result.appliedRevision, 1);
+    assert.equal(result.errorCode, 'cloud_unavailable');
     assert.equal(fixture.uploads, 0);
     assert.equal(fixture.patches, 0);
     assert.match(

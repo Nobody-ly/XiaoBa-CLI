@@ -44,10 +44,22 @@ export type BotSkillSyncDirection =
   | 'cloud_to_local'
   | 'feature_unavailable';
 
+export type BotSkillApplyStatus =
+  | 'applied'
+  | 'already_applied'
+  | 'deferred'
+  | 'failed';
+
 export interface BotSkillSyncResult {
   botId: string;
   direction: BotSkillSyncDirection;
+  /** @deprecated Use observedRevision for new activation decisions. */
   cloudRevision?: number;
+  observedRevision?: number;
+  desiredRevision?: number;
+  appliedRevision?: number;
+  applyStatus: BotSkillApplyStatus;
+  errorCode?: string;
   skills: BotSkillRef[];
   localPendingEvidence?: {
     path: string;
@@ -249,6 +261,10 @@ export class BotSkillSyncService {
           botId: this.botId,
           direction: 'none',
           cloudRevision: cloud.revision,
+          observedRevision: cloud.revision,
+          desiredRevision: cloud.revision,
+          appliedRevision: cloud.revision,
+          applyStatus: 'already_applied',
           skills: cloud.skills,
         };
       }
@@ -265,6 +281,10 @@ export class BotSkillSyncService {
       botId: this.botId,
       direction: 'none',
       cloudRevision: cloud.revision,
+      observedRevision: cloud.revision,
+      desiredRevision: cloud.revision,
+      appliedRevision: cloud.revision,
+      applyStatus: 'already_applied',
       skills: cloud.skills,
     };
   }
@@ -301,14 +321,25 @@ export class BotSkillSyncService {
       try {
         cloud = await pullCloudBotSkills(this.cloudOptions);
       } catch (error) {
-        if (verifiedExisting) return this.featureUnavailable();
+        if (verifiedExisting) {
+          return this.featureUnavailable({
+            appliedRevision: base!.definitionRevision,
+            errorCode: 'cloud_unavailable',
+          });
+        }
         throw new BotSkillCloudRestoreError(
           `Bot Skill activation requires Cloud or a verified local workspace: ${errorMessage(error)}`,
           { cause: error },
         );
       }
       if (!cloud?.definition) {
-        if (verifiedExisting) return this.featureUnavailable();
+        if (verifiedExisting) {
+          return this.featureUnavailable({
+            ...(cloud ? { observedRevision: cloud.revision } : {}),
+            appliedRevision: base!.definitionRevision,
+            errorCode: 'cloud_definition_unavailable',
+          });
+        }
         throw new BotSkillCloudRestoreError(
           'Bot Skill activation requires a canonical Cloud BotDefinition.',
         );
@@ -348,7 +379,11 @@ export class BotSkillSyncService {
           cloudRevision: cloud.revision,
         });
         return {
-          ...this.featureUnavailable(),
+          ...this.featureUnavailable({
+            observedRevision: cloud.revision,
+            desiredRevision: cloud.revision,
+            errorCode: 'local_workspace_unverified',
+          }),
           cloudRevision: cloud.revision,
           localPendingEvidence: {
             path: snapshot.path,
@@ -370,6 +405,10 @@ export class BotSkillSyncService {
           botId: this.botId,
           direction: 'none',
           cloudRevision: cloud.revision,
+          observedRevision: cloud.revision,
+          desiredRevision: cloud.revision,
+          appliedRevision: cloud.revision,
+          applyStatus: 'already_applied',
           skills: cloud.skills,
         };
       }
@@ -628,10 +667,20 @@ export class BotSkillSyncService {
     }
   }
 
-  private featureUnavailable(): BotSkillSyncResult {
+  private featureUnavailable(options: {
+    observedRevision?: number;
+    desiredRevision?: number;
+    appliedRevision?: number;
+    errorCode?: string;
+  } = {}): BotSkillSyncResult {
     return {
       botId: this.botId,
       direction: 'feature_unavailable',
+      applyStatus: 'deferred',
+      ...(options.observedRevision !== undefined
+        ? { cloudRevision: options.observedRevision }
+        : {}),
+      ...options,
       skills: this.definitionService.read(this.botId)?.skills ?? [],
     };
   }
@@ -805,6 +854,10 @@ export class BotSkillSyncService {
       botId: this.botId,
       direction: 'local_to_cloud',
       cloudRevision: cloud.revision,
+      observedRevision: cloud.revision,
+      desiredRevision: cloud.revision,
+      appliedRevision: cloud.revision,
+      applyStatus: 'applied',
       skills: cloud.skills,
     };
   }
@@ -1020,6 +1073,10 @@ export class BotSkillSyncService {
       botId: this.botId,
       direction: 'cloud_to_local',
       cloudRevision: cloud.revision,
+      observedRevision: cloud.revision,
+      desiredRevision: cloud.revision,
+      appliedRevision: cloud.revision,
+      applyStatus: 'applied',
       skills: cloud.skills,
       ...(localPendingEvidence ? { localPendingEvidence } : {}),
     };
