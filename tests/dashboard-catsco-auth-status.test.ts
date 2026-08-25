@@ -678,6 +678,11 @@ describe('dashboard CatsCo account status', () => {
               owner_id: 77,
             },
             {
+              uid: 198,
+              username: 'unknown-owner',
+              display_name: 'Unknown Owner',
+            },
+            {
               uid: 199,
               username: 'laomocun',
               display_name: '烙馍村村长',
@@ -695,7 +700,7 @@ describe('dashboard CatsCo account status', () => {
       'CATSCO_SERVER_URL=wss://app.catsco.cc/v0/channels',
       'CATSCO_USER_TOKEN=arrow-token',
       'CATSCO_USER_UID=88',
-      'CATSCO_BOT_UID=188',
+      'CATSCO_BOT_UID=198',
     ]);
 
     const response = await fetch(`${dashboardBaseUrl}/api/cats/bots`);
@@ -979,7 +984,7 @@ describe('dashboard CatsCo account status', () => {
     assert.equal(data.service.status, 'running');
   });
 
-  test('POST /cats/setup ignores a stale friend bot and reuses an Agent owned by the current account', async () => {
+  test('POST /cats/setup ignores stale friend and unknown-owner bots, then reuses an owned Agent', async () => {
     if (dashboardServer) {
       await close(dashboardServer);
       dashboardServer = undefined;
@@ -1022,6 +1027,12 @@ describe('dashboard CatsCo account status', () => {
             relation: 'friend',
             owner_id: 77,
           }, {
+            id: 198,
+            uid: 198,
+            username: 'unknown-owner-agent',
+            display_name: 'Unknown Owner Agent',
+            api_key: 'unknown-owner-agent-key',
+          }, {
             id: 199,
             uid: 199,
             username: 'existing-agent',
@@ -1053,8 +1064,8 @@ describe('dashboard CatsCo account status', () => {
       'CATSCO_USER_UID=88',
       'CATSCO_USER_NAME=fresh',
       'CATSCO_USER_DISPLAY_NAME=Fresh User',
-      'CATSCO_BOT_UID=188',
-      'CATSCO_API_KEY=old-friend-agent-key',
+      'CATSCO_BOT_UID=198',
+      'CATSCO_API_KEY=unknown-owner-agent-key',
       'GAUZ_LLM_PROVIDER=anthropic',
       'GAUZ_LLM_API_BASE=https://model.example.test/v1/messages',
       'GAUZ_LLM_API_KEY=sk-test',
@@ -1119,8 +1130,8 @@ describe('dashboard CatsCo account status', () => {
       if (req.path === '/api/bots' && req.method === 'GET') {
         return res.json({
           bots: [
-            { uid: 188, username: 'first-agent', display_name: 'First Agent', api_key: 'first-agent-key' },
-            { uid: 199, username: 'last-agent', display_name: 'Last Agent', api_key: 'last-agent-key' },
+            { uid: 188, username: 'first-agent', display_name: 'First Agent', api_key: 'first-agent-key', owner_id: 88 },
+            { uid: 199, username: 'last-agent', display_name: 'Last Agent', api_key: 'last-agent-key', owner_id: 88 },
           ],
         });
       }
@@ -1224,8 +1235,8 @@ describe('dashboard CatsCo account status', () => {
       if (req.path === '/api/bots' && req.method === 'GET') {
         return res.json({
           bots: [
-            { uid: 188, username: 'old-agent', display_name: 'Old Agent', api_key: 'old-agent-key' },
-            { uid: 199, username: 'new-agent', display_name: 'New Agent', api_key: 'new-agent-key' },
+            { uid: 188, username: 'old-agent', display_name: 'Old Agent', api_key: 'old-agent-key', owner_id: 88 },
+            { uid: 199, username: 'new-agent', display_name: 'New Agent', api_key: 'new-agent-key', owner_id: 88 },
           ],
         });
       }
@@ -1346,7 +1357,7 @@ describe('dashboard CatsCo account status', () => {
       }
       if (req.path === '/api/bots' && req.method === 'GET') {
         return res.json({
-          bots: [{ uid: 199, username: 'target-agent', display_name: 'Target Agent', api_key: 'target-agent-key' }],
+          bots: [{ uid: 199, username: 'target-agent', display_name: 'Target Agent', api_key: 'target-agent-key', owner_id: 88 }],
         });
       }
       if (req.path === '/api/friends/request' || req.path === '/api/friends/accept') {
@@ -1480,7 +1491,7 @@ describe('dashboard CatsCo account status', () => {
       }
       if (req.path === '/api/bots' && req.method === 'GET') {
         return res.json({
-          bots: [{ uid: 188, username: 'catsco_88', display_name: 'CatsCo Existing', api_key: 'cats-agent-key' }],
+          bots: [{ uid: 188, username: 'catsco_88', display_name: 'CatsCo Existing', api_key: 'cats-agent-key', owner_id: 88 }],
         });
       }
       if (req.path === '/api/friends/request' || req.path === '/api/friends/accept') {
@@ -1625,7 +1636,7 @@ describe('dashboard CatsCo account status', () => {
         return res.json({ uid: 88, username: 'fresh', display_name: 'Fresh User' });
       }
       if (req.path === '/api/bots' && req.method === 'GET') {
-        return res.json({ bots: [{ uid: 188, username: 'catsco_88', display_name: 'CatsCo', api_key: 'cats-agent-key' }] });
+        return res.json({ bots: [{ uid: 188, username: 'catsco_88', display_name: 'CatsCo', api_key: 'cats-agent-key', owner_id: 88 }] });
       }
       if (req.path === '/api/friends/request' || req.path === '/api/friends/accept') {
         return res.json({ ok: true });
@@ -1740,7 +1751,7 @@ describe('dashboard CatsCo account status', () => {
         return res.json({ uid: 88, username: 'fresh', display_name: 'Fresh User' });
       }
       if (req.path === '/api/bots' && req.method === 'GET') {
-        return res.json({ bots: [{ uid: 188, username: 'catsco_88', display_name: 'CatsCo', api_key: 'cats-agent-key' }] });
+        return res.json({ bots: [{ uid: 188, username: 'catsco_88', display_name: 'CatsCo', api_key: 'cats-agent-key', owner_id: 88 }] });
       }
       if (req.path === '/api/friends/request' || req.path === '/api/friends/accept') {
         return res.json({ ok: true });

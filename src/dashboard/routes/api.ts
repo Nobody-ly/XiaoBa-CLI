@@ -680,10 +680,13 @@ function sanitizeCatsUsernamePart(value: string): string {
 
 function isOwnedCatsBot(bot: any, userUid?: string): boolean {
   if (!bot || typeof bot !== 'object') return false;
-  if (bot.is_owner === false || String(bot.relation || '').toLowerCase() === 'friend') return false;
-  const ownerUid = String(bot.owner_id || bot.owner_uid || '').trim();
   const expectedOwnerUid = String(userUid || '').trim();
-  return !ownerUid || !expectedOwnerUid || ownerUid === expectedOwnerUid;
+  if (!expectedOwnerUid) return false;
+  const relation = String(bot.relation || '').trim().toLowerCase();
+  if (bot.is_owner === false || relation === 'friend') return false;
+  const ownerUid = String(bot.owner_id || bot.owner_uid || '').trim();
+  if (ownerUid && ownerUid !== expectedOwnerUid) return false;
+  return ownerUid === expectedOwnerUid || bot.is_owner === true || relation === 'owner';
 }
 
 function ensureCatsDeviceId(): string {
