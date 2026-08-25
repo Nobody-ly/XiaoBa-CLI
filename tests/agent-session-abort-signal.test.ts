@@ -22,26 +22,27 @@ test('AgentSession does not implicitly sync the Bot Skill workspace after a comp
   assert.equal(scheduledSyncs, 0);
 });
 
-test('AgentSession checkpoint candidate stays disabled by default', () => {
+test('AgentSession checkpoint candidate defaults on with an 85 percent serial threshold', () => {
   const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
   delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
   try {
-    const session = new AgentSession('user:candidate-disabled', buildMockServices({}), 'catscompany');
-    assert.equal((session as any).useCheckpointCandidates, false);
-    assert.equal((session as any).checkpointCompactionCoordinator.compactionThreshold, 0.8);
+    const session = new AgentSession('user:candidate-default', buildMockServices({}), 'catscompany');
+    assert.equal((session as any).useCheckpointCandidates, true);
+    assert.equal((session as any).checkpointCompactionCoordinator.compactionThreshold, 0.85);
+    assert.equal((session as any).checkpointCandidateCoordinator.compactionThreshold, 0.6);
   } finally {
     if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
     else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
   }
 });
 
-test('AgentSession candidate mode moves serial compaction threshold to 85 percent', () => {
+test('AgentSession candidate mode supports explicit false rollback', () => {
   const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
-  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'false';
   try {
-    const session = new AgentSession('user:candidate-threshold', buildMockServices({}), 'catscompany');
-    assert.equal((session as any).checkpointCompactionCoordinator.compactionThreshold, 0.85);
-    assert.equal((session as any).checkpointCandidateCoordinator.compactionThreshold, 0.6);
+    const session = new AgentSession('user:candidate-disabled', buildMockServices({}), 'catscompany');
+    assert.equal((session as any).useCheckpointCandidates, false);
+    assert.equal((session as any).checkpointCompactionCoordinator.compactionThreshold, 0.8);
   } finally {
     if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
     else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;

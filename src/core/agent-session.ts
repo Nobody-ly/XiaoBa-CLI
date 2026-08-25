@@ -258,7 +258,7 @@ export class AgentSession {
       maxContextTokens: contextWindow.promptBudgetTokens,
       summaryContentBudget: contextWindow.summaryBudgetTokens,
     });
-    const checkpointCandidatesEnabled = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED === 'true';
+    const checkpointCandidatesEnabled = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED !== 'false';
     this.checkpointCompactionCoordinator = new CheckpointCompactionCoordinator(
       services.aiService,
       {
