@@ -26,6 +26,7 @@ const skillHubPhase1Tests = [
   'tests/bot-definition-skills.test.ts',
   'tests/bot-skill-workspace.test.ts',
   'tests/bot-skill-candidate-workspace.test.ts',
+  'tests/bot-skills-activation-state.test.ts',
   'tests/bot-skills-sync.test.ts',
   'tests/bot-skills-security.test.ts',
   'tests/execution-router-clean.test.ts',
