@@ -299,11 +299,9 @@ export class AgentSession {
         ? this.checkpointCompactionCoordinator
         : undefined,
       persistCheckpoint: messages => {
-        this.cancelCheckpointCandidate();
         if (!this.persistCheckpoint(messages)) {
           throw new Error('Failed to persist continuation checkpoint');
         }
-        this.checkpointRevision++;
       },
     });
 
