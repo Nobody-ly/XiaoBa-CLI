@@ -113,7 +113,7 @@
 - `tests/checkpoint-candidate.test.ts`：snapshot 隔离、匹配提交、revision/episode/boundary 失效、取消后迟到结果、协调器生成失败等测试。
 - candidate 可通过最小 `generate()` 适配复用现有 `CheckpointCompactionCoordinator`；生成只读取 snapshot 副本并保存候选结果，不修改父 transcript、不自动提交。
 
-第三阶段增加了 `AgentSession` 单候选槽位：仅在 `XIAOBA_CHECKPOINT_CANDIDATES_ENABLED=true` 时启用，在 60%–80% 区间启动候选，并在 interrupt/reset/clear/cleanup/exit 时取消。进入 80% 串行压缩区间时会抢占旧候选；候选有 TTL，失败、过期或边界失效后释放槽位。候选模型调用不计入主 turn 的全局 metrics。
+第三阶段增加了 `AgentSession` 单候选槽位：仅在 `XIAOBA_CHECKPOINT_CANDIDATES_ENABLED=true` 时启用，在 60%–85% 区间启动候选，并在 interrupt/reset/clear/cleanup/exit 时取消。阶段五将该模式下的主串行压缩阈值提高到精确 85%：到达高水位时先取消旧候选，再基于最新 transcript 执行原有串行压缩；默认关闭时仍保持 80% 阈值。候选有 TTL，失败、过期或边界失效后释放槽位。候选模型调用不计入主 turn 的全局 metrics。
 
 candidate CAS 已能在边界校验成功后合并 snapshot 后新增的 suffix，revision 定义为 destructive transcript replacement epoch；普通尾部追加保持同一 epoch。ready candidate 使用 prepare/persist/confirm 两阶段提交：先构造并校验完整 tool exchange，持久化成功后才替换内存历史并进入 committed；失败时保留原历史。现有串行压缩路径保持不变。
 

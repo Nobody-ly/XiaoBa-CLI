@@ -28,6 +28,20 @@ test('AgentSession checkpoint candidate stays disabled by default', () => {
   try {
     const session = new AgentSession('user:candidate-disabled', buildMockServices({}), 'catscompany');
     assert.equal((session as any).useCheckpointCandidates, false);
+    assert.equal((session as any).checkpointCompactionCoordinator.compactionThreshold, 0.8);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
+test('AgentSession candidate mode moves serial compaction threshold to 85 percent', () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  try {
+    const session = new AgentSession('user:candidate-threshold', buildMockServices({}), 'catscompany');
+    assert.equal((session as any).checkpointCompactionCoordinator.compactionThreshold, 0.85);
+    assert.equal((session as any).checkpointCandidateCoordinator.compactionThreshold, 0.6);
   } finally {
     if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
     else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
@@ -149,11 +163,52 @@ test('AgentSession cancels an existing candidate before serial compaction range'
     (session as any).startCheckpointCandidateIfEligible(0, messages);
     const candidate = (session as any).checkpointCandidate;
     await waitFor(() => Boolean(observedSignal));
-    usagePercent = 80;
+    usagePercent = 84;
+    (session as any).coordinateCheckpointCandidate(messages);
+    assert.equal(observedSignal?.aborted, false);
+    assert.equal((session as any).checkpointCandidate, candidate);
+
+    usagePercent = 85;
     (session as any).coordinateCheckpointCandidate(messages);
 
     assert.equal(observedSignal?.aborted, true);
     assert.equal(candidate.status, 'cancelled');
+    assert.equal((session as any).checkpointCandidate, null);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
+test('a candidate result that arrives after 85 percent preemption stays cancelled', async () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  try {
+    let usagePercent = 60;
+    let releaseCandidate!: () => void;
+    const gate = new Promise<void>(resolve => { releaseCandidate = resolve; });
+    const session = new AgentSession('user:candidate-late-result', buildMockServices({}), 'catscompany');
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: usagePercent,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent,
+    });
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      await gate;
+      return { compacted: true, messages: [{ role: 'user', content: 'late summary' }] };
+    };
+    const messages = [{ role: 'user', content: 'root' }];
+
+    (session as any).startCheckpointCandidateIfEligible(0, messages);
+    const candidate = (session as any).checkpointCandidate;
+    usagePercent = 85;
+    (session as any).coordinateCheckpointCandidate(messages);
+    releaseCandidate();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(candidate.status, 'cancelled');
+    assert.equal(candidate.result, undefined);
     assert.equal((session as any).checkpointCandidate, null);
   } finally {
     if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;

@@ -97,6 +97,7 @@ export const CONTEXT_COMPACTION_START_MESSAGE = '正在压缩上下文，整理�
 export const CONTEXT_COMPACTION_COMPLETE_MESSAGE = '上下文压缩完成，继续处理当前请求。';
 export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文继续处理。';
 const CHECKPOINT_CANDIDATE_TTL_MS = 5 * 60 * 1000;
+const CHECKPOINT_CANDIDATE_SERIAL_THRESHOLD_PERCENT = 85;
 
 // ─── 接口定义 ───────────────────────────────────────────
 
@@ -257,16 +258,20 @@ export class AgentSession {
       maxContextTokens: contextWindow.promptBudgetTokens,
       summaryContentBudget: contextWindow.summaryBudgetTokens,
     });
+    const checkpointCandidatesEnabled = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED === 'true';
     this.checkpointCompactionCoordinator = new CheckpointCompactionCoordinator(
       services.aiService,
-      { maxContextTokens: contextWindow.promptBudgetTokens },
+      {
+        maxContextTokens: contextWindow.promptBudgetTokens,
+        ...(checkpointCandidatesEnabled ? { compactionThreshold: 0.85 } : {}),
+      },
     );
     this.checkpointCandidateCoordinator = new CheckpointCompactionCoordinator(
       services.aiService,
       { maxContextTokens: contextWindow.promptBudgetTokens, compactionThreshold: 0.6 },
     );
     this.useCheckpointCompaction = isCheckpointCompactionEnabled();
-    this.useCheckpointCandidates = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED === 'true';
+    this.useCheckpointCandidates = checkpointCandidatesEnabled;
     this.skillRuntime = new SessionSkillRuntime(services.skillManager, key);
     this.lifecycleManager = new SessionLifecycleManager({
       sessionKey: key,
@@ -294,9 +299,11 @@ export class AgentSession {
         ? this.checkpointCompactionCoordinator
         : undefined,
       persistCheckpoint: messages => {
+        this.cancelCheckpointCandidate();
         if (!this.persistCheckpoint(messages)) {
           throw new Error('Failed to persist continuation checkpoint');
         }
+        this.checkpointRevision++;
       },
     });
 
@@ -1071,7 +1078,7 @@ export class AgentSession {
       return;
     }
     const usage = this.getContextUsageInfo(messages);
-    if (usage.usagePercent >= 80) {
+    if (this.isCheckpointCandidateSerialThresholdReached(usage)) {
       this.cancelCheckpointCandidate();
       return;
     }
@@ -1092,7 +1099,8 @@ export class AgentSession {
   ): void {
     if (!this.useCheckpointCompaction || !this.useCheckpointCandidates || this.checkpointCandidate) return;
     const usage = this.getContextUsageInfo(messages);
-    if (usage.usagePercent < 60 || usage.usagePercent >= 80) return;
+    if (usage.usagePercent < 60
+      || this.isCheckpointCandidateSerialThresholdReached(usage)) return;
 
     const durableMessages = splitDurableAndTransient(
       this.turnContextBuilder.removeTransientMessages(stripAssistantArtifactsFromMessages(messages)),
@@ -1127,6 +1135,15 @@ export class AgentSession {
       this.checkpointCandidateAbortController = null;
       if (candidate.status === 'failed') this.checkpointCandidate = null;
     });
+  }
+
+  private isCheckpointCandidateSerialThresholdReached(usage: {
+    usedTokens: number;
+    toolTokens?: number;
+    maxTokens: number;
+  }): boolean {
+    return usage.usedTokens + (usage.toolTokens || 0)
+      >= usage.maxTokens * (CHECKPOINT_CANDIDATE_SERIAL_THRESHOLD_PERCENT / 100);
   }
 
   private cancelCheckpointCandidate(): void {
@@ -1236,6 +1253,7 @@ export class AgentSession {
 
   private getContextUsageInfo(messages: Message[]): {
     usedTokens: number;
+    toolTokens?: number;
     maxTokens: number;
     usagePercent: number;
   } {
