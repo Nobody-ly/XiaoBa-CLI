@@ -156,6 +156,58 @@ test('tool exchange validation rejects a partially completed parallel suffix', (
   ]), false);
 });
 
+test('tool exchange validation accepts multiple completed exchanges across assistant turns', () => {
+  assert.equal(hasCompleteToolExchanges([
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+    },
+    { role: 'tool', content: 'read done', tool_call_id: 'call-1' },
+    { role: 'assistant', content: 'first exchange handled' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call-2', type: 'function', function: { name: 'glob', arguments: '{}' } }],
+    },
+    { role: 'tool', content: 'glob done', tool_call_id: 'call-2' },
+    { role: 'assistant', content: 'all exchanges handled' },
+  ]), true);
+});
+
+test('tool exchange validation rejects a later incomplete exchange after a completed one', () => {
+  assert.equal(hasCompleteToolExchanges([
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+    },
+    { role: 'tool', content: 'read done', tool_call_id: 'call-1' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call-2', type: 'function', function: { name: 'glob', arguments: '{}' } }],
+    },
+  ]), false);
+});
+
+test('tool exchange validation rejects duplicate call ids and late orphan results', () => {
+  const firstCall: Message = {
+    role: 'assistant',
+    content: null,
+    tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+  };
+  const duplicateCall: Message = {
+    role: 'assistant',
+    content: null,
+    tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'glob', arguments: '{}' } }],
+  };
+  const result: Message = { role: 'tool', content: 'done', tool_call_id: 'call-1' };
+
+  assert.equal(hasCompleteToolExchanges([firstCall, duplicateCall, result]), false);
+  assert.equal(hasCompleteToolExchanges([firstCall, result, result]), false);
+});
+
 test('ready candidate commits when revision and boundary still match', () => {
   const messages = [user('root'), user('before branch')];
   const candidate = new CheckpointCandidate(

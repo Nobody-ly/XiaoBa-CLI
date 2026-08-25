@@ -73,10 +73,10 @@
 1. 在 60%–70% 创建不可变 snapshot。
 2. snapshot 至少记录 `revision`、`episodeId`、durable message hash、边界位置、token 使用量和启动节点。
 3. branch 只生成候选压缩结果，不修改父 messages，不进入 synthetic observation queue。
-4. 父会话继续执行时，revision 单调递增。
+4. revision 表示父 transcript 的破坏性替换 epoch；reset、clear 或 checkpoint 提交时递增，普通尾部追加保持当前 revision，并通过 boundary hash 校验后合并 suffix。
 5. 候选完成后只能通过 compare-and-swap 提交。
 6. 提交前必须确认当前历史仍以 snapshot boundary 为前缀，且 revision、episodeId、边界 hash 一致。
-7. 发生 85% 抢占时取消候选；候选即使晚返回，也只能标记 stale，不得写回。
+7. 发生 85% 抢占、reset、clear、cleanup 或会话退出时取消候选；候选即使晚返回，也必须丢弃结果，不得写回。边界或 revision 校验失败但未主动取消时，候选才标记为 stale。
 8. 串行压缩必须基于最新快照执行。
 
 ## 主要风险
@@ -117,6 +117,6 @@
 
 candidate CAS 已能在边界校验成功后合并 snapshot 后新增的 suffix，revision 定义为 destructive transcript replacement epoch；普通尾部追加保持同一 epoch。ready candidate 使用 prepare/persist/confirm 两阶段提交：先构造并校验完整 tool exchange，持久化成功后才替换内存历史并进入 committed；失败时保留原历史。现有串行压缩路径保持不变。
 
-阶段六第一部分已通过真实 `AgentSession.handleMessage()` 流程验证：60% 启动 candidate、主 turn 继续、下一 turn 持久化提交、suffix 保留、85% 基于最新 transcript 抢占，以及迟到结果丢弃。并行 tool call 跨 snapshot boundary 在结果完整时允许提交，缺少任一结果时拒绝提交。
+阶段六第一部分已通过真实 `AgentSession.handleMessage()` 流程验证：60% 启动 candidate、主 turn 继续、下一 turn 持久化提交、suffix 保留、85% 基于最新 transcript 抢占，以及迟到结果丢弃。主动取消或父会话被清除/销毁后，candidate 保持 cancelled 且不得写回；仅 CAS 边界、revision 或 episode 校验失败时标记 stale。并行 tool call 跨 snapshot boundary 在结果完整时允许提交，缺少任一结果时拒绝提交。
 
 后续仍需补充 candidate 专用生命周期事件、独立运行指标，以及受控启用后的成本和收益评估。

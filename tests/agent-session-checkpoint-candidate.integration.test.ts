@@ -97,6 +97,53 @@ test('handleMessage preempts at 85 percent and ignores a late candidate result',
   });
 });
 
+test('cleared parent session discards a candidate result that returns after deletion', async () => {
+  await withCandidateMode(async () => {
+    let releaseCandidate!: () => void;
+    const candidateGate = new Promise<void>(resolve => { releaseCandidate = resolve; });
+    const session = createInitializedSession('user:candidate-parent-destroyed', {
+      async chatStream() {
+        return { content: 'main answer', toolCalls: [], usage };
+      },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: 60,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: 60,
+    });
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      await candidateGate;
+      return { compacted: true, messages: [{ role: 'user', content: 'discarded candidate summary' }] };
+    };
+    let persistCalls = 0;
+    (session as any).lifecycleManager.saveContext = () => {
+      persistCalls++;
+      return true;
+    };
+
+    await session.handleMessage('start candidate before parent deletion');
+    const candidate = (session as any).checkpointCandidate;
+    assert.equal(candidate.status, 'running');
+
+    assert.equal(session.clear(), true);
+    assert.equal((session as any).checkpointCandidate, null);
+    assert.deepEqual((session as any).messages, []);
+    const persistCallsAfterClear = persistCalls;
+
+    releaseCandidate();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(candidate.status, 'cancelled');
+    assert.equal(candidate.result, undefined);
+    assert.equal((session as any).checkpointCandidate, null);
+    assert.deepEqual((session as any).messages, []);
+    assert.equal(persistCalls, persistCallsAfterClear);
+  });
+});
+
 function createInitializedSession(key: string, aiService: any): AgentSession {
   const session = new AgentSession(key, buildMockServices(aiService), 'catscompany');
   (session as any).initialized = true;
