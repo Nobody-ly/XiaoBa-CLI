@@ -94,8 +94,8 @@ export class CheckpointCandidate {
     return true;
   }
 
-  /** Commit only when the parent still has the exact snapshot boundary. */
-  tryCommit(
+  /** Prepare a CAS result without marking it committed before persistence succeeds. */
+  prepareCommit(
     currentMessages: readonly Message[],
     currentRevision: number,
     currentEpisodeId?: string,
@@ -112,8 +112,24 @@ export class CheckpointCandidate {
       return this.outcome(reason);
     }
     const suffix = currentMessages.slice(this.snapshot.boundaryMessageCount);
-    this._status = 'committed';
     return this.outcome(undefined, cloneMessages([...this._result, ...suffix]));
+  }
+
+  confirmCommit(): boolean {
+    if (this._status !== 'ready') return false;
+    this._status = 'committed';
+    return true;
+  }
+
+  /** Convenience helper for callers that do not have a persistence phase. */
+  tryCommit(
+    currentMessages: readonly Message[],
+    currentRevision: number,
+    currentEpisodeId?: string,
+  ): CheckpointCandidateResult {
+    const prepared = this.prepareCommit(currentMessages, currentRevision, currentEpisodeId);
+    if (!prepared.messages || !this.confirmCommit()) return prepared;
+    return { ...prepared, status: this._status };
   }
 
   private outcome(
@@ -157,6 +173,22 @@ export function compareSnapshotBoundary(
 
 export function hashMessages(messages: readonly Message[]): string {
   return createHash('sha256').update(JSON.stringify(messages)).digest('hex');
+}
+
+export function hasCompleteToolExchanges(messages: readonly Message[]): boolean {
+  const expected = new Set<string>();
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const call of message.tool_calls || []) {
+        if (!call.id || expected.has(call.id)) return false;
+        expected.add(call.id);
+      }
+      continue;
+    }
+    if (message.role !== 'tool') continue;
+    if (!message.tool_call_id || !expected.delete(message.tool_call_id)) return false;
+  }
+  return expected.size === 0;
 }
 
 function cloneMessages(messages: readonly Message[]): Message[] {

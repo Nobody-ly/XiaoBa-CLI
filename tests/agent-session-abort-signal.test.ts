@@ -68,6 +68,65 @@ test('AgentSession keeps one candidate slot and clear cancels it', async () => {
   }
 });
 
+test('AgentSession persists a ready candidate before returning replacement messages', () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  try {
+    const session = new AgentSession('user:candidate-commit', buildMockServices({}), 'catscompany');
+    const messages = [{ role: 'user', content: 'root', __episodeId: 'episode-1' }];
+    (session as any).getContextUsageInfo = () => ({ usedTokens: 60, toolTokens: 0, maxTokens: 100, usagePercent: 60 });
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => ({
+      compacted: true,
+      messages: [{ role: 'user', content: 'summary', __episodeId: 'episode-1' }],
+    });
+    let persisted: any[] | undefined;
+    (session as any).persistCheckpoint = (candidateMessages: any[]) => {
+      persisted = candidateMessages;
+      return true;
+    };
+
+    (session as any).startCheckpointCandidateIfEligible(0, messages);
+    const candidate = (session as any).checkpointCandidate;
+    candidate.complete([{ role: 'user', content: 'summary', __episodeId: 'episode-1' }]);
+    const committed = (session as any).commitReadyCheckpointCandidate([
+      ...messages,
+      { role: 'assistant', content: 'tail', __episodeId: 'episode-2' },
+    ]);
+
+    assert.deepEqual(committed.map((message: any) => message.content), ['summary', 'tail']);
+    assert.deepEqual(persisted?.map(message => message.content), ['summary', 'tail']);
+    assert.equal(candidate.status, 'committed');
+    assert.equal((session as any).checkpointCandidate, null);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
+test('AgentSession keeps original messages when candidate persistence fails', () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  try {
+    const session = new AgentSession('user:candidate-persist-failure', buildMockServices({}), 'catscompany');
+    const messages = [{ role: 'user', content: 'root' }];
+    (session as any).getContextUsageInfo = () => ({ usedTokens: 60, toolTokens: 0, maxTokens: 100, usagePercent: 60 });
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => ({ compacted: true, messages: [] });
+    (session as any).persistCheckpoint = () => false;
+
+    (session as any).startCheckpointCandidateIfEligible(0, messages);
+    const candidate = (session as any).checkpointCandidate;
+    candidate.complete([{ role: 'user', content: 'summary' }]);
+    const committed = (session as any).commitReadyCheckpointCandidate(messages);
+
+    assert.equal(committed, null);
+    assert.equal(candidate.status, 'cancelled');
+    assert.equal((session as any).checkpointCandidate, null);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
 test('AgentSession cancels an existing candidate before serial compaction range', async () => {
   const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
   process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';

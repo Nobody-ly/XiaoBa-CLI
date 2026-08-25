@@ -66,12 +66,14 @@ import {
   CheckpointCompactionCoordinator,
   type CheckpointCompactionPhase,
   isCheckpointCompactionEnabled,
+  splitDurableAndTransient,
 } from './checkpoint-compaction';
 import { estimateToolsTokens } from './token-estimator';
 import {
   CheckpointCandidate,
   createCheckpointSnapshot,
   hashMessages,
+  hasCompleteToolExchanges,
 } from './checkpoint-candidate';
 import type { SessionRuntimeLogEvent, TurnErrorPayload } from '../utils/session-log-schema';
 
@@ -685,9 +687,11 @@ export class AgentSession {
       try {
         const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(this.messages);
         this.coordinateCheckpointCandidate(messagesBeforeCompaction);
-        this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesBeforeCompaction);
+        const candidateMessages = this.commitReadyCheckpointCandidate(messagesBeforeCompaction);
+        const messagesForCompaction = candidateMessages || messagesBeforeCompaction;
+        this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesForCompaction);
         const compactionResult = await this.compactContextIfNeeded(
-          messagesBeforeCompaction,
+          messagesForCompaction,
           'pre_turn',
           '处理前',
           this.activeAbortController.signal,
@@ -704,7 +708,7 @@ export class AgentSession {
             this.messages = compactionResult.messages;
           } else {
             Logger.warning(`[会话 ${this.key}] 处理前检查点持久化失败，保留原始上下文`);
-            this.messages = messagesBeforeCompaction;
+            this.messages = messagesForCompaction;
           }
         } else {
           this.messages = compactionResult.messages;
@@ -1027,6 +1031,39 @@ export class AgentSession {
 
   // ─── 私有方法 ──────────────────────────────────────
 
+  private commitReadyCheckpointCandidate(messages: Message[]): Message[] | null {
+    const candidate = this.checkpointCandidate;
+    if (!candidate || candidate.status !== 'ready') return null;
+    const { durable, transient } = splitDurableAndTransient(messages);
+    const boundaryMessages = durable.slice(0, candidate.snapshot.boundaryMessageCount);
+    const boundaryEpisodeId = [...boundaryMessages].reverse()
+      .find(message => message.__episodeId)?.__episodeId;
+    const prepared = candidate.prepareCommit(
+      durable,
+      this.checkpointRevision,
+      boundaryEpisodeId,
+    );
+    if (!prepared.messages) {
+      if (prepared.status === 'stale') this.cancelCheckpointCandidate();
+      return null;
+    }
+    const committedMessages = [...prepared.messages, ...transient];
+    if (!hasCompleteToolExchanges(committedMessages)) {
+      this.cancelCheckpointCandidate();
+      return null;
+    }
+    if (!this.persistCheckpoint(committedMessages)) {
+      this.cancelCheckpointCandidate();
+      Logger.warning(`[会话 ${this.key}] 异步检查点持久化失败，保留原始上下文`);
+      return null;
+    }
+    if (!candidate.confirmCommit()) return null;
+    this.checkpointRevision++;
+    this.checkpointCandidate = null;
+    this.checkpointCandidateAbortController = null;
+    return committedMessages;
+  }
+
   private coordinateCheckpointCandidate(messages: Message[]): void {
     if (!this.checkpointCandidate) return;
     if (Date.now() - this.checkpointCandidate.snapshot.startedAt >= CHECKPOINT_CANDIDATE_TTL_MS) {
@@ -1039,8 +1076,9 @@ export class AgentSession {
       return;
     }
     if (this.checkpointCandidate.status === 'ready') {
+      const durable = splitDurableAndTransient(messages).durable;
       const boundary = this.checkpointCandidate.snapshot.boundaryMessageCount;
-      const currentBoundary = messages.slice(0, boundary);
+      const currentBoundary = durable.slice(0, boundary);
       if (currentBoundary.length !== boundary
         || this.checkpointCandidate.snapshot.durableHash !== hashMessages(currentBoundary)) {
         this.cancelCheckpointCandidate();
@@ -1056,11 +1094,14 @@ export class AgentSession {
     const usage = this.getContextUsageInfo(messages);
     if (usage.usagePercent < 60 || usage.usagePercent >= 80) return;
 
-    const episodeId = [...messages].reverse().find(message => message.__episodeId)?.__episodeId;
+    const durableMessages = splitDurableAndTransient(
+      this.turnContextBuilder.removeTransientMessages(stripAssistantArtifactsFromMessages(messages)),
+    ).durable;
+    const episodeId = [...durableMessages].reverse().find(message => message.__episodeId)?.__episodeId;
     const candidate = new CheckpointCandidate(
       `checkpoint:${this.key}:${++this.checkpointCandidateSequence}`,
       createCheckpointSnapshot(
-        this.turnContextBuilder.removeTransientMessages(stripAssistantArtifactsFromMessages(messages)),
+        durableMessages,
         {
           revision: this.checkpointRevision,
           episodeId,

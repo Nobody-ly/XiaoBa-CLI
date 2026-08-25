@@ -105,7 +105,7 @@
 
 ## 当前实现边界
 
-已完成纯逻辑 checkpoint candidate、最小异步适配，以及 `AgentSession` 中默认关闭的单候选槽位。不修改运行时压缩算法、现有串行阈值、队列、持久化格式或 transcript 提交行为。
+已完成纯逻辑 checkpoint candidate、最小异步适配，以及 `AgentSession` 中默认关闭的单候选槽位和持久化提交。不修改运行时压缩算法、现有串行阈值、队列或持久化格式。
 
 已完成内容：
 
@@ -115,6 +115,6 @@
 
 第三阶段增加了 `AgentSession` 单候选槽位：仅在 `XIAOBA_CHECKPOINT_CANDIDATES_ENABLED=true` 时启用，在 60%–80% 区间启动候选，并在 interrupt/reset/clear/cleanup/exit 时取消。进入 80% 串行压缩区间时会抢占旧候选；候选有 TTL，失败、过期或边界失效后释放槽位。候选模型调用不计入主 turn 的全局 metrics。
 
-candidate CAS 已能在边界校验成功后合并 snapshot 后新增的 suffix，revision 定义为 destructive transcript replacement epoch；普通尾部追加保持同一 epoch。候选结果仍不自动提交，现有串行压缩路径保持不变。
+candidate CAS 已能在边界校验成功后合并 snapshot 后新增的 suffix，revision 定义为 destructive transcript replacement epoch；普通尾部追加保持同一 epoch。ready candidate 使用 prepare/persist/confirm 两阶段提交：先构造并校验完整 tool exchange，持久化成功后才替换内存历史并进入 committed；失败时保留原历史。现有串行压缩路径保持不变。
 
-后续仍需补充 ready candidate 的持久化提交协议、持久化失败回滚测试，以及跨 snapshot 的完整 tool-call 边界测试。
+后续仍需补充更完整的真实 turn 集成场景、跨 snapshot 的并行 tool-call 边界，以及启用后的运行指标评估。

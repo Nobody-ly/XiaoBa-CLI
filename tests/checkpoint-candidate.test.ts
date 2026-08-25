@@ -4,6 +4,7 @@ import type { Message } from '../src/types';
 import {
   CheckpointCandidate,
   createCheckpointSnapshot,
+  hasCompleteToolExchanges,
 } from '../src/core/checkpoint-candidate';
 
 function user(content: string): Message {
@@ -101,6 +102,19 @@ test('candidate generation failure enters failed state', async () => {
   assert.equal(candidate.status, 'failed');
 });
 
+test('tool exchange validation rejects incomplete and orphan results', () => {
+  const call: Message = {
+    role: 'assistant',
+    content: null,
+    tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+  };
+  const result: Message = { role: 'tool', content: 'done', tool_call_id: 'call-1' };
+
+  assert.equal(hasCompleteToolExchanges([call]), false);
+  assert.equal(hasCompleteToolExchanges([result]), false);
+  assert.equal(hasCompleteToolExchanges([call, result]), true);
+});
+
 test('ready candidate commits when revision and boundary still match', () => {
   const messages = [user('root'), user('before branch')];
   const candidate = new CheckpointCandidate(
@@ -117,6 +131,21 @@ test('ready candidate commits when revision and boundary still match', () => {
 
   assert.equal(result.status, 'committed');
   assert.deepEqual(result.messages?.map(message => message.content), ['summary', 'after branch']);
+});
+
+test('candidate remains ready until a prepared commit is confirmed', () => {
+  const messages = [user('root')];
+  const candidate = new CheckpointCandidate('candidate-prepare', createCheckpointSnapshot(messages, {
+    revision: 1,
+  }));
+  candidate.complete([user('summary')]);
+
+  const prepared = candidate.prepareCommit(messages, 1);
+
+  assert.deepEqual(prepared.messages?.map(message => message.content), ['summary']);
+  assert.equal(candidate.status, 'ready');
+  assert.equal(candidate.confirmCommit(), true);
+  assert.equal(candidate.status, 'committed');
 });
 
 test('candidate becomes stale when parent revision changes', () => {
