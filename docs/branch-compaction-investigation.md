@@ -117,4 +117,6 @@
 
 candidate CAS 已能在边界校验成功后合并 snapshot 后新增的 suffix，revision 定义为 destructive transcript replacement epoch；普通尾部追加保持同一 epoch。ready candidate 使用 prepare/persist/confirm 两阶段提交：先构造并校验完整 tool exchange，持久化成功后才替换内存历史并进入 committed；失败时保留原历史。现有串行压缩路径保持不变。
 
-后续仍需补充更完整的真实 turn 集成场景、跨 snapshot 的并行 tool-call 边界，以及启用后的运行指标评估。
+阶段六第一部分已通过真实 `AgentSession.handleMessage()` 流程验证：60% 启动 candidate、主 turn 继续、下一 turn 持久化提交、suffix 保留、85% 基于最新 transcript 抢占，以及迟到结果丢弃。并行 tool call 跨 snapshot boundary 在结果完整时允许提交，缺少任一结果时拒绝提交。
+
+后续仍需补充 candidate 专用生命周期事件、独立运行指标，以及受控启用后的成本和收益评估。

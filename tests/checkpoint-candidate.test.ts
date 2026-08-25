@@ -115,6 +115,47 @@ test('tool exchange validation rejects incomplete and orphan results', () => {
   assert.equal(hasCompleteToolExchanges([call, result]), true);
 });
 
+test('tool exchange validation accepts parallel calls split across the snapshot suffix', () => {
+  const calls: Message = {
+    role: 'assistant',
+    content: null,
+    tool_calls: [
+      { id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } },
+      { id: 'call-2', type: 'function', function: { name: 'glob', arguments: '{}' } },
+    ],
+  };
+  const firstResult: Message = { role: 'tool', content: 'read done', tool_call_id: 'call-1' };
+  const secondResult: Message = { role: 'tool', content: 'glob done', tool_call_id: 'call-2' };
+  const candidate = new CheckpointCandidate('parallel-tools', createCheckpointSnapshot(
+    [user('root'), calls],
+    { revision: 1 },
+  ));
+  candidate.complete([user('summary with pending tool boundary'), calls]);
+
+  const prepared = candidate.prepareCommit(
+    [user('root'), calls, firstResult, secondResult],
+    1,
+  );
+
+  assert.ok(prepared.messages);
+  assert.equal(hasCompleteToolExchanges(prepared.messages!), true);
+});
+
+test('tool exchange validation rejects a partially completed parallel suffix', () => {
+  const calls: Message = {
+    role: 'assistant',
+    content: null,
+    tool_calls: [
+      { id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } },
+      { id: 'call-2', type: 'function', function: { name: 'glob', arguments: '{}' } },
+    ],
+  };
+  assert.equal(hasCompleteToolExchanges([
+    calls,
+    { role: 'tool', content: 'read done', tool_call_id: 'call-1' },
+  ]), false);
+});
+
 test('ready candidate commits when revision and boundary still match', () => {
   const messages = [user('root'), user('before branch')];
   const candidate = new CheckpointCandidate(
