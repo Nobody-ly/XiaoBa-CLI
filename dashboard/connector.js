@@ -265,6 +265,7 @@
     $('progress-list').hidden = view.key !== 'connecting';
     $('error-card').hidden = view.key !== 'error';
     $('webapp-button').hidden = view.key !== 'ready';
+    $('logout-button').hidden = view.key === 'auth' || (!cats.connected && !cats.tokenPresent);
     $('retry-button').hidden = view.key !== 'error';
     $('close-hint').hidden = view.key !== 'ready';
 
@@ -326,12 +327,14 @@
   }
 
   function renderError(view) {
+    const title = view.title || '自动连接未完成';
+    const detail = humanError(view.error || '请重新连接，或打开本地管理查看日志。');
     setText('status-label', 'Connector 需要处理');
     setText('hero-title', '连接未完成');
     setText('hero-copy', '本地资料没有被删除。处理下面的问题后可以继续重试。');
-    setText('error-title', view.title || '自动连接未完成');
-    setText('error-copy', view.error || '请重新连接，或展开高级诊断查看日志。');
-    setNotice(view.title || 'Connector 连接异常', 'error');
+    setText('error-title', title);
+    setText('error-copy', detail);
+    setNotice(`${title}：${detail}`, 'error');
   }
 
   function markStep(name, status) {
@@ -1148,6 +1151,7 @@
     const message = String(error?.message || error || '未知错误');
     if (/password mismatch/i.test(message)) return '账号或密码错误，请重试。';
     if (/user not found/i.test(message)) return '没有找到这个 CatsCo 账号。';
+    if (/not your bot/i.test(message)) return '当前账号无权使用原 Agent（not your bot），请切换到当前账号拥有的 Agent。';
     if (/failed to fetch|network/i.test(message)) return '暂时无法连接 CatsCo，请检查网络。';
     return message;
   }

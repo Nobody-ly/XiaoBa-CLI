@@ -35,8 +35,12 @@ test('Connector lets an authenticated user switch the Agent bound to this comput
   assert.doesNotMatch(script, /\/cats\/create-bot/);
   assert.match(styles, /\.agent-switch-dialog/);
   assert.match(html, /id="logout-dialog"/);
+  assert.match(html, /hero-actions[\s\S]*id="webapp-button"[\s\S]*id="logout-button"/);
+  assert.doesNotMatch(html, /class="danger-zone"/);
   assert.doesNotMatch(script, /window\.confirm\(/);
   assert.match(script, /login-account'\)\?\.focus/);
+  assert.match(script, /当前账号无权使用原 Agent（not your bot）/);
+  assert.match(script, /setNotice\(`\$\{title\}：\$\{detail\}`/);
 });
 
 test('Connector local management restores channels and gives logs a full workspace', () => {
@@ -390,6 +394,32 @@ test('loopback bootstrap requests include the configured Dashboard API key', asy
     await controller.run('startup');
     assert.equal(headers.length, 1);
     assert.equal(headers[0].get('X-API-Key'), 'dashboard-test-key');
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test('account or Agent transition clears a stale bootstrap error immediately', async () => {
+  const runtimeRoot = createRuntimeConfig('catsco-connector-transition-', {
+    version: 1,
+    account: { token: 'test-user-token', uid: 'usr-test' },
+    preferences: { autoConnect: true },
+  });
+  try {
+    const controller = new CatsConnectorAutoStart({
+      port: 3800,
+      runtimeRoot,
+      fetchImpl: async () => jsonResponse({ error: 'not your bot' }, 403),
+    });
+    const failed = await controller.run('login');
+    assert.equal(failed.stage, 'error');
+    assert.equal(failed.error, 'not your bot');
+
+    const transition = controller.invalidateAndSchedule('switch-bot', 10_000, { force: true });
+    assert.equal(transition.stage, 'connecting');
+    assert.equal(transition.trigger, 'switch-bot');
+    assert.equal(transition.error, undefined);
+    controller.stop();
   } finally {
     rmSync(runtimeRoot, { recursive: true, force: true });
   }
