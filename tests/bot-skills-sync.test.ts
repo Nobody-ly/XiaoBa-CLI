@@ -1,5 +1,6 @@
 import { afterEach, describe, test } from 'node:test';
 import * as assert from 'node:assert';
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -101,6 +102,53 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     );
     assert.equal(readSkillHubInstallMarker(path.join(fixture.skillsRoot, 'cloud-b'))?.skillId, external.reference.skillId);
     assert.equal(new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.definitionRevision, 2);
+  });
+
+  test('restores all cloud Skills when a legacy preferred directory collides with a newer package', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'shared-name', 'shared-name', 'legacy private package');
+    await fixture.sync();
+
+    const privateReference = fixture.cloud.skills[0];
+    const privatePackage = fixture.packages.get(refKey(privateReference));
+    assert.ok(privatePackage);
+    const publicPackage = createPackage(
+      roots,
+      'published-copy',
+      'shared-name',
+      'new public package',
+    );
+    publicPackage.source = 'public';
+    publicPackage.reference = { skillId: 'alice/shared-name', version: '1.0.0' };
+    fixture.packages.set(refKey(publicPackage.reference), publicPackage);
+    fixture.cloud = {
+      revision: fixture.cloud.revision + 1,
+      skills: [definitionRef(publicPackage), privateReference],
+    };
+
+    const restored = await fixture.sync();
+
+    assert.equal(restored.direction, 'cloud_to_local');
+    assert.equal(scanBotSkillWorkspace(fixture.skillsRoot).length, 2);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'shared-name', 'SKILL.md'), 'utf8'),
+      /new public package/,
+    );
+    const privateFallback = `shared-name-${crypto.createHash('sha256')
+      .update(privatePackage.localSkillId, 'utf8')
+      .digest('hex')
+      .slice(0, 12)}`;
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, privateFallback, 'SKILL.md'), 'utf8'),
+      /legacy private package/,
+    );
+    assert.deepEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills
+        .map(entry => entry.reference.skillId)
+        .sort(),
+      fixture.cloud.skills.map(entry => entry.skillId).sort(),
+    );
+    assert.equal((await fixture.sync()).direction, 'none');
   });
 
   test('keeps a public reference after replacing the private sync copy of a local Skill', async () => {

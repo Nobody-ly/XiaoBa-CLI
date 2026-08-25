@@ -23,6 +23,13 @@ export class BotSkillPackageValidationError extends Error {
 
 const BOT_SKILL_LOCAL_MARKER_SCHEMA = 'xiaoba.bot-skill-local.v1';
 const SKIP_DIRECTORIES = new Set(['.git', 'node_modules']);
+const EPHEMERAL_DIRECTORIES = new Set([
+  '.cache',
+  '.mypy_cache',
+  '.pytest_cache',
+  '.ruff_cache',
+  '__pycache__',
+]);
 const SKIP_FILES = new Set([
   BOT_SKILL_LOCAL_MARKER_FILE,
   '.xiaoba-skillhub-install.json',
@@ -90,7 +97,13 @@ export function scanBotSkillWorkspace(
   const localSkillIds = new Set<string>();
   const visit = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith('.')) continue;
+      if (
+        !entry.isDirectory()
+        || entry.isSymbolicLink()
+        || entry.name.startsWith('.')
+        || SKIP_DIRECTORIES.has(entry.name)
+        || isEphemeralSkillDirectory(entry.name)
+      ) continue;
       const skillDir = path.join(current, entry.name);
       assertRealPathContained(realRoot, skillDir);
       if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
@@ -115,7 +128,7 @@ export function scanBotSkillWorkspace(
             path: skillDir,
             error,
           });
-          if (!SKIP_DIRECTORIES.has(entry.name)) visit(skillDir);
+          visit(skillDir);
           continue;
         }
         if (localSkillIds.has(manifestEntry.localSkillId)) {
@@ -124,7 +137,7 @@ export function scanBotSkillWorkspace(
         localSkillIds.add(manifestEntry.localSkillId);
         entries.push(manifestEntry);
       }
-      if (!SKIP_DIRECTORIES.has(entry.name)) visit(skillDir);
+      visit(skillDir);
     }
   };
   visit(root);
@@ -266,6 +279,7 @@ export function collectBotSkillPackageFiles(root: string): BotSkillPackageFile[]
       if (entry.isDirectory()) {
         if (
           !SKIP_DIRECTORIES.has(entry.name)
+          && !isEphemeralSkillDirectory(entry.name)
           && !fs.existsSync(path.join(fullPath, 'SKILL.md'))
         ) {
           visit(fullPath);
@@ -298,6 +312,15 @@ export function collectBotSkillPackageFiles(root: string): BotSkillPackageFile[]
   };
   visit(root);
   return files.sort((left, right) => compareText(left.path, right.path));
+}
+
+/**
+ * Runtime caches belong to the live Skill workspace, but not to the portable
+ * Skill package. They remain on disk for the running Skill and are excluded
+ * only from hashing, BotDefinition sync, and SkillHub publication.
+ */
+export function isEphemeralSkillDirectory(directoryName: string): boolean {
+  return EPHEMERAL_DIRECTORIES.has(directoryName);
 }
 
 function rejectSensitiveMaterial(filePath: string, bytes: Buffer): void {
