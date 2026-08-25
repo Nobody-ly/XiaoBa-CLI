@@ -166,6 +166,26 @@ test('restore checkpoint explicitly marks runtime state for re-verification', as
   assert.match(prompt, /processes, ports, files, devices/i);
 });
 
+test('checkpoint generation can opt out of global metrics recording', async () => {
+  const { service } = createService(() => 'candidate summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 200,
+    compactionThreshold: 0.5,
+  });
+  const { Metrics } = await import('../src/utils/metrics');
+  Metrics.reset();
+
+  await coordinator.compactIfNeeded([
+    { role: 'user', content: largeText('candidate source') },
+  ], {
+    sessionKey: 'candidate-metrics',
+    phase: 'pre_turn',
+    recordMetrics: false,
+  });
+
+  assert.equal(Metrics.getSummary().aiCalls, 0);
+});
+
 test('checkpoint failure preserves the original transcript for emergency fallback', async () => {
   const service = {
     chatStream: async () => {

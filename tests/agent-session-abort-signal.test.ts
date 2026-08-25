@@ -68,6 +68,40 @@ test('AgentSession keeps one candidate slot and clear cancels it', async () => {
   }
 });
 
+test('AgentSession cancels an existing candidate before serial compaction range', async () => {
+  const previous = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'true';
+  try {
+    let usagePercent = 60;
+    let observedSignal: AbortSignal | undefined;
+    const session = new AgentSession('user:candidate-preempt', buildMockServices({}), 'catscompany');
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: usagePercent,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent,
+    });
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async (_messages: any[], options: any) => {
+      observedSignal = options.signal;
+      return await new Promise(() => {});
+    };
+
+    const messages = [{ role: 'user', content: 'root' }];
+    (session as any).startCheckpointCandidateIfEligible(0, messages);
+    const candidate = (session as any).checkpointCandidate;
+    await waitFor(() => Boolean(observedSignal));
+    usagePercent = 80;
+    (session as any).coordinateCheckpointCandidate(messages);
+
+    assert.equal(observedSignal?.aborted, true);
+    assert.equal(candidate.status, 'cancelled');
+    assert.equal((session as any).checkpointCandidate, null);
+  } finally {
+    if (previous === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previous;
+  }
+});
+
 test('AgentSession requestInterrupt aborts an in-flight model request', async () => {
   let observedSignal: AbortSignal | undefined;
 

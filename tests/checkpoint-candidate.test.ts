@@ -37,6 +37,29 @@ test('snapshot freezes nested message structures', () => {
   assert.equal((snapshot.messages[0].content as any)[0].source.data, 'abc');
 });
 
+test('snapshot isolates provider replay and remote watermark metadata', () => {
+  const providerBlock: Record<string, unknown> = { type: 'reasoning', nested: { value: 'original' } };
+  const messages: Message[] = [{
+    role: 'assistant',
+    content: 'result',
+    providerContent: [providerBlock as any],
+    providerState: {
+      schema: 'xiaoba.provider_state.v1',
+      apiType: 'openai-responses',
+      model: 'test',
+      endpointFingerprint: 'endpoint',
+    },
+    __remoteContextWatermarks: { cloud: 7 },
+  }];
+  const snapshot = createCheckpointSnapshot(messages, { revision: 1 });
+
+  (providerBlock.nested as any).value = 'changed';
+  messages[0].__remoteContextWatermarks!.cloud = 9;
+
+  assert.equal(((snapshot.messages[0].providerContent![0] as any).nested as any).value, 'original');
+  assert.equal(snapshot.messages[0].__remoteContextWatermarks!.cloud, 7);
+});
+
 test('candidate generates through the coordinator without mutating the snapshot', async () => {
   const source = [user('root')];
   const candidate = new CheckpointCandidate('candidate-generate', createCheckpointSnapshot(source, {
@@ -84,7 +107,7 @@ test('ready candidate commits when revision and boundary still match', () => {
     'candidate-1',
     createCheckpointSnapshot(messages, { revision: 4, episodeId: 'episode-1' }),
   );
-  assert.equal(candidate.complete([user('summary'), user('after branch')]), true);
+  assert.equal(candidate.complete([user('summary')]), true);
 
   const result = candidate.tryCommit(
     [...messages, user('after branch')],

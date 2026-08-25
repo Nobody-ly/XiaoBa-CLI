@@ -39,6 +39,7 @@ export interface CheckpointCompactionRequest {
   episodeId?: string;
   toolTokens?: number;
   signal?: AbortSignal;
+  recordMetrics?: boolean;
   onStatus?: (event: CheckpointCompactionStatusEvent) => void | Promise<void>;
 }
 
@@ -236,6 +237,7 @@ export class CheckpointCompactionCoordinator {
       request.phase,
       request.sessionKey,
       request.signal,
+      request.recordMetrics,
     );
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
@@ -262,6 +264,7 @@ export class CheckpointCompactionCoordinator {
     phase: CheckpointCompactionPhase,
     sessionKey: string,
     signal?: AbortSignal,
+    recordMetrics = true,
   ): Promise<string> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
@@ -292,7 +295,7 @@ export class CheckpointCompactionCoordinator {
             },
           },
         );
-        if (response.usage) {
+        if (response.usage && recordMetrics) {
           Metrics.recordAICall('stream', response.usage);
         }
         const summary = (streamed || response.content || '').trim();

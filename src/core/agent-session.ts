@@ -71,6 +71,7 @@ import { estimateToolsTokens } from './token-estimator';
 import {
   CheckpointCandidate,
   createCheckpointSnapshot,
+  hashMessages,
 } from './checkpoint-candidate';
 import type { SessionRuntimeLogEvent, TurnErrorPayload } from '../utils/session-log-schema';
 
@@ -93,6 +94,7 @@ export const MODEL_REQUEST_FAILED_MESSAGE = '模型服务暂时不稳定，本�
 export const CONTEXT_COMPACTION_START_MESSAGE = '正在压缩上下文，整理较早的对话内容。';
 export const CONTEXT_COMPACTION_COMPLETE_MESSAGE = '上下文压缩完成，继续处理当前请求。';
 export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文继续处理。';
+const CHECKPOINT_CANDIDATE_TTL_MS = 5 * 60 * 1000;
 
 // ─── 接口定义 ───────────────────────────────────────────
 
@@ -223,6 +225,8 @@ export class AgentSession {
   private readonly useCheckpointCandidates: boolean;
   private checkpointCandidate: CheckpointCandidate | null = null;
   private checkpointCandidateAbortController: AbortController | null = null;
+  private checkpointCandidateSequence = 0;
+  /** Epoch for destructive transcript replacement; tail appends keep the same epoch. */
   private checkpointRevision = 0;
   private skillRuntime: SessionSkillRuntime;
   private runtimeFeedbackInbox = new RuntimeFeedbackInbox();
@@ -680,6 +684,7 @@ export class AgentSession {
 
       try {
         const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(this.messages);
+        this.coordinateCheckpointCandidate(messagesBeforeCompaction);
         this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesBeforeCompaction);
         const compactionResult = await this.compactContextIfNeeded(
           messagesBeforeCompaction,
@@ -695,6 +700,7 @@ export class AgentSession {
         }
         if (compactionResult.compacted) {
           if (this.persistCheckpoint(compactionResult.messages)) {
+            this.checkpointRevision++;
             this.messages = compactionResult.messages;
           } else {
             Logger.warning(`[会话 ${this.key}] 处理前检查点持久化失败，保留原始上下文`);
@@ -925,6 +931,7 @@ export class AgentSession {
   /** 重置会话状态（仅清内存，保留历史文件） */
   reset(): void {
     this.lifecycleGeneration++;
+    this.checkpointRevision++;
     this.cancelCheckpointCandidate();
     this.planRuntime.clear();
     this.stopSubAgents('父会话 reset');
@@ -940,6 +947,7 @@ export class AgentSession {
   /** 清空历史（同时删除文件），返回本地文件与状态是否都删除成功。 */
   clear(): boolean {
     this.lifecycleGeneration++;
+    this.checkpointRevision++;
     this.cancelCheckpointCandidate();
     this.planRuntime.clear();
     this.stopSubAgents('父会话 clear');
@@ -1019,6 +1027,27 @@ export class AgentSession {
 
   // ─── 私有方法 ──────────────────────────────────────
 
+  private coordinateCheckpointCandidate(messages: Message[]): void {
+    if (!this.checkpointCandidate) return;
+    if (Date.now() - this.checkpointCandidate.snapshot.startedAt >= CHECKPOINT_CANDIDATE_TTL_MS) {
+      this.cancelCheckpointCandidate();
+      return;
+    }
+    const usage = this.getContextUsageInfo(messages);
+    if (usage.usagePercent >= 80) {
+      this.cancelCheckpointCandidate();
+      return;
+    }
+    if (this.checkpointCandidate.status === 'ready') {
+      const boundary = this.checkpointCandidate.snapshot.boundaryMessageCount;
+      const currentBoundary = messages.slice(0, boundary);
+      if (currentBoundary.length !== boundary
+        || this.checkpointCandidate.snapshot.durableHash !== hashMessages(currentBoundary)) {
+        this.cancelCheckpointCandidate();
+      }
+    }
+  }
+
   private startCheckpointCandidateIfEligible(
     lifecycleGeneration: number,
     messages: Message[] = this.messages,
@@ -1029,11 +1058,11 @@ export class AgentSession {
 
     const episodeId = [...messages].reverse().find(message => message.__episodeId)?.__episodeId;
     const candidate = new CheckpointCandidate(
-      `checkpoint:${this.key}:${this.checkpointRevision + 1}`,
+      `checkpoint:${this.key}:${++this.checkpointCandidateSequence}`,
       createCheckpointSnapshot(
         this.turnContextBuilder.removeTransientMessages(stripAssistantArtifactsFromMessages(messages)),
         {
-          revision: ++this.checkpointRevision,
+          revision: this.checkpointRevision,
           episodeId,
         },
       ),
@@ -1048,6 +1077,7 @@ export class AgentSession {
       episodeId,
       toolTokens: this.getToolDefinitionTokens(),
       signal: abortController.signal,
+      recordMetrics: false,
     }).finally(() => {
       if (lifecycleGeneration !== this.lifecycleGeneration
         || this.checkpointCandidate !== candidate) {

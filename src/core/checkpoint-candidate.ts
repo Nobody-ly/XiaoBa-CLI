@@ -111,8 +111,9 @@ export class CheckpointCandidate {
       this._status = 'stale';
       return this.outcome(reason);
     }
+    const suffix = currentMessages.slice(this.snapshot.boundaryMessageCount);
     this._status = 'committed';
-    return this.outcome(undefined, cloneMessages(this._result));
+    return this.outcome(undefined, cloneMessages([...this._result, ...suffix]));
   }
 
   private outcome(
@@ -170,6 +171,13 @@ function cloneMessages(messages: readonly Message[]): Message[] {
     ...(message.tool_calls ? {
       tool_calls: message.tool_calls.map(call => ({ ...call, function: { ...call.function } })),
     } : {}),
+    ...(message.providerContent ? {
+      providerContent: message.providerContent.map(block => structuredClone(block)),
+    } : {}),
+    ...(message.providerState ? { providerState: { ...message.providerState } } : {}),
+    ...(message.__remoteContextWatermarks ? {
+      __remoteContextWatermarks: { ...message.__remoteContextWatermarks },
+    } : {}),
   }));
 }
 
@@ -189,7 +197,19 @@ function freezeMessages(messages: Message[]): readonly Message[] {
       }
       Object.freeze(message.tool_calls);
     }
+    if (message.providerContent) {
+      for (const block of message.providerContent) deepFreeze(block);
+      Object.freeze(message.providerContent);
+    }
+    if (message.providerState) Object.freeze(message.providerState);
+    if (message.__remoteContextWatermarks) Object.freeze(message.__remoteContextWatermarks);
     Object.freeze(message);
   }
   return Object.freeze(messages);
+}
+
+function deepFreeze(value: unknown): void {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+  for (const child of Object.values(value)) deepFreeze(child);
+  Object.freeze(value);
 }

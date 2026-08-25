@@ -99,8 +99,8 @@
 ## 当前验证状态
 
 - 已阅读 branch、observation、controller、checkpoint、runner 和 agent session 相关实现及文档。
-- 当前测试脚本和 `package.json` 已声明 `glob` 依赖，但本工作区的 `node_modules` 未安装该依赖；运行 `npm test` 时仍会在测试发现阶段报 `ERR_MODULE_NOT_FOUND`，因此本轮尚未进入测试断言阶段。该问题属于依赖安装状态，不是测试脚本缺少依赖声明。
-- 当前 XiaoBa-CLI 工作区唯一已知未提交文件是本调查文档 `docs/branch-compaction-investigation.md`；未将其它仓库工作区状态作为本项目事实。
+- 本工作区依赖已经安装；candidate、AgentSession 生命周期、checkpoint coordinator 和 runner 的目标回归测试已进入断言并通过。
+- 当前工作区状态以 `git status` 为准；未将其它仓库工作区状态作为本项目事实。
 - 本轮未执行远程 fetch。因此本记录不宣称仓库已更新到最新版本。
 
 ## 当前实现边界
@@ -113,6 +113,8 @@
 - `tests/checkpoint-candidate.test.ts`：snapshot 隔离、匹配提交、revision/episode/boundary 失效、取消后迟到结果、协调器生成失败等测试。
 - candidate 可通过最小 `generate()` 适配复用现有 `CheckpointCompactionCoordinator`；生成只读取 snapshot 副本并保存候选结果，不修改父 transcript、不自动提交。
 
-第三阶段增加了 `AgentSession` 单候选槽位：仅在 `XIAOBA_CHECKPOINT_CANDIDATES_ENABLED=true` 时启用，在 60%–80% 区间启动候选，并在 interrupt/reset/clear/cleanup/exit 时取消。候选结果仍不自动提交，现有 80% 串行压缩路径保持不变。
+第三阶段增加了 `AgentSession` 单候选槽位：仅在 `XIAOBA_CHECKPOINT_CANDIDATES_ENABLED=true` 时启用，在 60%–80% 区间启动候选，并在 interrupt/reset/clear/cleanup/exit 时取消。进入 80% 串行压缩区间时会抢占旧候选；候选有 TTL，失败、过期或边界失效后释放槽位。候选模型调用不计入主 turn 的全局 metrics。
 
-后续仍需补充 ready candidate 的 CAS 合并与持久化协议、85% 抢占协调、持久化失败回滚测试，以及完整 tool-call 边界测试。
+candidate CAS 已能在边界校验成功后合并 snapshot 后新增的 suffix，revision 定义为 destructive transcript replacement epoch；普通尾部追加保持同一 epoch。候选结果仍不自动提交，现有串行压缩路径保持不变。
+
+后续仍需补充 ready candidate 的持久化提交协议、持久化失败回滚测试，以及跨 snapshot 的完整 tool-call 边界测试。
