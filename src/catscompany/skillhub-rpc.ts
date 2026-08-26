@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createCatsCoLocalConfigService } from './local-config';
@@ -28,7 +29,9 @@ export const SKILLHUB_THIN_RPC_TOOLS = {
   switchBot: 'skillhub.localBot.switch',
 } as const;
 
-const MAX_SKILLS = 200;
+const DEFAULT_WORKSPACE_PAGE_SIZE = 200;
+const MAX_WORKSPACE_PAGE_SIZE = 200;
+const MAX_WORKSPACE_OFFSET = 1_000_000;
 const MAX_NAME_LENGTH = 160;
 const MAX_DESCRIPTION_LENGTH = 1_000;
 const MAX_RELATIVE_PATH_LENGTH = 500;
@@ -153,7 +156,7 @@ export class SkillHubThinRpcHandler {
 
     switch (request.tool_name) {
       case SKILLHUB_THIN_RPC_TOOLS.workspace:
-        return this.readWorkspace(botUid, request);
+        return this.readWorkspace(botUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.share:
         return this.shareSkill(botUid, scope.ownerUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.finalize:
@@ -167,8 +170,18 @@ export class SkillHubThinRpcHandler {
 
   private async readWorkspace(
     botUid: string,
+    payload: Record<string, unknown>,
     request: CatsThinToolRpcMessage,
   ): Promise<Record<string, unknown>> {
+    const pageOffset = optionalInteger(payload.offset, 'offset', 0, 0, MAX_WORKSPACE_OFFSET);
+    const pageLimit = optionalInteger(
+      payload.limit,
+      'limit',
+      DEFAULT_WORKSPACE_PAGE_SIZE,
+      1,
+      MAX_WORKSPACE_PAGE_SIZE,
+    );
+    const expectedRevision = optionalContentHash(payload.workspace_revision, 'workspace_revision');
     return withCurrentBotSkillWorkspaceWrite((context) => {
       this.assertOperational(request);
       this.assertRequestScope(request, botUid, true);
@@ -191,8 +204,7 @@ export class SkillHubThinRpcHandler {
       const listed = [
         ...entries.map(entry => ({ kind: 'valid' as const, entry })),
         ...rejected.map(entry => ({ kind: 'rejected' as const, entry })),
-      ].sort((left, right) => compareText(left.entry.localSkillId, right.entry.localSkillId))
-        .slice(0, MAX_SKILLS);
+      ].sort((left, right) => compareText(left.entry.localSkillId, right.entry.localSkillId));
       const skills = listed.map((item) => {
         if (item.kind === 'valid') {
           const { entry } = item;
@@ -223,12 +235,33 @@ export class SkillHubThinRpcHandler {
           skill_hub: presentation.metadata || {},
         };
       });
+      const workspaceRevision = createHash('sha256')
+        .update(stableSerialize(listed.map((item, index) => ({
+          skill: skills[index],
+          package_content_hash: item.kind === 'valid' ? item.entry.contentHash : '',
+        }))))
+        .digest('hex');
+      if (expectedRevision && expectedRevision !== workspaceRevision) {
+        throw new SkillHubThinRpcError(
+          'WORKSPACE_CHANGED',
+          'The local Skill workspace changed while its pages were being read. Restart the listing.',
+        );
+      }
+      const pageSkills = skills.slice(pageOffset, pageOffset + pageLimit);
+      const nextOffset = pageOffset + pageSkills.length;
+      const hasMore = nextOffset < skills.length;
       return {
         schema: 'xiaoba.skillhub.local_workspace.v1',
         bot_uid: botUid,
         active_bot_uid: context.activeBotId,
         skills_path: fs.realpathSync(context.skillsRoot),
-        skills,
+        workspace_revision: workspaceRevision,
+        total_skills: skills.length,
+        page_offset: pageOffset,
+        page_limit: pageLimit,
+        next_offset: hasMore ? nextOffset : null,
+        truncated: hasMore,
+        skills: pageSkills,
       };
     }, { runtimeRoot: this.runtimeRoot });
   }
@@ -661,6 +694,34 @@ function requiredText(value: unknown, field: string, maxLength: number): string 
     throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
   }
   return text;
+}
+
+function optionalInteger(
+  value: unknown,
+  field: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value.trim())
+      ? Number(value.trim())
+      : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
+  }
+  return parsed;
+}
+
+function optionalContentHash(value: unknown, field: string): string {
+  if (value === undefined || value === null || value === '') return '';
+  const normalized = String(value).trim().toLowerCase();
+  if (!CONTENT_HASH_PATTERN.test(normalized)) {
+    throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
+  }
+  return normalized;
 }
 
 function limitText(value: string, maxLength: number): string {

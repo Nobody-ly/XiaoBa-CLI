@@ -112,6 +112,91 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(skills[0].relative_path, 'local-demo');
     assert.equal(Object.prototype.hasOwnProperty.call(skills[0], 'path'), false);
     assert.equal(JSON.stringify(result).includes('# Local Demo'), false);
+    assert.match(String(result.workspace_revision), /^[0-9a-f]{64}$/);
+    assert.equal(result.total_skills, 1);
+    assert.equal(result.page_offset, 0);
+    assert.equal(result.page_limit, 200);
+    assert.equal(result.next_offset, null);
+    assert.equal(result.truncated, false);
+  });
+
+  test('paginates more than 200 workspace Skills without hiding the remainder', async () => {
+    const skillsRoot = path.join(runtimeRoot, 'skills');
+    for (let index = 0; index < 205; index += 1) {
+      const name = `bulk-${String(index).padStart(3, '0')}`;
+      const skillRoot = path.join(skillsRoot, name);
+      fs.mkdirSync(skillRoot, { recursive: true });
+      fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+        '---',
+        `name: ${name}`,
+        `description: Pagination fixture ${index}`,
+        '---',
+        '',
+      ].join('\n'));
+    }
+
+    const first = await handler.execute(request({
+      request_id: 'workspace-page-1',
+      payload: { bot_uid: '42', limit: 75 },
+    }));
+    assert.equal((first.skills as unknown[]).length, 75);
+    assert.equal(first.total_skills, 206);
+    assert.equal(first.page_offset, 0);
+    assert.equal(first.next_offset, 75);
+    assert.equal(first.truncated, true);
+
+    const second = await handler.execute(request({
+      request_id: 'workspace-page-2',
+      payload: {
+        bot_uid: '42',
+        offset: first.next_offset,
+        limit: 200,
+        workspace_revision: first.workspace_revision,
+      },
+    }));
+    assert.equal(second.workspace_revision, first.workspace_revision);
+    assert.equal((second.skills as unknown[]).length, 131);
+    assert.equal(second.page_offset, 75);
+    assert.equal(second.next_offset, null);
+    assert.equal(second.truncated, false);
+
+    const combined = [
+      ...(first.skills as Array<Record<string, unknown>>),
+      ...(second.skills as Array<Record<string, unknown>>),
+    ];
+    assert.equal(combined.length, 206);
+    assert.equal(new Set(combined.map(skill => skill.local_skill_id)).size, 206);
+    assert.deepEqual(
+      combined.map(skill => String(skill.local_skill_id)),
+      [...combined.map(skill => String(skill.local_skill_id))].sort(),
+    );
+  });
+
+  test('rejects a stale workspace revision and invalid pagination input', async () => {
+    const first = await handler.execute(request({ request_id: 'workspace-revision-before-edit' }));
+    fs.appendFileSync(path.join(runtimeRoot, 'skills', 'local-demo', 'SKILL.md'), '\nUpdated after page one.\n');
+
+    await assert.rejects(
+      handler.execute(request({
+        request_id: 'workspace-revision-after-edit',
+        payload: {
+          bot_uid: '42',
+          offset: 0,
+          workspace_revision: first.workspace_revision,
+        },
+      })),
+      (error: unknown) => error instanceof SkillHubThinRpcError && error.code === 'WORKSPACE_CHANGED',
+    );
+    for (const [requestID, payload] of [
+      ['workspace-invalid-limit', { bot_uid: '42', limit: 201 }],
+      ['workspace-invalid-offset', { bot_uid: '42', offset: -1 }],
+      ['workspace-invalid-revision', { bot_uid: '42', workspace_revision: 'not-a-hash' }],
+    ] as const) {
+      await assert.rejects(
+        handler.execute(request({ request_id: requestID, payload })),
+        (error: unknown) => error instanceof SkillHubThinRpcError && error.code === 'INVALID_REQUEST',
+      );
+    }
   });
 
   test('deletes only the exact local Skill selected by local_skill_id', async () => {
