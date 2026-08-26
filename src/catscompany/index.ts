@@ -1684,7 +1684,12 @@ export class CatsCompanyBot {
           thinToolRpc: this.maybeBuildThinToolRpcTransport(),
           localFileGrants,
           runtimeFeedback,
-          pendingUserInputProvider: () => this.consumeQueuedUserInput(key, msg.executionScope, entryClearGeneration),
+          pendingUserInputProvider: () => this.consumeQueuedUserInput(
+            key,
+            msg.executionScope,
+            entryClearGeneration,
+            msg.artifactTaskRef,
+          ),
           callbacks: this.buildSessionCallbacks(msg.topic, {
             sessionKey: key,
             senderId: msg.senderId,
@@ -3002,7 +3007,12 @@ export class CatsCompanyBot {
             thinToolRpc: this.maybeBuildThinToolRpcTransport(),
             runtimeFeedback: msg.runtimeFeedback,
             localFileGrants: msg.localFileGrants,
-            pendingUserInputProvider: () => this.consumeQueuedUserInput(sessionKey, msg.executionScope, clearGeneration),
+            pendingUserInputProvider: () => this.consumeQueuedUserInput(
+              sessionKey,
+              msg.executionScope,
+              clearGeneration,
+              msg.artifactTaskRef,
+            ),
             callbacks: this.buildSessionCallbacks(msg.topic, {
               sessionKey,
               senderId: msg.senderId,
@@ -3093,11 +3103,15 @@ export class CatsCompanyBot {
     sessionKey: string,
     currentScope?: ParsedCatsMessage['executionScope'],
     expectedClearGeneration = this.getSessionClearGeneration(sessionKey),
+    currentArtifactTaskRef?: string,
   ): string | ContentBlock[] | PendingUserInput | null {
     const queue = this.messageQueue.get(sessionKey);
     if (!queue || queue.length === 0) return null;
 
     if (expectedClearGeneration !== this.getSessionClearGeneration(sessionKey)) return null;
+    // Artifact tasks own a one-shot ToolExecutionContext. Ordinary input must
+    // remain queued until that task turn releases its run/task correlation.
+    if (currentArtifactTaskRef) return null;
     const userMessages: QueuedMessage[] = [];
     let firstRemainingIndex = 0;
     for (; firstRemainingIndex < queue.length; firstRemainingIndex++) {
