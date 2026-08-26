@@ -9,18 +9,18 @@ import { Logger } from '../utils/logger';
  */
 export class SkillManager {
   private skills: Map<string, Skill>;
-  private skillsPath: string;
+  private readonly fixedSkillsPath?: string;
 
-  constructor() {
+  constructor(skillsPath?: string) {
     this.skills = new Map();
-    this.skillsPath = PathResolver.getSkillsPath();
+    this.fixedSkillsPath = skillsPath;
   }
 
   /**
    * 加载所有 skills（只从统一目录加载）
    */
   async loadSkills(): Promise<void> {
-    const skillsPath = PathResolver.getSkillsPath();
+    const skillsPath = this.fixedSkillsPath ?? PathResolver.getSkillsPath();
 
     // 从统一的 skills 目录加载
     const nextSkills = await this.loadSkillsFromPath(skillsPath);
