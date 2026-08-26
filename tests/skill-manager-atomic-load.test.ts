@@ -88,6 +88,18 @@ describe('SkillManager atomic loading', () => {
     assert.deepEqual(skillNames(manager), ['stable-skill']);
   });
 
+  test('keeps the previous complete map when the Skill directory disappears', async () => {
+    writeSkill(skillsPath, 'stable-skill', 'Stable skill');
+    const manager = new SkillManager();
+    await manager.loadSkills();
+
+    fs.rmSync(skillsPath, { recursive: true, force: true });
+    await manager.loadSkills();
+
+    assert.equal(fs.existsSync(skillsPath), false);
+    assert.deepEqual(skillNames(manager), ['stable-skill']);
+  });
+
   test('publishes an empty map when the Skill directory is successfully empty', async () => {
     writeSkill(skillsPath, 'removed-skill', 'Removed skill');
     const manager = new SkillManager();

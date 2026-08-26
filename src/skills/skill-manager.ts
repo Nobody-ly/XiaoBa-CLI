@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import { Skill } from '../types/skill';
 import { PathResolver } from '../utils/path-resolver';
 import { SkillParser } from './skill-parser';
@@ -35,6 +36,10 @@ export class SkillManager {
    */
   private async loadSkillsFromPath(basePath: string): Promise<Map<string, Skill> | undefined> {
     try {
+      if (!fs.statSync(basePath).isDirectory()) {
+        return undefined;
+      }
+
       const skillFiles = PathResolver.findSkillFiles(basePath);
       const nextSkills = new Map<string, Skill>();
 
@@ -45,6 +50,13 @@ export class SkillManager {
         } catch (error: any) {
           Logger.warning(`Failed to load skill from ${filePath}: ${error.message}`);
         }
+      }
+
+      // findSkillFiles() intentionally returns [] for a missing path. Recheck
+      // the root so a directory removed during the scan is not mistaken for a
+      // successfully empty Skill workspace.
+      if (!fs.statSync(basePath).isDirectory()) {
+        return undefined;
       }
 
       return nextSkills;
