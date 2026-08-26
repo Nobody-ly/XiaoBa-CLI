@@ -51,7 +51,7 @@ export interface BotSkillActivationAckWorkerOptions {
   botId: string;
   bodyId: string;
   installationId: string;
-  runtimeCredential: string;
+  activationAckCredential: string;
   httpBaseUrl: string;
   stateStore?: BotSkillActivationAckStateStore;
   fetchImpl?: typeof fetch;
@@ -72,7 +72,7 @@ export class BotSkillActivationAckWorker {
   private readonly botId: string;
   private readonly skillsRoot: string;
   private readonly bodyIdHash: string;
-  private readonly runtimeCredential: string;
+  private readonly activationAckCredential: string;
   private readonly endpointBase: string;
   private readonly pollIntervalMs: number;
   private readonly requestTimeoutMs: number;
@@ -87,8 +87,8 @@ export class BotSkillActivationAckWorker {
     this.botId = normalizePositiveInt64(options.botId, 'Bot ID');
     const bodyId = normalizeRuntimeIdentity(options.bodyId, 'body ID');
     normalizeRuntimeIdentity(options.installationId, 'installation ID');
-    this.runtimeCredential = String(options.runtimeCredential || '').trim();
-    if (!this.runtimeCredential) throw new Error('Runtime credential is required for Skill activation ACK');
+    this.activationAckCredential = String(options.activationAckCredential || '').trim();
+    if (!this.activationAckCredential) throw new Error('Dedicated Runtime credential is required for Skill activation ACK');
     this.endpointBase = normalizeHttpBaseUrl(options.httpBaseUrl);
     this.skillsRoot = String(options.skillsRoot || '').trim();
     if (!this.skillsRoot) throw new Error('Skill workspace is required for activation ACK');
@@ -167,7 +167,7 @@ export class BotSkillActivationAckWorker {
         {
           method: 'POST',
           headers: {
-            'X-CatsCo-Runtime-Credential': this.runtimeCredential,
+            'X-CatsCo-Runtime-Credential': this.activationAckCredential,
             'Content-Type': 'application/json',
             Accept: 'application/json',
           },

@@ -221,7 +221,7 @@ function createWorker(
     botId: '42',
     bodyId: 'body-prod-1',
     installationId: 'install-prod-1',
-    runtimeCredential: 'runtime-credential',
+    activationAckCredential: 'runtime-credential',
     httpBaseUrl: 'https://app.catsco.cc/',
     stateStore: fixture.store,
     pollIntervalMs: 5_000,

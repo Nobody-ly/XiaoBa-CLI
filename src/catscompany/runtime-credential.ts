@@ -93,7 +93,15 @@ export async function provisionCatsCoRuntimeCredential(
   auth: CatsCoAuthSnapshot,
   options: Pick<IssueCatsCoRuntimeCredentialOptions, 'fetchImpl' | 'timeoutMs' | 'scopes'> = {},
 ): Promise<CatsCompanyConfig> {
-  if (String(config.runtimeCredential || '').trim()) return config;
+  const requestedScopes = normalizeRequestedScopes(options.scopes);
+  const needsActivationAck = requestedScopes.includes(CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE);
+  const existingGrantCredential = String(config.runtimeCredential || '').trim();
+  if (
+    (!needsActivationAck && existingGrantCredential)
+    || (needsActivationAck && getUsableCatsCoRuntimeActivationAckCredential(config))
+  ) {
+    return config;
+  }
   const userToken = String(auth.token || '').trim();
   const actorUid = String(auth.uid || '').trim();
   const ownerUid = String(config.ownerUserId || '').trim();
@@ -101,8 +109,9 @@ export async function provisionCatsCoRuntimeCredential(
   const bodyId = String(config.bodyId || '').trim();
   const installationId = String(config.installationId || config.bodyId || '').trim();
   // Automatic provisioning is deliberately owner-only. Server runtimes that
-  // do not keep a human session use the explicit CATSCO_RUNTIME_CREDENTIAL
-  // configuration path instead.
+  // do not keep a human session use the explicit credential configuration
+  // paths instead. In particular, an old grant-only credential is never
+  // guessed to contain the activation ACK scope.
   if (!userToken || !actorUid || !ownerUid || actorUid !== ownerUid || !botUid || !bodyId || !installationId) {
     return config;
   }
@@ -116,9 +125,29 @@ export async function provisionCatsCoRuntimeCredential(
   });
   return {
     ...config,
-    runtimeCredential: issued.credential,
-    runtimeCredentialExpiresAt: issued.expiresAt,
+    ...(!existingGrantCredential ? {
+      runtimeCredential: issued.credential,
+      runtimeCredentialExpiresAt: issued.expiresAt,
+    } : {}),
+    ...(needsActivationAck ? {
+      runtimeActivationAckCredential: issued.credential,
+      runtimeActivationAckCredentialExpiresAt: issued.expiresAt,
+    } : {}),
   };
+}
+
+export function getUsableCatsCoRuntimeActivationAckCredential(
+  config: Pick<
+    CatsCompanyConfig,
+    'runtimeActivationAckCredential' | 'runtimeActivationAckCredentialExpiresAt'
+  >,
+  now = Date.now(),
+): string | undefined {
+  const credential = String(config.runtimeActivationAckCredential || '').trim();
+  if (!credential) return undefined;
+  const expiresAt = Number(config.runtimeActivationAckCredentialExpiresAt);
+  if (Number.isFinite(expiresAt) && expiresAt <= now) return undefined;
+  return credential;
 }
 
 function normalizeRequestedScopes(input: string[] | undefined): string[] {

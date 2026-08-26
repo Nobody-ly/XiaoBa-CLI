@@ -22,6 +22,7 @@ import { getPromptReconcileCoordinator } from '../bot-definition/prompt-sync';
 import {
   CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE,
   CATSCO_RUNTIME_MUTATION_GRANT_SCOPE,
+  getUsableCatsCoRuntimeActivationAckCredential,
   provisionCatsCoRuntimeCredential,
 } from '../catscompany/runtime-credential';
 import {
@@ -107,17 +108,23 @@ export async function catscompanyCommand(): Promise<void> {
   }
 
   try {
+    const hadGrantCredential = Boolean(String(connectorConfig.runtimeCredential || '').trim());
+    const hadActivationAckCredential = Boolean(
+      getUsableCatsCoRuntimeActivationAckCredential(connectorConfig),
+    );
     const provisioned = await provisionCatsCoRuntimeCredential(connectorConfig, resolvedRuntime.auth, {
       ...(activationAckWorkerEnabled ? {
         scopes: [CATSCO_RUNTIME_MUTATION_GRANT_SCOPE, CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE],
       } : {}),
     });
-    if (provisioned.runtimeCredential && !connectorConfig.runtimeCredential) {
-      Logger.info(
-        activationAckWorkerEnabled
-          ? 'CatsCo Runtime 已取得受限 Skill mutation grant + activation ACK 凭证。'
-          : 'CatsCo Runtime 已取得受限 Skill mutation grant 凭证。',
-      );
+    if (
+      activationAckWorkerEnabled
+      && !hadActivationAckCredential
+      && getUsableCatsCoRuntimeActivationAckCredential(provisioned)
+    ) {
+      Logger.info('CatsCo Runtime 已取得独立的 Skill activation ACK 凭证。');
+    } else if (!hadGrantCredential && provisioned.runtimeCredential) {
+      Logger.info('CatsCo Runtime 已取得受限 Skill mutation grant 凭证。');
     }
     connectorConfig = provisioned;
   } catch (error) {
@@ -180,11 +187,11 @@ export async function catscompanyCommand(): Promise<void> {
     const auth = createCatsCoLocalConfigService({ runtimeRoot }).getAuthState();
     const modelBotId = String(preparedBot?.botId || connectorConfig.botUid || '').trim();
     if (activationAckWorkerEnabled) {
-      const credential = String(connectorConfig.runtimeCredential || '').trim();
+      const activationAckCredential = getUsableCatsCoRuntimeActivationAckCredential(connectorConfig);
       const connectorBotId = String(connectorConfig.botUid || '').trim();
       const installationId = String(connectorConfig.installationId || connectorConfig.bodyId || '').trim();
-      if (!credential) {
-        Logger.warning('Skill activation ACK worker 未启动：当前 Runtime 没有带专用 scope 的凭据；普通聊天继续可用。');
+      if (!activationAckCredential) {
+        Logger.warning('Skill activation ACK worker 未启动：当前 Runtime 没有可用的专用 ACK 凭据；不会复用旧 grant-only 凭据，普通聊天继续可用。');
       } else if (!connectorBotId || (modelBotId && modelBotId !== connectorBotId)) {
         Logger.warning('Skill activation ACK worker 未启动：本地 BotDefinition 与连接 Bot 身份不一致；普通聊天继续可用。');
       } else {
@@ -195,7 +202,7 @@ export async function catscompanyCommand(): Promise<void> {
             botId: connectorBotId,
             bodyId: connectorConfig.bodyId || '',
             installationId,
-            runtimeCredential: credential,
+            activationAckCredential,
             httpBaseUrl: connectorConfig.httpBaseUrl || resolvedRuntime.auth.httpBaseUrl,
             onWarning: code => Logger.warning(skillActivationAckWarning(code)),
           });
