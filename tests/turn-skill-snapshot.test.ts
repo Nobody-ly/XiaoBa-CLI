@@ -130,6 +130,26 @@ describe('turn Skill snapshot store', () => {
     assert.equal(fs.readFileSync(outside, 'utf8'), 'outside');
   });
 
+  test('rejects a dangling workspace-root link instead of publishing an empty revision', async (t) => {
+    const root = createRuntimeRoot(roots);
+    const missingTarget = path.join(root, 'missing-skills-target');
+    const skillsRoot = path.join(root, 'skills-link');
+    try {
+      fs.symlinkSync(missingTarget, skillsRoot, 'dir');
+    } catch (error: any) {
+      if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(String(error?.code))) {
+        t.skip('Windows symlink creation is unavailable for this user');
+        return;
+      }
+      throw error;
+    }
+
+    const store = new TurnSkillSnapshotStore({ runtimeRoot: root, skillsRoot });
+    await assert.rejects(() => store.acquire(), /not a safe directory/i);
+    assert.equal(fs.lstatSync(skillsRoot).isSymbolicLink(), true);
+    assert.equal(fs.existsSync(missingTarget), false);
+  });
+
   test('detects snapshot tampering and preserves the evidence from GC', async () => {
     const root = createRuntimeRoot(roots);
     const skillsRoot = path.join(root, 'skills');

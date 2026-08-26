@@ -361,8 +361,13 @@ export class TurnSkillSnapshotStore {
 
 function scanWorkspaceTree(rootValue: string): WorkspaceTree {
   const root = path.resolve(rootValue);
-  if (!fs.existsSync(root)) return buildWorkspaceTree([], []);
-  const rootStat = fs.lstatSync(root);
+  let rootStat: fs.Stats;
+  try {
+    rootStat = fs.lstatSync(root);
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return buildWorkspaceTree([], []);
+    throw error;
+  }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
     throw new Error(`Skill workspace is not a safe directory: ${root}`);
   }
