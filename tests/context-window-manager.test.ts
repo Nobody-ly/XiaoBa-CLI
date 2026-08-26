@@ -59,23 +59,24 @@ describe('ContextWindowManager', () => {
     assert.doesNotMatch(capturedSummaryInput, /SKILL_LIST_SHOULD_NOT_BE_SUMMARIZED/);
     assert.doesNotMatch(capturedSummaryInput, /SUBAGENT_STATUS_SHOULD_NOT_BE_SUMMARIZED/);
 
-    assert.equal(result.some(message => message.content === 'INJECTED_CONTEXT_SHOULD_NOT_BE_SUMMARIZED'), true);
-    assert.equal(result.some(message =>
+    assert.equal(result.compacted, true);
+    assert.equal(result.messages.some(message => message.content === 'INJECTED_CONTEXT_SHOULD_NOT_BE_SUMMARIZED'), true);
+    assert.equal(result.messages.some(message =>
       typeof message.content === 'string'
       && message.content.includes('RUNTIME_FEEDBACK_SHOULD_NOT_BE_SUMMARIZED')
     ), true);
-    assert.equal(result.some(message =>
+    assert.equal(result.messages.some(message =>
       typeof message.content === 'string'
       && message.content.includes('SKILL_LIST_SHOULD_NOT_BE_SUMMARIZED')
     ), true);
-    assert.equal(result.some(message =>
+    assert.equal(result.messages.some(message =>
       typeof message.content === 'string'
       && message.content.includes('[以下是之前')
     ), true);
     assert.deepStrictEqual(statusEvents.map(event => event.status), ['start', 'complete']);
     assert.equal(statusEvents[0].sessionKey, 'test-session');
     assert.equal(statusEvents[0].usedTokens > 0, true);
-    assert.equal(statusEvents[1].messageCount, result.length);
+    assert.equal(statusEvents[1].messageCount, result.messages.length);
   });
 
   test('does not compact when only transient context is large', async () => {
@@ -98,7 +99,8 @@ describe('ContextWindowManager', () => {
 
     const result = await manager.compactIfNeeded(messages, { sessionKey: 'test-session' });
 
-    assert.equal(result, messages);
+    assert.equal(result.compacted, false);
+    assert.equal(result.messages, messages);
     assert.equal(aiCalls, 0);
   });
 
@@ -126,7 +128,8 @@ describe('ContextWindowManager', () => {
       },
     });
 
-    assert.equal(result, messages);
+    assert.equal(result.compacted, false);
+    assert.equal(result.messages, messages);
     assert.deepStrictEqual(statusEvents.map(event => event.status), ['start', 'error']);
     assert.match(String(statusEvents[1].error), /summary failed/);
   });

@@ -1062,7 +1062,14 @@ export class AgentSession {
       Logger.warning(`[会话 ${this.key}] 异步检查点持久化失败，保留原始上下文`);
       return null;
     }
-    if (!candidate.confirmCommit()) return null;
+    if (!candidate.confirmCommit()) {
+      // Persistence succeeded, so keep memory aligned with the durable projection.
+      candidate.cancel();
+      this.checkpointRevision++;
+      this.checkpointCandidate = null;
+      this.checkpointCandidateAbortController = null;
+      return committedMessages;
+    }
     this.checkpointRevision++;
     this.checkpointCandidate = null;
     this.checkpointCandidateAbortController = null;
@@ -1272,16 +1279,12 @@ export class AgentSession {
     callbacks?: SessionCallbacks,
   ): Promise<{ messages: Message[]; compacted: boolean }> {
     if (!this.useCheckpointCompaction) {
-      const compactedMessages = await this.contextWindowManager.compactIfNeeded(messages, {
+      return this.contextWindowManager.compactIfNeeded(messages, {
         sessionKey: this.key,
         reason,
         signal,
         onStatus: this.createContextCompactionNotifier(callbacks),
       });
-      return {
-        messages: compactedMessages,
-        compacted: false,
-      };
     }
     return this.checkpointCompactionCoordinator.compactIfNeeded(messages, {
       sessionKey: this.key,
