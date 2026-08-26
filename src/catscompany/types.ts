@@ -20,7 +20,8 @@ export interface CatsCompanyConfig {
   /**
    * Owner-provisioned credential for the concrete Runtime body/installation.
    * This is separate from the Bot API key and currently grants only the right
-   * to request a candidate-bound Skill mutation grant.
+   * to request a candidate-bound Skill mutation grant. A separately reviewed
+   * canary may also include the activation ACK scope; old credentials do not.
    */
   runtimeCredential?: string;
   /** Expiry of an automatically provisioned Runtime credential, in Unix milliseconds. */

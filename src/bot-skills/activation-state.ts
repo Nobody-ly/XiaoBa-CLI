@@ -62,6 +62,12 @@ export type BotSkillActivationRecovery =
   | { status: 'retry_ack'; journal: BotSkillActivationJournal; marker: BotSkillAppliedMarker }
   | { status: 'acked'; journal: BotSkillActivationJournal; marker: BotSkillAppliedMarker };
 
+export type BotSkillActivationAckInspection =
+  | { status: 'none' }
+  | { status: 'not_ready'; journal: BotSkillActivationJournal }
+  | { status: 'retry_ack'; journal: BotSkillActivationJournal; marker: BotSkillAppliedMarker }
+  | { status: 'acked'; journal: BotSkillActivationJournal; marker: BotSkillAppliedMarker };
+
 /**
  * Computes a stable hash for the complete BotDefinition Skill reference set.
  * This intentionally hashes reference facts only; it is not a workspace-content
@@ -261,6 +267,29 @@ export class BotSkillActivationStateStore {
     return journal.phase === 'acked'
       ? { status: 'acked', journal, marker }
       : { status: 'retry_ack', journal, marker };
+  }
+
+  /**
+   * Read-only E3 boundary. Unlike recover(), this never removes a stage,
+   * restores a backup, advances a phase, or writes any workspace state. It
+   * only proves whether an already locally_applied activation may be ACKed.
+   */
+  inspectForAck(botId: string, skillsRoot: string): BotSkillActivationAckInspection {
+    const journal = this.readJournal(botId, skillsRoot);
+    if (!journal) return { status: 'none' };
+    if (journal.phase !== 'locally_applied' && journal.phase !== 'acked') {
+      return { status: 'not_ready', journal };
+    }
+    const marker = this.readApplied(journal.botId);
+    if (!marker || !appliedMatchesJournal(marker, journal)) {
+      throw new Error('Bot Skill activation journal does not match its applied marker');
+    }
+    if (journal.phase === 'acked') return { status: 'acked', journal, marker };
+    assertSafeWorkspacePathType(journal.skillsRoot, 'live');
+    assertSafeWorkspacePathType(journal.stage, 'stage');
+    assertSafeWorkspacePathType(journal.backup, 'backup');
+    assertLiveMatchesJournal(journal);
+    return { status: 'retry_ack', journal, marker };
   }
 
   private requireJournal(

@@ -1,6 +1,8 @@
 import { describe, test } from 'node:test';
 import * as assert from 'node:assert';
 import {
+  CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE,
+  CATSCO_RUNTIME_MUTATION_GRANT_SCOPE,
   issueCatsCoRuntimeCredential,
   provisionCatsCoRuntimeCredential,
 } from '../src/catscompany/runtime-credential';
@@ -76,6 +78,57 @@ describe('CatsCo Runtime credential provisioning', () => {
         bodyId: 'body-prod-1',
         installationId: 'install-prod-1',
         fetchImpl,
+      }),
+      /invalid Runtime credential binding/,
+    );
+  });
+
+  test('requests activation ACK scope only when explicitly enabled and verifies the response', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({
+        bot_uid: 42,
+        body_id: 'body-prod-1',
+        installation_id: 'install-prod-1',
+        scopes: [CATSCO_RUNTIME_MUTATION_GRANT_SCOPE, CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE],
+        credential: 'runtime-credential-with-ack',
+        expires_at: Date.now() + 86_400_000,
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const issued = await issueCatsCoRuntimeCredential({
+      httpBaseUrl: 'https://app.catsco.cc',
+      userToken: 'owner-user-token',
+      botUid: '42',
+      bodyId: 'body-prod-1',
+      installationId: 'install-prod-1',
+      scopes: [CATSCO_RUNTIME_MUTATION_GRANT_SCOPE, CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE],
+      fetchImpl,
+    });
+
+    assert.deepEqual(requestBody?.scopes, [
+      CATSCO_RUNTIME_MUTATION_GRANT_SCOPE,
+      CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE,
+    ]);
+    assert.deepEqual(issued.scopes, requestBody?.scopes);
+
+    await assert.rejects(
+      issueCatsCoRuntimeCredential({
+        httpBaseUrl: 'https://app.catsco.cc',
+        userToken: 'owner-user-token',
+        botUid: '42',
+        bodyId: 'body-prod-1',
+        installationId: 'install-prod-1',
+        scopes: [CATSCO_RUNTIME_MUTATION_GRANT_SCOPE, CATSCO_RUNTIME_ACTIVATION_ACK_SCOPE],
+        fetchImpl: (async () => new Response(JSON.stringify({
+          bot_uid: 42,
+          body_id: 'body-prod-1',
+          installation_id: 'install-prod-1',
+          scopes: [CATSCO_RUNTIME_MUTATION_GRANT_SCOPE],
+          credential: 'grant-only-credential',
+          expires_at: Date.now() + 86_400_000,
+        }), { status: 201, headers: { 'Content-Type': 'application/json' } })) as typeof fetch,
       }),
       /invalid Runtime credential binding/,
     );
