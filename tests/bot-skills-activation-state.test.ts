@@ -56,6 +56,8 @@ describe('Bot Skill activation state v2', () => {
     fixture.store.markAcked(fixture.botId, fixture.skillsRoot, journal);
     assert.equal(fixture.store.readJournal(fixture.botId, fixture.skillsRoot)?.phase, 'acked');
     assert.equal(fs.existsSync(fixture.backup), true);
+    fs.rmSync(fixture.skillsRoot, { recursive: true, force: true });
+    assert.equal(fixture.store.inspectForAck(fixture.botId, fixture.skillsRoot).status, 'acked');
   });
 
   test('rejects phase skips, conflicting activation identities, and ACK without an applied marker', () => {
@@ -130,6 +132,22 @@ describe('Bot Skill activation state v2', () => {
     const result = fixture.store.recover(fixture.botId, fixture.skillsRoot);
     assert.equal(result.status, 'retry_ack');
     assert.equal(result.status === 'retry_ack' && result.marker.definitionRevision, 12);
+  });
+
+  test('inspects ACK readiness without recovering or changing earlier phases', () => {
+    const fixture = createFixture(roots);
+    fs.mkdirSync(fixture.skillsRoot, { recursive: true });
+    fs.writeFileSync(path.join(fixture.skillsRoot, 'keep.txt'), 'old live');
+    fs.mkdirSync(fixture.stage, { recursive: true });
+    fs.writeFileSync(path.join(fixture.stage, 'keep-stage.txt'), 'not active');
+    fixture.store.begin(fixture.begin);
+
+    const result = fixture.store.inspectForAck(fixture.botId, fixture.skillsRoot);
+
+    assert.equal(result.status, 'not_ready');
+    assert.equal(fixture.store.readJournal(fixture.botId, fixture.skillsRoot)?.phase, 'prepared');
+    assert.equal(fs.existsSync(fixture.stage), true);
+    assert.equal(fs.readFileSync(path.join(fixture.skillsRoot, 'keep.txt'), 'utf8'), 'old live');
   });
 
   test('fails closed on a mismatched live workspace and preserves backup evidence', () => {
