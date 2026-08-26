@@ -80,8 +80,8 @@ export interface TurnSkillSnapshotGcResult {
 /**
  * One reference-counted claim on an immutable turn Skill snapshot.
  *
- * This class is not wired into the active conversation path yet. A later,
- * separately reviewed change will pass leases through ToolExecutionContext.
+ * Runtime code passes this opaque lease through ToolExecutionContext. It is
+ * generated locally and is never part of model-provided tool arguments.
  */
 export class TurnSkillSnapshotLease {
   private released = false;

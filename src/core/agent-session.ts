@@ -12,6 +12,7 @@ import * as path from 'path';
 import { AIService } from '../utils/ai-service';
 import { ToolManager } from '../tools/tool-manager';
 import { SkillManager } from '../skills/skill-manager';
+import type { TurnSkillSnapshotStore } from '../skills/turn-skill-snapshot';
 import {
   ChannelCallbacks,
   DeviceRpcTransport,
@@ -102,6 +103,8 @@ export interface AgentServices {
   };
   toolManager: ToolManager;
   skillManager: SkillManager;
+  /** Optional so tests and embedded legacy runtimes keep their existing path. */
+  turnSkillSnapshotStore?: TurnSkillSnapshotStore;
 }
 
 export type SystemPromptProvider = () => Promise<string> | string;

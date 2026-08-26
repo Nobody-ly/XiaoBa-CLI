@@ -4,7 +4,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SkillManager } from '../src/skills/skill-manager';
+import { SessionSkillRuntime } from '../src/skills/session-skill-runtime';
 import { TurnSkillSnapshotStore } from '../src/skills/turn-skill-snapshot';
+import { AgentTurnController } from '../src/core/agent-turn-controller';
+import { PlanRuntime } from '../src/core/plan-runtime';
 
 describe('turn Skill snapshot store', () => {
   const roots: string[] = [];
@@ -185,6 +188,127 @@ describe('turn Skill snapshot store', () => {
       if (previousSkillsDirectory === undefined) delete process.env.XIAOBA_SKILLS_DIR;
       else process.env.XIAOBA_SKILLS_DIR = previousSkillsDirectory;
     }
+  });
+
+  test('binds one snapshot to a complete turn, releases it, and uses a new revision next turn', async () => {
+    const root = createRuntimeRoot(roots);
+    const skillsRoot = path.join(root, 'skills');
+    const skillRoot = writeSkill(skillsRoot, 'turn-bound-skill', 'one');
+    const liveManager = new SkillManager(skillsRoot);
+    await liveManager.loadSkills();
+    const store = new TurnSkillSnapshotStore({ runtimeRoot: root, skillsRoot });
+    const observedBodies: string[] = [];
+    const observedSnapshotIds: string[] = [];
+    let buildCount = 0;
+    const turnContextBuilder = {
+      build: async (params: any) => {
+        await params.skillRuntime.reloadSkills();
+        buildCount += 1;
+        if (buildCount === 1) {
+          fs.writeFileSync(path.join(skillRoot, 'body.txt'), 'two');
+        }
+        return {
+          messages: params.durableMessages,
+          runtimeFeedbackForLog: [],
+        };
+      },
+      removeTransientMessages: (messages: any[]) => messages,
+    };
+    const controller = new AgentTurnController({
+      sessionKey: 'turn-snapshot-test',
+      services: {
+        aiService: {} as any,
+        toolManager: {} as any,
+        skillManager: liveManager,
+        turnSkillSnapshotStore: store,
+      },
+      skillRuntime: new SessionSkillRuntime(liveManager, 'turn-snapshot-test'),
+      planRuntime: new PlanRuntime(),
+      turnContextBuilder: turnContextBuilder as any,
+      turnLogRecorder: { recordTurn: () => undefined } as any,
+      workspaceRoot: root,
+      getCurrentDirectory: () => root,
+      updateCurrentDirectory: () => undefined,
+    });
+    (controller as any).createRunner = (options: any) => ({
+      run: async (messages: any[]) => {
+        const skill = options.skillManager.getSkill('turn-bound-skill');
+        assert.ok(skill);
+        observedBodies.push(fs.readFileSync(path.join(path.dirname(skill.filePath), 'body.txt'), 'utf8'));
+        observedSnapshotIds.push(options.turnSkillSnapshot.snapshot.snapshotId);
+        return {
+          response: 'ok',
+          finalResponseVisible: false,
+          newMessages: [],
+          messages,
+        };
+      },
+    });
+    const messages: any[] = [];
+
+    await controller.run({ input: 'first', messages, runtimeFeedback: [], shouldContinue: () => true });
+    await controller.run({ input: 'second', messages, runtimeFeedback: [], shouldContinue: () => true });
+
+    assert.deepEqual(observedBodies, ['one', 'two']);
+    assert.notEqual(observedSnapshotIds[0], observedSnapshotIds[1]);
+    const gc = await store.collectGarbage({ minAgeMs: 0 });
+    assert.deepEqual(gc.removed.sort(), [...observedSnapshotIds].sort());
+  });
+
+  test('releases the turn snapshot on both context errors and cancelled model runs', async () => {
+    const root = createRuntimeRoot(roots);
+    const skillsRoot = path.join(root, 'skills');
+    writeSkill(skillsRoot, 'failed-turn-skill', 'one');
+    const liveManager = new SkillManager(skillsRoot);
+    await liveManager.loadSkills();
+    const store = new TurnSkillSnapshotStore({ runtimeRoot: root, skillsRoot });
+    const controller = new AgentTurnController({
+      sessionKey: 'turn-snapshot-failure-test',
+      services: {
+        aiService: {} as any,
+        toolManager: {} as any,
+        skillManager: liveManager,
+        turnSkillSnapshotStore: store,
+      },
+      skillRuntime: new SessionSkillRuntime(liveManager, 'turn-snapshot-failure-test'),
+      planRuntime: new PlanRuntime(),
+      turnContextBuilder: {
+        build: async () => { throw new Error('context failed'); },
+        removeTransientMessages: (messages: any[]) => messages,
+      } as any,
+      turnLogRecorder: { recordTurn: () => undefined } as any,
+      workspaceRoot: root,
+      getCurrentDirectory: () => root,
+      updateCurrentDirectory: () => undefined,
+    });
+
+    await assert.rejects(
+      () => controller.run({ input: 'fail', messages: [], runtimeFeedback: [], shouldContinue: () => true }),
+      /context failed/,
+    );
+    const gc = await store.collectGarbage({ minAgeMs: 0 });
+    assert.equal(gc.removed.length, 1);
+
+    (controller as any).options.turnContextBuilder = {
+      build: async (params: any) => ({
+        messages: params.durableMessages,
+        runtimeFeedbackForLog: [],
+      }),
+      removeTransientMessages: (messages: any[]) => messages,
+    };
+    (controller as any).createRunner = () => ({
+      run: async () => {
+        const error = new Error('turn cancelled');
+        error.name = 'AbortError';
+        throw error;
+      },
+    });
+    await assert.rejects(
+      () => controller.run({ input: 'cancel', messages: [], runtimeFeedback: [], shouldContinue: () => false }),
+      /turn cancelled/,
+    );
+    const cancelledGc = await store.collectGarbage({ minAgeMs: 0 });
+    assert.equal(cancelledGc.removed.length, 1);
   });
 
   test('rejects a workspace configuration that would recursively snapshot the store', () => {
