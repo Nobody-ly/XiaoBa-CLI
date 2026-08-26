@@ -676,6 +676,7 @@ describe('subagent runtime events', () => {
         sessionId: 'session:v2:catscompany:p2p:p2p_7_43:agent:usr43',
         surface: 'catscompany',
         artifactContextRef: `acr_${'a'.repeat(43)}`,
+        artifactTaskRef: `atr_${'t'.repeat(43)}`,
         executionScope: {
           source: 'catscompany',
           sessionKey: 'session:v2:catscompany:p2p:p2p_7_43:agent:usr43',
@@ -705,6 +706,7 @@ describe('subagent runtime events', () => {
       assert.equal(capturedDelegatedContext.executionScope?.sessionKey, 'session:v2:catscompany:p2p:p2p_7_43:agent:usr43');
       assert.equal(capturedDelegatedContext.localDeviceGrant?.bodyId, 'body-main');
       assert.equal('artifactContextRef' in capturedDelegatedContext, false);
+      assert.equal('artifactTaskRef' in capturedDelegatedContext, false);
     } finally {
       (SubAgentManager as any).getInstance = originalGetInstance;
     }

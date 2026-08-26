@@ -12,6 +12,7 @@ export type ConversationTaskState = 'running' | 'completed' | 'failed' | 'cancel
 
 export interface ConversationTaskStatusInput {
   run_id: string;
+  artifact_task_ref?: string;
   state: ConversationTaskState;
   summary: string;
   error?: string;

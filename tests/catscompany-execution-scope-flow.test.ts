@@ -1259,6 +1259,30 @@ describe('CatsCompany execution scope flow', () => {
     assert.doesNotMatch(JSON.stringify(handledTurns[0].userMessage), /acr_[A-Za-z0-9_-]{43}/);
   });
 
+  test('forwards a trusted Artifact task ref only through current turn options', async () => {
+    const { bot, handledTurns } = createHarness();
+    const ref = `atr_${'t'.repeat(43)}`;
+    const metadata = {
+      ...canonicalMetadata('usr7', 'p2p_7_43'),
+      artifact_task_ref: ref,
+    };
+
+    await (bot as any).onMessage({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: '来自「项目风险台账」：分析选中的风险',
+      content: '来自「项目风险台账」：分析选中的风险',
+      metadata,
+      isGroup: false,
+      seq: 12,
+    });
+
+    assert.equal(handledTurns.length, 1);
+    assert.equal(handledTurns[0].options.artifactTaskRef, ref);
+    assert.equal('artifactTaskRef' in handledTurns[0].options.executionScope, false);
+    assert.doesNotMatch(JSON.stringify(handledTurns[0].userMessage), /atr_[A-Za-z0-9_-]{43}/);
+  });
+
   test('does not merge queued CatsCo group input from another actor into the current actor scope', () => {
     const { bot } = createHarness();
     const aliceScope = createExecutionScope(createCatsCoMessageEnvelope({
@@ -1296,6 +1320,32 @@ describe('CatsCompany execution scope flow', () => {
     const pendingForBob = (bot as any).consumeQueuedUserInput(bobScope.sessionKey, bobScope);
     assert.equal(pendingForBob, 'bob follow-up');
     assert.equal(bot.messageQueue.has(bobScope.sessionKey), false);
+  });
+
+  test('keeps a queued Artifact task for its own run instead of merging it into active input', () => {
+    const { bot } = createHarness();
+    const scope = createExecutionScope(createCatsCoMessageEnvelope({
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      text: 'first',
+      metadata: canonicalMetadata('usr7', 'p2p_7_43'),
+      botUid: 'usr43',
+    }));
+    const taskRef = `atr_${'q'.repeat(43)}`;
+
+    bot.messageQueue.set(scope.sessionKey, [{
+      userMessage: '来自「项目风险台账」：生成处理方案',
+      topic: 'p2p_7_43',
+      senderId: 'usr7',
+      seq: 13,
+      executionScope: scope,
+      artifactTaskRef: taskRef,
+      receivedAt: Date.now(),
+      source: 'user',
+    }]);
+
+    assert.equal((bot as any).consumeQueuedUserInput(scope.sessionKey, scope), null);
+    assert.equal(bot.messageQueue.get(scope.sessionKey)?.[0].artifactTaskRef, taskRef);
   });
 
   test('preserves device grants when queued CatsCompany user input is merged', () => {
