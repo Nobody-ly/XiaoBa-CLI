@@ -172,24 +172,75 @@ describe('CatsCompany SkillHub thin RPC', () => {
     );
   });
 
-  test('rejects a stale workspace revision and invalid pagination input', async () => {
+  test('serves later pages from one cached snapshot and refreshes only on a new listing', async () => {
     const first = await handler.execute(request({ request_id: 'workspace-revision-before-edit' }));
-    fs.appendFileSync(path.join(runtimeRoot, 'skills', 'local-demo', 'SKILL.md'), '\nUpdated after page one.\n');
+    fs.writeFileSync(path.join(runtimeRoot, 'skills', 'local-demo', 'SKILL.md'), [
+      '---',
+      'name: [unterminated',
+      'description: Still the old validation class',
+      '---',
+      '',
+    ].join('\n'));
 
+    const cached = await handler.execute(request({
+      request_id: 'workspace-revision-cached-after-edit',
+      payload: {
+        bot_uid: '42',
+        offset: 0,
+        workspace_revision: first.workspace_revision,
+      },
+    }));
+    assert.deepEqual(cached.skills, first.skills);
+    assert.equal(cached.workspace_revision, first.workspace_revision);
+
+    const refreshed = await handler.execute(request({ request_id: 'workspace-revision-new-listing' }));
+    assert.notEqual(refreshed.workspace_revision, first.workspace_revision);
+    assert.equal((refreshed.skills as Array<Record<string, unknown>>)[0]?.can_share, false);
+
+    const restartedHandler = new SkillHubThinRpcHandler({ runtimeRoot });
     await assert.rejects(
-      handler.execute(request({
-        request_id: 'workspace-revision-after-edit',
+      restartedHandler.execute(request({
+        request_id: 'workspace-revision-evicted',
         payload: {
           bot_uid: '42',
-          offset: 0,
           workspace_revision: first.workspace_revision,
         },
       })),
       (error: unknown) => error instanceof SkillHubThinRpcError && error.code === 'WORKSPACE_CHANGED',
     );
+  });
+
+  test('fingerprints rejected Skill bytes even when the visible validation error is unchanged', async () => {
+    const skillRoot = path.join(runtimeRoot, 'skills', 'broken-revision');
+    fs.mkdirSync(skillRoot, { recursive: true });
+    writeBotSkillLocalMarker(skillRoot, {
+      schema: 'xiaoba.bot-skill-local.v1',
+      localSkillId: 'broken-revision',
+    });
+    const writeBroken = (description: string) => fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+      '---',
+      'name: [unterminated',
+      `description: ${description}`,
+      '---',
+      '',
+    ].join('\n'));
+    writeBroken('first rejected bytes');
+    const first = await handler.execute(request({ request_id: 'rejected-revision-first' }));
+    writeBroken('later rejected byte');
+    const second = await handler.execute(request({ request_id: 'rejected-revision-second' }));
+    assert.notEqual(second.workspace_revision, first.workspace_revision);
+    const firstRejected = (first.skills as Array<Record<string, unknown>>)
+      .find(skill => skill.local_skill_id === 'broken-revision');
+    const secondRejected = (second.skills as Array<Record<string, unknown>>)
+      .find(skill => skill.local_skill_id === 'broken-revision');
+    assert.equal(firstRejected?.share_error, secondRejected?.share_error);
+  });
+
+  test('rejects invalid pagination input', async () => {
     for (const [requestID, payload] of [
       ['workspace-invalid-limit', { bot_uid: '42', limit: 201 }],
       ['workspace-invalid-offset', { bot_uid: '42', offset: -1 }],
+      ['workspace-outside-offset', { bot_uid: '42', offset: 2 }],
       ['workspace-invalid-revision', { bot_uid: '42', workspace_revision: 'not-a-hash' }],
     ] as const) {
       await assert.rejects(

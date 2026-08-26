@@ -21,6 +21,13 @@ export class BotSkillPackageValidationError extends Error {
   }
 }
 
+export class BotSkillWorkspaceScanLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BotSkillWorkspaceScanLimitError';
+  }
+}
+
 const BOT_SKILL_LOCAL_MARKER_SCHEMA = 'xiaoba.bot-skill-local.v1';
 const SKIP_DIRECTORIES = new Set(['.git', 'node_modules']);
 const EPHEMERAL_DIRECTORIES = new Set([
@@ -77,6 +84,20 @@ export interface BotSkillWorkspaceValidationFailure {
 
 export interface ScanBotSkillWorkspaceOptions {
   onValidationFailure?: (failure: BotSkillWorkspaceValidationFailure) => void;
+  /** Optional fail-closed bounds for metadata-only callers such as paginated workspace listing. */
+  maxSkillEntries?: number;
+  maxTotalPackageBytes?: number;
+  /** Keeps content hashes but clears `files`; never use this for upload/materialization. */
+  retainPackageContents?: boolean;
+}
+
+interface BotSkillPackageByteBudget {
+  bytes: number;
+  maximum: number;
+}
+
+interface ScanLocalBotSkillOptions {
+  packageByteBudget?: BotSkillPackageByteBudget;
 }
 
 export function scanBotSkillWorkspace(
@@ -95,6 +116,10 @@ export function scanBotSkillWorkspace(
 
   const entries: LocalBotSkillManifestEntry[] = [];
   const localSkillIds = new Set<string>();
+  let discoveredSkillEntries = 0;
+  const packageByteBudget = options.maxTotalPackageBytes === undefined
+    ? undefined
+    : { bytes: 0, maximum: options.maxTotalPackageBytes };
   const visit = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       if (
@@ -107,9 +132,16 @@ export function scanBotSkillWorkspace(
       const skillDir = path.join(current, entry.name);
       assertRealPathContained(realRoot, skillDir);
       if (fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
+        discoveredSkillEntries += 1;
+        if (
+          options.maxSkillEntries !== undefined
+          && discoveredSkillEntries > options.maxSkillEntries
+        ) {
+          throw new BotSkillWorkspaceScanLimitError('Bot Skill workspace contains too many Skills');
+        }
         let manifestEntry: LocalBotSkillManifestEntry;
         try {
-          manifestEntry = scanLocalBotSkill(skillDir, root);
+          manifestEntry = scanLocalBotSkill(skillDir, root, { packageByteBudget });
         } catch (error) {
           if (!(error instanceof BotSkillPackageValidationError) || !options.onValidationFailure) {
             throw error;
@@ -131,6 +163,9 @@ export function scanBotSkillWorkspace(
           visit(skillDir);
           continue;
         }
+        if (options.retainPackageContents === false) {
+          manifestEntry = { ...manifestEntry, files: [] };
+        }
         if (localSkillIds.has(manifestEntry.localSkillId)) {
           throw new Error(`Bot Skill workspace contains a duplicate localSkillId: ${manifestEntry.localSkillId}`);
         }
@@ -147,6 +182,7 @@ export function scanBotSkillWorkspace(
 export function scanLocalBotSkill(
   skillDir: string,
   workspaceRoot?: string,
+  options: ScanLocalBotSkillOptions = {},
 ): LocalBotSkillManifestEntry {
   const root = path.resolve(skillDir);
   const rootStat = fs.lstatSync(root);
@@ -163,7 +199,7 @@ export function scanLocalBotSkill(
   }
   assertRealPathContained(fs.realpathSync(root), skillFile);
   const marker = ensureBotSkillLocalMarker(root);
-  const files = collectBotSkillPackageFiles(root);
+  const files = collectBotSkillPackageFiles(root, options.packageByteBudget);
   const contentHash = computeBotSkillPackageHash(files);
   const reference = marker.reference?.contentHash === contentHash
     ? marker.reference
@@ -265,7 +301,10 @@ function ensureBotSkillLocalMarker(skillDir: string): BotSkillLocalMarker {
   return marker;
 }
 
-export function collectBotSkillPackageFiles(root: string): BotSkillPackageFile[] {
+export function collectBotSkillPackageFiles(
+  root: string,
+  aggregateBudget?: BotSkillPackageByteBudget,
+): BotSkillPackageFile[] {
   const realRoot = fs.realpathSync(root);
   const files: BotSkillPackageFile[] = [];
   let totalBytes = 0;
@@ -292,6 +331,14 @@ export function collectBotSkillPackageFiles(root: string): BotSkillPackageFile[]
         throw new BotSkillPackageValidationError(`Skill contains an unsafe path: ${relativePath}`);
       }
       const bytes = fs.readFileSync(fullPath);
+      if (aggregateBudget) {
+        aggregateBudget.bytes += bytes.length;
+        if (aggregateBudget.bytes > aggregateBudget.maximum) {
+          throw new BotSkillWorkspaceScanLimitError(
+            'Bot Skill workspace packages exceed the listing byte limit',
+          );
+        }
+      }
       if (bytes.length > MAX_SINGLE_FILE_BYTES) {
         throw new BotSkillPackageValidationError(`Skill file is too large: ${relativePath}`);
       }
