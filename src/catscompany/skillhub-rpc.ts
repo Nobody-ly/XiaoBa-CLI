@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createCatsCoLocalConfigService } from './local-config';
@@ -9,6 +10,8 @@ import {
   withCurrentBotSkillWorkspaceWrite,
 } from '../bot-skills/runtime';
 import {
+  BotSkillWorkspaceScanLimitError,
+  isEphemeralSkillDirectory,
   scanBotSkillWorkspace,
 } from '../bot-skills/local-manifest';
 import { trashBotSkill } from '../bot-skills/deleted-skill-trash';
@@ -28,7 +31,18 @@ export const SKILLHUB_THIN_RPC_TOOLS = {
   switchBot: 'skillhub.localBot.switch',
 } as const;
 
-const MAX_SKILLS = 200;
+const DEFAULT_WORKSPACE_PAGE_SIZE = 200;
+const MAX_WORKSPACE_PAGE_SIZE = 200;
+const MAX_WORKSPACE_OFFSET = 1_000_000;
+const MAX_WORKSPACE_SKILLS = 10_000;
+const MAX_WORKSPACE_PACKAGE_BYTES = 128 * 1024 * 1024;
+const MAX_WORKSPACE_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+const MAX_WORKSPACE_SNAPSHOTS = 4;
+const WORKSPACE_SNAPSHOT_TTL_MS = 5 * 60_000;
+const MAX_REJECTED_FINGERPRINT_FILES = 10_000;
+const MAX_REJECTED_FINGERPRINT_BYTES = 32 * 1024 * 1024;
+const REJECTED_FINGERPRINT_LARGE_FILE_BYTES = 2 * 1024 * 1024;
+const REJECTED_FINGERPRINT_SAMPLE_BYTES = 64 * 1024;
 const MAX_NAME_LENGTH = 160;
 const MAX_DESCRIPTION_LENGTH = 1_000;
 const MAX_RELATIVE_PATH_LENGTH = 500;
@@ -42,6 +56,21 @@ interface SkillHubWorkspaceValidationFailure {
   installName: string;
   path: string;
   error: Error;
+}
+
+interface SkillHubWorkspaceSnapshot {
+  botUid: string;
+  activeBotUid?: string;
+  skillsRoot: string;
+  skillsPath: string;
+  revision: string;
+  skills: Array<Record<string, unknown>>;
+  createdAtMs: number;
+}
+
+interface RejectedFingerprintBudget {
+  files: number;
+  bytes: number;
 }
 
 export class SkillHubThinRpcError extends Error {
@@ -73,6 +102,7 @@ export class SkillHubThinRpcHandler {
     fingerprint: string;
     operation: Promise<Record<string, unknown>>;
   }>();
+  private readonly workspaceSnapshots = new Map<string, SkillHubWorkspaceSnapshot>();
 
   constructor(options: SkillHubThinRpcHandlerOptions = {}) {
     this.runtimeRoot = path.resolve(options.runtimeRoot ?? PathResolver.getRuntimeDataRoot());
@@ -153,7 +183,7 @@ export class SkillHubThinRpcHandler {
 
     switch (request.tool_name) {
       case SKILLHUB_THIN_RPC_TOOLS.workspace:
-        return this.readWorkspace(botUid, request);
+        return this.readWorkspace(botUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.share:
         return this.shareSkill(botUid, scope.ownerUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.finalize:
@@ -167,49 +197,81 @@ export class SkillHubThinRpcHandler {
 
   private async readWorkspace(
     botUid: string,
+    payload: Record<string, unknown>,
     request: CatsThinToolRpcMessage,
   ): Promise<Record<string, unknown>> {
+    const pageOffset = optionalInteger(payload.offset, 'offset', 0, 0, MAX_WORKSPACE_OFFSET);
+    const pageLimit = optionalInteger(
+      payload.limit,
+      'limit',
+      DEFAULT_WORKSPACE_PAGE_SIZE,
+      1,
+      MAX_WORKSPACE_PAGE_SIZE,
+    );
+    const expectedRevision = optionalContentHash(payload.workspace_revision, 'workspace_revision');
     return withCurrentBotSkillWorkspaceWrite((context) => {
       this.assertOperational(request);
       this.assertRequestScope(request, botUid, true);
       this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
-      const rejected: SkillHubWorkspaceValidationFailure[] = [];
-      const entries = scanSkillHubWorkspace(context.skillsRoot, {
-        onValidationFailure: failure => rejected.push(failure),
-      }).filter((entry) => {
-        const error = validateSkillHubShareMetadata(entry.path);
-        if (!error) return true;
-        rejected.push({
-          localSkillId: entry.localSkillId,
-          name: entry.name,
-          installName: entry.installName,
-          path: entry.path,
-          error,
-        });
-        return false;
+      const nowMs = this.now().getTime();
+      this.pruneWorkspaceSnapshots(nowMs);
+      const snapshot = expectedRevision
+        ? this.readCachedWorkspaceSnapshot(expectedRevision, botUid, context.skillsRoot)
+        : this.createWorkspaceSnapshot(botUid, context.activeBotId, context.skillsRoot, nowMs);
+      if (pageOffset > snapshot.skills.length) {
+        throw new SkillHubThinRpcError('INVALID_REQUEST', 'offset is outside the workspace snapshot.');
+      }
+      const pageSkills = snapshot.skills.slice(pageOffset, pageOffset + pageLimit);
+      const nextOffset = pageOffset + pageSkills.length;
+      const hasMore = nextOffset < snapshot.skills.length;
+      return {
+        schema: 'xiaoba.skillhub.local_workspace.v1',
+        bot_uid: botUid,
+        active_bot_uid: snapshot.activeBotUid,
+        skills_path: snapshot.skillsPath,
+        workspace_revision: snapshot.revision,
+        total_skills: snapshot.skills.length,
+        page_offset: pageOffset,
+        page_limit: pageLimit,
+        next_offset: hasMore ? nextOffset : null,
+        truncated: hasMore,
+        skills: pageSkills,
+      };
+    }, { runtimeRoot: this.runtimeRoot });
+  }
+
+  private createWorkspaceSnapshot(
+    botUid: string,
+    activeBotUid: string | undefined,
+    skillsRoot: string,
+    nowMs: number,
+  ): SkillHubWorkspaceSnapshot {
+    const rejected: SkillHubWorkspaceValidationFailure[] = [];
+    const entries = scanSkillHubWorkspace(skillsRoot, {
+      onValidationFailure: failure => rejected.push(failure),
+      maxSkillEntries: MAX_WORKSPACE_SKILLS,
+      maxTotalPackageBytes: MAX_WORKSPACE_PACKAGE_BYTES,
+      retainPackageContents: false,
+    }).filter((entry) => {
+      const error = validateSkillHubShareMetadata(entry.path);
+      if (!error) return true;
+      rejected.push({
+        localSkillId: entry.localSkillId,
+        name: entry.name,
+        installName: entry.installName,
+        path: entry.path,
+        error,
       });
-      const listed = [
-        ...entries.map(entry => ({ kind: 'valid' as const, entry })),
-        ...rejected.map(entry => ({ kind: 'rejected' as const, entry })),
-      ].sort((left, right) => compareText(left.entry.localSkillId, right.entry.localSkillId))
-        .slice(0, MAX_SKILLS);
-      const skills = listed.map((item) => {
-        if (item.kind === 'valid') {
-          const { entry } = item;
-          const presentation = readLocalSkillPresentation(entry.path);
-          return {
-            local_skill_id: limitText(entry.localSkillId, MAX_NAME_LENGTH),
-            name: limitText(entry.name, MAX_NAME_LENGTH),
-            description: limitText(presentation.description, MAX_DESCRIPTION_LENGTH),
-            relative_path: limitText(entry.installName, MAX_RELATIVE_PATH_LENGTH),
-            source: 'user',
-            can_share: !entry.reference || isPrivateSkillReference(entry.reference.skillId),
-            skill_hub: {
-              ...(presentation.metadata || {}),
-              ...(entry.reference ? { reference: entry.reference } : {}),
-            },
-          };
-        }
+      return false;
+    });
+    const listed = [
+      ...entries.map(entry => ({ kind: 'valid' as const, entry })),
+      ...rejected.map(entry => ({ kind: 'rejected' as const, entry })),
+    ].sort((left, right) => compareText(left.entry.localSkillId, right.entry.localSkillId));
+    if (listed.length > MAX_WORKSPACE_SKILLS) throw workspaceTooLargeError();
+    const rejectedFingerprintBudget: RejectedFingerprintBudget = { files: 0, bytes: 0 };
+    const skills = listed.map((item) => {
+      if (item.kind === 'valid') {
         const { entry } = item;
         const presentation = readLocalSkillPresentation(entry.path);
         return {
@@ -218,19 +280,80 @@ export class SkillHubThinRpcHandler {
           description: limitText(presentation.description, MAX_DESCRIPTION_LENGTH),
           relative_path: limitText(entry.installName, MAX_RELATIVE_PATH_LENGTH),
           source: 'user',
-          can_share: false,
-          share_error: limitText(entry.error.message, MAX_DESCRIPTION_LENGTH),
-          skill_hub: presentation.metadata || {},
+          can_share: !entry.reference || isPrivateSkillReference(entry.reference.skillId),
+          skill_hub: {
+            ...(presentation.metadata || {}),
+            ...(entry.reference ? { reference: entry.reference } : {}),
+          },
         };
-      });
+      }
+      const { entry } = item;
+      const presentation = readLocalSkillPresentation(entry.path);
       return {
-        schema: 'xiaoba.skillhub.local_workspace.v1',
-        bot_uid: botUid,
-        active_bot_uid: context.activeBotId,
-        skills_path: fs.realpathSync(context.skillsRoot),
-        skills,
+        local_skill_id: limitText(entry.localSkillId, MAX_NAME_LENGTH),
+        name: limitText(entry.name, MAX_NAME_LENGTH),
+        description: limitText(presentation.description, MAX_DESCRIPTION_LENGTH),
+        relative_path: limitText(entry.installName, MAX_RELATIVE_PATH_LENGTH),
+        source: 'user',
+        can_share: false,
+        share_error: limitText(entry.error.message, MAX_DESCRIPTION_LENGTH),
+        skill_hub: presentation.metadata || {},
       };
-    }, { runtimeRoot: this.runtimeRoot });
+    });
+    if (Buffer.byteLength(stableSerialize(skills), 'utf8') > MAX_WORKSPACE_SNAPSHOT_BYTES) {
+      throw workspaceTooLargeError();
+    }
+    const revision = createHash('sha256')
+      .update(stableSerialize(listed.map((item, index) => ({
+        skill: skills[index],
+        package_content_hash: item.kind === 'valid'
+          ? item.entry.contentHash
+          : fingerprintRejectedSkillPackage(item.entry.path, rejectedFingerprintBudget),
+      }))))
+      .digest('hex');
+    const snapshot: SkillHubWorkspaceSnapshot = {
+      botUid,
+      activeBotUid,
+      skillsRoot: path.resolve(skillsRoot),
+      skillsPath: fs.realpathSync(skillsRoot),
+      revision,
+      skills,
+      createdAtMs: nowMs,
+    };
+    this.workspaceSnapshots.delete(revision);
+    this.workspaceSnapshots.set(revision, snapshot);
+    this.pruneWorkspaceSnapshots(nowMs);
+    return snapshot;
+  }
+
+  private readCachedWorkspaceSnapshot(
+    revision: string,
+    botUid: string,
+    skillsRoot: string,
+  ): SkillHubWorkspaceSnapshot {
+    const snapshot = this.workspaceSnapshots.get(revision);
+    if (
+      !snapshot
+      || snapshot.botUid !== botUid
+      || snapshot.skillsRoot !== path.resolve(skillsRoot)
+    ) {
+      throw new SkillHubThinRpcError(
+        'WORKSPACE_CHANGED',
+        'The local Skill workspace snapshot is no longer available. Restart the listing.',
+      );
+    }
+    return snapshot;
+  }
+
+  private pruneWorkspaceSnapshots(nowMs: number): void {
+    for (const [revision, snapshot] of this.workspaceSnapshots) {
+      if (nowMs - snapshot.createdAtMs > WORKSPACE_SNAPSHOT_TTL_MS) {
+        this.workspaceSnapshots.delete(revision);
+      }
+    }
+    while (this.workspaceSnapshots.size > MAX_WORKSPACE_SNAPSHOTS) {
+      this.workspaceSnapshots.delete(this.workspaceSnapshots.keys().next().value as string);
+    }
   }
 
   private async shareSkill(
@@ -625,6 +748,9 @@ function readLocalSkillPresentation(skillDir: string): {
 } {
   const skillFile = path.join(skillDir, 'SKILL.md');
   try {
+    if (fs.statSync(skillFile).size > REJECTED_FINGERPRINT_LARGE_FILE_BYTES) {
+      return { description: '', metadata: null };
+    }
     const parsed = matter(fs.readFileSync(skillFile, 'utf8'), {});
     return {
       description: String(parsed.data?.description || ''),
@@ -635,18 +761,88 @@ function readLocalSkillPresentation(skillDir: string): {
   }
 }
 
+function fingerprintRejectedSkillPackage(
+  skillDir: string,
+  budget: RejectedFingerprintBudget,
+): string {
+  const root = path.resolve(skillDir);
+  const evidence: Array<Record<string, unknown>> = [];
+  const visit = (current: string): void => {
+    const children = fs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => compareText(left.name, right.name));
+    for (const child of children) {
+      if (
+        child.isDirectory()
+        && (child.name === '.git' || child.name === 'node_modules' || isEphemeralSkillDirectory(child.name))
+      ) continue;
+      const fullPath = path.join(current, child.name);
+      const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
+      const stat = fs.lstatSync(fullPath);
+      if (stat.isSymbolicLink()) {
+        evidence.push({ path: relativePath, type: 'symlink' });
+        continue;
+      }
+      if (stat.isDirectory()) {
+        evidence.push({ path: relativePath, type: 'directory' });
+        if (!fs.existsSync(path.join(fullPath, 'SKILL.md'))) visit(fullPath);
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      budget.files += 1;
+      if (budget.files > MAX_REJECTED_FINGERPRINT_FILES) throw workspaceTooLargeError();
+      const sampled = readBoundedFingerprintBytes(fullPath, stat.size);
+      budget.bytes += sampled.length;
+      if (budget.bytes > MAX_REJECTED_FINGERPRINT_BYTES) throw workspaceTooLargeError();
+      evidence.push({
+        path: relativePath,
+        size: stat.size,
+        mtime_ms: stat.mtimeMs,
+        sha256: createHash('sha256').update(sampled).digest('hex'),
+        sampled: sampled.length !== stat.size,
+      });
+    }
+  };
+  visit(root);
+  return createHash('sha256').update(stableSerialize(evidence)).digest('hex');
+}
+
+function readBoundedFingerprintBytes(filePath: string, size: number): Buffer {
+  if (size <= REJECTED_FINGERPRINT_LARGE_FILE_BYTES) {
+    return fs.readFileSync(filePath);
+  }
+  const handle = fs.openSync(filePath, 'r');
+  try {
+    const head = Buffer.alloc(Math.min(REJECTED_FINGERPRINT_SAMPLE_BYTES, size));
+    fs.readSync(handle, head, 0, head.length, 0);
+    const remaining = Math.max(0, size - head.length);
+    const tail = Buffer.alloc(Math.min(REJECTED_FINGERPRINT_SAMPLE_BYTES, remaining));
+    if (tail.length > 0) fs.readSync(handle, tail, 0, tail.length, size - tail.length);
+    return Buffer.concat([head, tail]);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
 function scanSkillHubWorkspace(
   skillsRoot: string,
   options: Parameters<typeof scanBotSkillWorkspace>[1],
 ): ReturnType<typeof scanBotSkillWorkspace> {
   try {
     return scanBotSkillWorkspace(skillsRoot, options);
-  } catch {
+  } catch (error) {
+    if (error instanceof BotSkillWorkspaceScanLimitError) throw workspaceTooLargeError();
     throw new SkillHubThinRpcError(
       'LOCAL_SKILL_INVALID',
       'The local Skill workspace could not be validated safely.',
     );
   }
+}
+
+function workspaceTooLargeError(): SkillHubThinRpcError {
+  return new SkillHubThinRpcError(
+    'WORKSPACE_TOO_LARGE',
+    'The local Skill workspace is too large to list safely.',
+  );
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -661,6 +857,34 @@ function requiredText(value: unknown, field: string, maxLength: number): string 
     throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
   }
   return text;
+}
+
+function optionalInteger(
+  value: unknown,
+  field: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value.trim())
+      ? Number(value.trim())
+      : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
+  }
+  return parsed;
+}
+
+function optionalContentHash(value: unknown, field: string): string {
+  if (value === undefined || value === null || value === '') return '';
+  const normalized = String(value).trim().toLowerCase();
+  if (!CONTENT_HASH_PATTERN.test(normalized)) {
+    throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
+  }
+  return normalized;
 }
 
 function limitText(value: string, maxLength: number): string {

@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { canonicalizeBotSkillRefs } from '../src/bot-skills/canonical';
 import {
+  BotSkillWorkspaceScanLimitError,
   isPortablePackagePath,
   scanBotSkillWorkspace,
   scanLocalBotSkill,
@@ -63,6 +64,22 @@ describe('Bot Skill sync security boundaries', () => {
       fs.writeFileSync(path.join(crowdedRoot, `file-${index}.txt`), '');
     }
     assert.throws(() => scanLocalBotSkill(crowdedRoot), /too many files/i);
+  });
+
+  test('bounds aggregate workspace listing work without retaining package bodies', () => {
+    const skillRoot = createSkill(roots, 'bounded-listing');
+    const workspaceRoot = path.dirname(skillRoot);
+    assert.throws(
+      () => scanBotSkillWorkspace(workspaceRoot, { maxSkillEntries: 0 }),
+      (error: unknown) => error instanceof BotSkillWorkspaceScanLimitError,
+    );
+    assert.throws(
+      () => scanBotSkillWorkspace(workspaceRoot, { maxTotalPackageBytes: 1 }),
+      (error: unknown) => error instanceof BotSkillWorkspaceScanLimitError,
+    );
+    const [entry] = scanBotSkillWorkspace(workspaceRoot, { retainPackageContents: false });
+    assert.ok(entry?.contentHash);
+    assert.deepEqual(entry.files, []);
   });
 
   test('excludes runtime cache directories without deleting or size-checking them', () => {
