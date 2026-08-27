@@ -1092,15 +1092,35 @@ export class AgentSession {
     phase: CheckpointCompactionPhase = 'mid_turn',
   ): Promise<Message[]> {
     const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(messages);
+    const stopPointReached = this.isCheckpointCandidateSerialThresholdReached(
+      this.getContextUsageInfo(messagesBeforeCompaction),
+    );
+    const candidateAtBoundary = this.checkpointCandidate;
     this.coordinateCheckpointCandidate(messagesBeforeCompaction);
     await this.waitForCheckpointCandidateAtStopPoint(messagesBeforeCompaction);
     this.coordinateCheckpointCandidate(messagesBeforeCompaction);
     const committed = this.commitReadyCheckpointCandidate(messagesBeforeCompaction);
-    const nextMessages = committed || messagesBeforeCompaction;
-    if (!committed) {
-      this.startCheckpointCandidateIfEligible(lifecycleGeneration, nextMessages, phase);
+    if (committed) return committed;
+
+    if (stopPointReached && candidateAtBoundary) {
+      const fallback = await this.checkpointCompactionCoordinator.compactIfNeeded(
+        messagesBeforeCompaction,
+        {
+          sessionKey: this.key,
+          phase,
+          toolTokens: this.getToolDefinitionTokens(),
+          signal: this.activeAbortController?.signal,
+        },
+      );
+      if (fallback.compacted && this.persistCheckpoint(fallback.messages)) {
+        this.checkpointRevision++;
+        return fallback.messages;
+      }
+      return messagesBeforeCompaction;
     }
-    return nextMessages;
+
+    this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesBeforeCompaction, phase);
+    return messagesBeforeCompaction;
   }
 
   private async waitForCheckpointCandidateAtStopPoint(messages: Message[]): Promise<void> {

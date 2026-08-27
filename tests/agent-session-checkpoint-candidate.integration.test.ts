@@ -13,6 +13,7 @@ const OWNED_SESSION_KEYS = [
   'user:candidate-integration',
   'user:candidate-episode-end',
   'user:candidate-preempt-integration',
+  'user:candidate-fallback-integration',
   'user:candidate-parent-destroyed',
 ];
 
@@ -289,6 +290,58 @@ test('handleMessage waits for a running candidate at 85 percent', async () => {
     assert.equal((session as any).checkpointCandidate, null);
     assert.equal(serialCalls, 1);
     assert.ok((session as any).messages.some((message: Message) => message.content === 'late candidate summary'));
+  });
+});
+
+test('candidate failure at 85 percent falls back once with the latest transcript', async () => {
+  await withCandidateMode(async () => {
+    let usagePercent = 75;
+    let releaseFailure!: () => void;
+    const failureGate = new Promise<void>(resolve => { releaseFailure = resolve; });
+    const session = createInitializedSession('user:candidate-fallback-integration', {
+      async chatStream() {
+        return { content: 'main answer', toolCalls: [], usage };
+      },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = (messages: Message[]) => {
+      const compacted = messages.some(message => message.content === 'serial fallback summary');
+      const currentPercent = compacted ? 20 : usagePercent;
+      return { usedTokens: currentPercent, toolTokens: 0, maxTokens: 100, usagePercent: currentPercent };
+    };
+    const fallbackInputs: Message[][] = [];
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: Message[]) => {
+      if (usagePercent !== 85
+        || messages.some(message => message.content === 'serial fallback summary')) {
+        return noCompaction(messages);
+      }
+      fallbackInputs.push(messages.map(message => ({ ...message })));
+      return {
+        messages: [{ role: 'user', content: 'serial fallback summary' }],
+        compacted: true,
+        usedTokens: 85,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: 85,
+      };
+    };
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      await failureGate;
+      throw new Error('candidate failed');
+    };
+
+    await session.handleMessage('start candidate');
+    usagePercent = 85;
+    const highWaterTurn = session.handleMessage('latest suffix');
+    await new Promise(resolve => setImmediate(resolve));
+    releaseFailure();
+    await highWaterTurn;
+
+    assert.equal(fallbackInputs.length, 1);
+    assert.ok(fallbackInputs[0].some(message => message.content === 'start candidate'));
+    assert.ok(fallbackInputs[0].some(message => message.content === 'main answer'));
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'serial fallback summary'));
+    assert.equal((session as any).checkpointCandidate, null);
   });
 });
 
