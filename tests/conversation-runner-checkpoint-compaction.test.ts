@@ -247,14 +247,14 @@ test('runner keeps the original transcript when checkpoint persistence fails', a
     },
   });
 
-  const result = await runner.run([{
+  await assert.rejects(() => runner.run([{
     role: 'user',
     content: 'inspect and continue',
     __episodeId: 'episode-main',
-  }]);
+  }]), /disk full/);
 
-  assert.equal(result.response, 'continued with original transcript');
-  assert.ok(modelRequests[1].some(message =>
-    message.role === 'tool' && message.content === 'verified tool evidence'));
-  assert.equal(modelRequests[1].some(message => message.__checkpointSummary), false);
+  assert.equal(modelRequests.length, 1);
+  assert.ok(modelRequests[0].some(message =>
+    message.role === 'user' && message.content === 'inspect and continue'));
+
 });

@@ -842,7 +842,20 @@ export class ConversationRunner {
         }
         : undefined,
     });
-    if (!result.compacted) return;
+    if (!result.compacted) {
+      const getUsageInfo = this.checkpointCompactionCoordinator.getUsageInfo;
+      if (typeof getUsageInfo === 'function') {
+        const usage = getUsageInfo.call(
+          this.checkpointCompactionCoordinator,
+          messages,
+          estimateToolsTokens(tools),
+        );
+        if (usage.usedTokens + usage.toolTokens >= usage.maxTokens * 0.85) {
+          throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+        }
+      }
+      return;
+    }
 
     try {
       await this.onCompactionCheckpoint?.(result.messages);
@@ -851,7 +864,20 @@ export class ConversationRunner {
         `[${this.sessionLabel}Turn ${turns}] continuation checkpoint persistence failed; `
         + `keeping original transcript: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return;
+      throw error;
+    }
+
+    const getUsageInfo = this.checkpointCompactionCoordinator.getUsageInfo;
+    if (typeof getUsageInfo === 'function') {
+      const postCheckpointUsage = getUsageInfo.call(
+        this.checkpointCompactionCoordinator,
+        result.messages,
+        estimateToolsTokens(tools),
+      );
+      if (postCheckpointUsage.usedTokens + postCheckpointUsage.toolTokens
+        >= postCheckpointUsage.maxTokens * 0.85) {
+        throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+      }
     }
 
     messages.splice(0, messages.length, ...result.messages);
