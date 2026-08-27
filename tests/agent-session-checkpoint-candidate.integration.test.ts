@@ -239,7 +239,7 @@ test('episode end commits a candidate that became ready during the model request
   });
 });
 
-test('handleMessage preempts at 85 percent and ignores a late candidate result', async () => {
+test('handleMessage waits for a running candidate at 85 percent', async () => {
   await withCandidateMode(async () => {
     let usagePercent = 75;
     let releaseCandidate!: () => void;
@@ -250,15 +250,19 @@ test('handleMessage preempts at 85 percent and ignores a late candidate result',
       },
     });
     (session as any).messages.push({ role: 'user', content: 'history root' });
-    (session as any).getContextUsageInfo = () => ({
-      usedTokens: usagePercent,
-      toolTokens: 0,
-      maxTokens: 100,
-      usagePercent,
-    });
-    let serialInput: Message[] | undefined;
+    (session as any).getContextUsageInfo = (messages: Message[]) => {
+      const compacted = messages.some(message => message.content === 'late candidate summary');
+      const currentPercent = compacted ? 20 : usagePercent;
+      return {
+        usedTokens: currentPercent,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: currentPercent,
+      };
+    };
+    let serialCalls = 0;
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: Message[]) => {
-      if (usagePercent === 85) serialInput = messages.map(message => ({ ...message }));
+      serialCalls++;
       return noCompaction(messages);
     };
     (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
@@ -269,18 +273,22 @@ test('handleMessage preempts at 85 percent and ignores a late candidate result',
     await session.handleMessage('start candidate');
     const candidate = (session as any).checkpointCandidate;
     assert.equal(candidate.status, 'running');
+    serialCalls = 0;
 
     usagePercent = 85;
-    await session.handleMessage('trigger high water');
-    releaseCandidate();
+    const highWaterTurn = session.handleMessage('trigger high water');
     await new Promise(resolve => setImmediate(resolve));
+    assert.equal((session as any).checkpointCandidate, candidate);
+    assert.equal(candidate.status, 'running');
+    assert.equal(serialCalls, 0);
 
-    assert.ok(serialInput?.some(message => message.content === 'start candidate'));
-    assert.ok(serialInput?.some(message => message.content === 'main answer'));
-    assert.equal(candidate.status, 'cancelled');
-    assert.equal(candidate.result, undefined);
+    releaseCandidate();
+    await highWaterTurn;
+
+    assert.equal(candidate.status, 'committed');
     assert.equal((session as any).checkpointCandidate, null);
-    assert.equal(JSON.stringify((session as any).messages).includes('late candidate summary'), false);
+    assert.equal(serialCalls, 1);
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'late candidate summary'));
   });
 });
 

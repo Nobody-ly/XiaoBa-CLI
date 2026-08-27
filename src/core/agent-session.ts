@@ -228,6 +228,7 @@ export class AgentSession {
   private readonly useCheckpointCompaction: boolean;
   private readonly useCheckpointCandidates: boolean;
   private checkpointCandidate: CheckpointCandidate | null = null;
+  private checkpointCandidatePromise: Promise<boolean> | null = null;
   private checkpointCandidateAbortController: AbortController | null = null;
   private checkpointCandidateSequence = 0;
   /** Epoch for destructive transcript replacement; tail appends keep the same epoch. */
@@ -698,10 +699,11 @@ export class AgentSession {
 
       try {
         const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(this.messages);
-        this.coordinateCheckpointCandidate(messagesBeforeCompaction);
-        const candidateMessages = this.commitReadyCheckpointCandidate(messagesBeforeCompaction);
-        const messagesForCompaction = candidateMessages || messagesBeforeCompaction;
-        this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesForCompaction);
+        const messagesForCompaction = await this.handleCheckpointCandidateBoundary(
+          messagesBeforeCompaction,
+          lifecycleGeneration,
+          'pre_turn',
+        );
         const compactionResult = await this.compactContextIfNeeded(
           messagesForCompaction,
           'pre_turn',
@@ -1075,6 +1077,7 @@ export class AgentSession {
       this.checkpointRevision++;
       this.checkpointCandidate = null;
       this.checkpointCandidateAbortController = null;
+      this.checkpointCandidatePromise = null;
       return committedMessages;
     }
     this.checkpointRevision++;
@@ -1083,18 +1086,28 @@ export class AgentSession {
     return committedMessages;
   }
 
-  private handleCheckpointCandidateBoundary(
+  private async handleCheckpointCandidateBoundary(
     messages: Message[],
     lifecycleGeneration: number,
-  ): Message[] {
+    phase: CheckpointCompactionPhase = 'mid_turn',
+  ): Promise<Message[]> {
     const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(messages);
+    this.coordinateCheckpointCandidate(messagesBeforeCompaction);
+    await this.waitForCheckpointCandidateAtStopPoint(messagesBeforeCompaction);
     this.coordinateCheckpointCandidate(messagesBeforeCompaction);
     const committed = this.commitReadyCheckpointCandidate(messagesBeforeCompaction);
     const nextMessages = committed || messagesBeforeCompaction;
     if (!committed) {
-      this.startCheckpointCandidateIfEligible(lifecycleGeneration, nextMessages, 'mid_turn');
+      this.startCheckpointCandidateIfEligible(lifecycleGeneration, nextMessages, phase);
     }
     return nextMessages;
+  }
+
+  private async waitForCheckpointCandidateAtStopPoint(messages: Message[]): Promise<void> {
+    if (!this.checkpointCandidate || !this.checkpointCandidatePromise) return;
+    const usage = this.getContextUsageInfo(messages);
+    if (!this.isCheckpointCandidateSerialThresholdReached(usage)) return;
+    await this.checkpointCandidatePromise;
   }
 
   private coordinateCheckpointCandidate(messages: Message[]): void {
@@ -1105,7 +1118,6 @@ export class AgentSession {
     }
     const usage = this.getContextUsageInfo(messages);
     if (this.isCheckpointCandidateSerialThresholdReached(usage)) {
-      this.cancelCheckpointCandidate();
       return;
     }
     if (this.checkpointCandidate.status === 'ready') {
@@ -1147,19 +1159,22 @@ export class AgentSession {
     this.checkpointCandidate = candidate;
     this.checkpointCandidateAbortController = abortController;
 
-    void candidate.generate(this.checkpointCandidateCoordinator, {
+    const generation = candidate.generate(this.checkpointCandidateCoordinator, {
       sessionKey: this.key,
       phase,
       episodeId,
       toolTokens: this.getToolDefinitionTokens(),
       signal: abortController.signal,
-      recordMetrics: false,
-    }).finally(() => {
+      recordMetrics: true,
+    });
+    this.checkpointCandidatePromise = generation;
+    void generation.finally(() => {
       if (lifecycleGeneration !== this.lifecycleGeneration
         || this.checkpointCandidate !== candidate) {
         return;
       }
       this.checkpointCandidateAbortController = null;
+      this.checkpointCandidatePromise = null;
       if (candidate.status === 'failed') this.checkpointCandidate = null;
     });
   }
@@ -1177,6 +1192,7 @@ export class AgentSession {
     this.checkpointCandidate?.cancel();
     this.checkpointCandidateAbortController?.abort();
     this.checkpointCandidate = null;
+    this.checkpointCandidatePromise = null;
     this.checkpointCandidateAbortController = null;
   }
 
