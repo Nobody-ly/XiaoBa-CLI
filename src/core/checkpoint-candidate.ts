@@ -41,6 +41,9 @@ export interface CheckpointCandidateResult {
 export class CheckpointCandidate {
   private _status: CheckpointCandidateStatus = 'running';
   private _result: Message[] | undefined;
+  private _attempts = 0;
+  private _readyAt: number | undefined;
+  private _settledAt: number | undefined;
 
   constructor(
     readonly id: string,
@@ -55,16 +58,30 @@ export class CheckpointCandidate {
     return this._result;
   }
 
+  get attempts(): number {
+    return this._attempts;
+  }
+
+  get readyAt(): number | undefined {
+    return this._readyAt;
+  }
+
+  get settledAt(): number | undefined {
+    return this._settledAt;
+  }
+
   complete(messages: Message[]): boolean {
     if (this._status !== 'running') return false;
     this._result = cloneMessages(messages);
     this._status = 'ready';
+    this._readyAt = Date.now();
     return true;
   }
 
   fail(): boolean {
     if (this._status !== 'running') return false;
     this._status = 'failed';
+    this._settledAt = Date.now();
     return true;
   }
 
@@ -77,6 +94,7 @@ export class CheckpointCandidate {
     const deadlineAt = this.snapshot.startedAt + CHECKPOINT_CANDIDATE_DEADLINE_MS;
     for (let attempt = 1; attempt <= CHECKPOINT_CANDIDATE_MAX_ATTEMPTS; attempt++) {
       if (Date.now() >= deadlineAt || request.signal?.aborted || this._status !== 'running') break;
+      this._attempts = attempt;
       try {
         const result = await coordinator.compactIfNeeded([...this.snapshot.messages], {
           ...request,
@@ -96,6 +114,7 @@ export class CheckpointCandidate {
   cancel(): boolean {
     if (this._status === 'committed' || this._status === 'stale' || this._status === 'failed') return false;
     this._status = 'cancelled';
+    this._settledAt = Date.now();
     return true;
   }
 
@@ -114,6 +133,7 @@ export class CheckpointCandidate {
     const reason = compareSnapshotBoundary(this.snapshot, currentMessages, currentRevision, currentEpisodeId);
     if (reason) {
       this._status = 'stale';
+      this._settledAt = Date.now();
       return this.outcome(reason);
     }
     const suffix = currentMessages.slice(this.snapshot.boundaryMessageCount);
@@ -123,6 +143,7 @@ export class CheckpointCandidate {
   confirmCommit(): boolean {
     if (this._status !== 'ready') return false;
     this._status = 'committed';
+    this._settledAt = Date.now();
     return true;
   }
 

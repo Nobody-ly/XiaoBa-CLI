@@ -1095,6 +1095,8 @@ export class AgentSession {
     this.checkpointRevision++;
     this.checkpointCandidate = null;
     this.checkpointCandidateAbortController = null;
+    this.checkpointCandidatePromise = null;
+    this.logCheckpointCandidateEvent(candidate, 'committed', 'async_candidate');
     return committedMessages;
   }
 
@@ -1115,6 +1117,7 @@ export class AgentSession {
     if (committed) return committed;
 
     if (stopPointReached && candidateAtBoundary) {
+      const fallbackStartedAt = Date.now();
       const fallback = await this.checkpointCompactionCoordinator.compactIfNeeded(
         messagesBeforeCompaction,
         {
@@ -1122,6 +1125,23 @@ export class AgentSession {
           phase,
           toolTokens: this.getToolDefinitionTokens(),
           signal: this.activeAbortController?.signal,
+        },
+      );
+      const fallbackOutcome = fallback.compacted ? 'committed' : 'failed';
+      Logger.runtimeEvent(
+        fallback.compacted ? 'INFO' : 'WARN',
+        `[${this.key}] checkpoint_summary mode=serial_fallback outcome=${fallbackOutcome}`,
+        {
+          type: 'checkpoint_summary',
+          payload: {
+            category: 'checkpoint_summary',
+            mode: 'serial_fallback',
+            outcome: fallbackOutcome,
+            started_at: fallbackStartedAt,
+            duration_ms: Date.now() - fallbackStartedAt,
+            snapshot_tokens: this.getContextUsageInfo(messagesBeforeCompaction).usedTokens,
+            attempts: 1,
+          },
         },
       );
       if (fallback.compacted
@@ -1194,6 +1214,7 @@ export class AgentSession {
     const abortController = new AbortController();
     this.checkpointCandidate = candidate;
     this.checkpointCandidateAbortController = abortController;
+    this.logCheckpointCandidateEvent(candidate, 'started', 'async_candidate');
 
     const generation = candidate.generate(this.checkpointCandidateCoordinator, {
       sessionKey: this.key,
@@ -1211,6 +1232,7 @@ export class AgentSession {
       }
       this.checkpointCandidateAbortController = null;
       this.checkpointCandidatePromise = null;
+      this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
       if (candidate.status === 'failed') this.checkpointCandidate = null;
     });
   }
@@ -1224,8 +1246,42 @@ export class AgentSession {
       >= usage.maxTokens * (CHECKPOINT_CANDIDATE_SERIAL_THRESHOLD_PERCENT / 100);
   }
 
+  private logCheckpointCandidateEvent(
+    candidate: CheckpointCandidate,
+    outcome: string,
+    mode: 'async_candidate' | 'serial_fallback',
+  ): void {
+    const config = typeof (this.services.aiService as any).getConfig === 'function'
+      ? (this.services.aiService as any).getConfig()
+      : {};
+    const endedAt = candidate.settledAt || candidate.readyAt || Date.now();
+    Logger.runtimeEvent(
+      outcome === 'failed' ? 'WARN' : 'INFO',
+      `[${this.key}] checkpoint_summary mode=${mode} outcome=${outcome} candidate=${candidate.id}`,
+      {
+        type: 'checkpoint_summary',
+        payload: {
+          category: 'checkpoint_summary',
+          mode,
+          outcome,
+          candidate_id: candidate.id,
+          model: config.model,
+          provider: config.provider,
+          snapshot_tokens: candidate.snapshot.usedTokens,
+          started_at: candidate.snapshot.startedAt,
+          ready_at: candidate.readyAt,
+          committed_at: outcome === 'committed' ? endedAt : undefined,
+          duration_ms: Math.max(0, endedAt - candidate.snapshot.startedAt),
+          attempts: candidate.attempts,
+        },
+      },
+    );
+  }
+
   private cancelCheckpointCandidate(): void {
-    this.checkpointCandidate?.cancel();
+    const candidate = this.checkpointCandidate;
+    candidate?.cancel();
+    if (candidate) this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
     this.checkpointCandidateAbortController?.abort();
     this.checkpointCandidate = null;
     this.checkpointCandidatePromise = null;
