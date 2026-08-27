@@ -1278,7 +1278,7 @@ export class AgentSession {
     signal?: AbortSignal,
     callbacks?: SessionCallbacks,
   ): Promise<{ messages: Message[]; compacted: boolean }> {
-    if (!this.useCheckpointCompaction) {
+    if (!this.useCheckpointCompaction || !this.useCheckpointCandidates) {
       return this.contextWindowManager.compactIfNeeded(messages, {
         sessionKey: this.key,
         reason,

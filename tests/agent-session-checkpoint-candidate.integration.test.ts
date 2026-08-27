@@ -45,6 +45,41 @@ test('legacy compaction persists its replacement context', async () => {
   });
 });
 
+test('disabling candidates falls back to legacy synchronous compaction', async () => {
+  const previousCandidates = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+  const previousCheckpoint = process.env.XIAOBA_CHECKPOINT_COMPACTION_ENABLED;
+  process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = 'false';
+  process.env.XIAOBA_CHECKPOINT_COMPACTION_ENABLED = 'true';
+  try {
+    const session = createInitializedSession('user:candidate-fallback', {
+      async chatStream() {
+        return { content: 'answer', toolCalls: [], usage };
+      },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    let legacyCalls = 0;
+    let checkpointCalls = 0;
+    (session as any).contextWindowManager.compactIfNeeded = async (messages: Message[]) => {
+      legacyCalls++;
+      return { messages, compacted: false };
+    };
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async () => {
+      checkpointCalls++;
+      return noCompaction();
+    };
+
+    await session.handleMessage('fallback');
+
+    assert.equal(legacyCalls, 1);
+    assert.equal(checkpointCalls, 0);
+  } finally {
+    if (previousCandidates === undefined) delete process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = previousCandidates;
+    if (previousCheckpoint === undefined) delete process.env.XIAOBA_CHECKPOINT_COMPACTION_ENABLED;
+    else process.env.XIAOBA_CHECKPOINT_COMPACTION_ENABLED = previousCheckpoint;
+  }
+});
+
 test('candidate persistence race keeps memory aligned with the persisted projection', async () => {
   await withCandidateMode(async () => {
     const session = createInitializedSession('user:candidate-persist-race', {
