@@ -1236,7 +1236,13 @@ export class AgentSession {
     if (outcome === 'deadline' && candidate.status === 'running') {
       this.checkpointCandidateAbortController?.abort();
       candidate.fail('deadline');
-      this.checkpointCandidatePromise = null;
+      this.logCheckpointCandidateEvent(candidate, 'failed', 'async_candidate');
+      if (this.checkpointCandidate === candidate) {
+        this.checkpointCandidate = null;
+        this.checkpointCandidateAbortController = null;
+        this.checkpointCandidatePromise = null;
+        this.checkpointCandidateSuppressed = true;
+      }
     }
   }
 
