@@ -70,6 +70,9 @@ export class ContextWindowManager {
 
     try {
       const compacted = await this.compressor.compact(durable, { signal: options.signal });
+      if (compacted === durable) {
+        return { messages, compacted: false };
+      }
       const result = [...compacted, ...transient];
       Logger.info(`[${options.sessionKey}] 压缩完成，当前消息数: ${result.length}`);
       await this.emitStatus(options, {

@@ -104,6 +104,32 @@ describe('ContextWindowManager', () => {
     assert.equal(aiCalls, 0);
   });
 
+  test('does not report compaction when only system context exceeds the threshold', async () => {
+    let aiCalls = 0;
+    const statusEvents: any[] = [];
+    const aiService = {
+      chatStream: async () => {
+        aiCalls++;
+        return { content: '<summary>unexpected</summary>' };
+      },
+    } as unknown as AIService;
+    const manager = new ContextWindowManager(aiService, {
+      maxContextTokens: 100,
+      compactionThreshold: 0.5,
+    });
+    const messages: Message[] = [system('中'.repeat(1000))];
+
+    const result = await manager.compactIfNeeded(messages, {
+      sessionKey: 'system-only-session',
+      onStatus: event => statusEvents.push(event),
+    });
+
+    assert.equal(result.compacted, false);
+    assert.equal(result.messages, messages);
+    assert.equal(aiCalls, 0);
+    assert.deepStrictEqual(statusEvents.map(event => event.status), ['start']);
+  });
+
   test('emits a visible error status and keeps messages when compaction fails', async () => {
     const statusEvents: any[] = [];
     const aiService = {
