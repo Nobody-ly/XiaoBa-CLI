@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Message } from '../types';
+import type { Message, TokenUsage } from '../types';
 import type {
   CheckpointCompactionCoordinator,
   CheckpointCompactionRequest,
@@ -44,6 +44,8 @@ export class CheckpointCandidate {
   private _attempts = 0;
   private _readyAt: number | undefined;
   private _settledAt: number | undefined;
+  private _summaryUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  private _summaryAttempts = 0;
 
   constructor(
     readonly id: string,
@@ -68,6 +70,14 @@ export class CheckpointCandidate {
 
   get settledAt(): number | undefined {
     return this._settledAt;
+  }
+
+  get summaryUsage(): Readonly<TokenUsage> {
+    return this._summaryUsage;
+  }
+
+  get summaryAttempts(): number {
+    return this._summaryAttempts;
   }
 
   complete(messages: Message[]): boolean {
@@ -101,6 +111,7 @@ export class CheckpointCandidate {
           signal: request.signal,
         });
         if (this._status !== 'running') return false;
+        this.accumulateSummaryUsage(result.summaryUsage, result.summaryAttempts);
         if (result.compacted) return this.complete(result.messages);
         if (result.error && (
           isAuthenticationError(result.error)
@@ -113,6 +124,18 @@ export class CheckpointCandidate {
     }
     this.fail();
     return false;
+  }
+
+  private accumulateSummaryUsage(usage?: TokenUsage, attempts?: number): void {
+    this._summaryAttempts += Math.max(0, Math.floor(attempts || 0));
+    if (!usage) return;
+    this._summaryUsage = {
+      promptTokens: this._summaryUsage.promptTokens + usage.promptTokens,
+      completionTokens: this._summaryUsage.completionTokens + usage.completionTokens,
+      totalTokens: this._summaryUsage.totalTokens + usage.totalTokens,
+      cachedReadTokens: (this._summaryUsage.cachedReadTokens || 0) + (usage.cachedReadTokens || 0),
+      cachedWriteTokens: (this._summaryUsage.cachedWriteTokens || 0) + (usage.cachedWriteTokens || 0),
+    };
   }
 
   cancel(): boolean {

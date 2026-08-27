@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Message } from '../types';
+import { Message, TokenUsage } from '../types';
 import { AIService } from '../utils/ai-service';
 import { Logger } from '../utils/logger';
 import { Metrics } from '../utils/metrics';
@@ -63,6 +63,8 @@ export interface CheckpointCompactionResult {
   toolTokens: number;
   maxTokens: number;
   usagePercent: number;
+  summaryUsage?: TokenUsage;
+  summaryAttempts?: number;
 }
 
 export function isCheckpointCompactionEnabled(
@@ -150,22 +152,22 @@ export class CheckpointCompactionCoordinator {
 
     try {
       const result = await this.compact(messages, request, usage);
-      if (result === messages) {
+      if (result.messages === messages) {
         return { messages, compacted: false, ...usage };
       }
       await this.emitStatus(request, {
         status: 'complete',
         sessionKey: request.sessionKey,
         phase: request.phase,
-        messageCount: result.length,
+        messageCount: result.messages.length,
         ...usage,
       });
       Logger.info(
         `[${request.sessionKey}] checkpoint compaction complete `
-        + `phase=${request.phase}, messages=${messages.length}->${result.length}, `
-        + `tokens=${usage.usedTokens}->${estimateMessagesTokens(result)}`,
+        + `phase=${request.phase}, messages=${messages.length}->${result.messages.length}, `
+        + `tokens=${usage.usedTokens}->${estimateMessagesTokens(result.messages)}`,
       );
-      const audit = buildCompactionAudit(result);
+      const audit = buildCompactionAudit(result.messages);
       Logger.runtimeEvent(
         'INFO',
         `[${request.sessionKey}] checkpoint_compaction phase=${request.phase} `
@@ -176,9 +178,9 @@ export class CheckpointCompactionCoordinator {
           payload: {
             phase: request.phase,
             tokens_before: usage.usedTokens,
-            tokens_after: estimateMessagesTokens(result),
+            tokens_after: estimateMessagesTokens(result.messages),
             messages_before: messages.length,
-            messages_after: result.length,
+            messages_after: result.messages.length,
             summary_chars: audit.summaryChars,
             summary_sha256: audit.summarySha256,
             retained_root_count: audit.retainedRootCount,
@@ -189,7 +191,13 @@ export class CheckpointCompactionCoordinator {
           },
         },
       );
-      return { messages: result, compacted: true, ...usage };
+      return {
+        messages: result.messages,
+        compacted: true,
+        summaryUsage: result.summaryUsage,
+        summaryAttempts: result.summaryAttempts,
+        ...usage,
+      };
     } catch (error) {
       await this.emitStatus(request, {
         status: 'error',
@@ -210,7 +218,7 @@ export class CheckpointCompactionCoordinator {
     messages: Message[],
     request: CheckpointCompactionRequest,
     usage: ReturnType<CheckpointCompactionCoordinator['getUsageInfo']>,
-  ): Promise<Message[]> {
+  ): Promise<{ messages: Message[]; summaryUsage?: TokenUsage; summaryAttempts?: number }> {
     request.signal?.throwIfAborted();
     const { durable, transient } = splitDurableAndTransient(messages);
     const stableSystemMessages = durable.filter(message => (
@@ -220,7 +228,7 @@ export class CheckpointCompactionCoordinator {
     // summarized again, but is not retained verbatim in the compacted output.
     const sessionMessages = durable.filter(message => message.role !== 'system');
     if (sessionMessages.length === 0) {
-      return messages;
+      return { messages };
     }
 
     const activeEpisodeId = request.episodeId || findLatestEpisodeId(sessionMessages);
@@ -230,10 +238,10 @@ export class CheckpointCompactionCoordinator {
       this.retainedUserTokenBudget,
     );
     if (exactTail.summarySource.length === 0) {
-      return messages;
+      return { messages };
     }
 
-    const summary = await this.generateContinuationSummary(
+    const summaryResult = await this.generateContinuationSummary(
       exactTail.summarySource,
       request.phase,
       request.sessionKey,
@@ -243,7 +251,7 @@ export class CheckpointCompactionCoordinator {
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
       role: 'user',
-      content: `${CHECKPOINT_SUMMARY_PREFIX}\n\n${summary}`,
+      content: `${CHECKPOINT_SUMMARY_PREFIX}\n\n${summaryResult.summary}`,
       __checkpointSummary: true,
       __checkpointPhase: request.phase,
       ...(activeEpisodeId ? { __episodeId: activeEpisodeId } : {}),
@@ -252,12 +260,16 @@ export class CheckpointCompactionCoordinator {
         : {}),
     };
 
-    return [
-      ...stableSystemMessages,
-      summaryMessage,
-      ...exactTail.retained,
-      ...transient,
-    ];
+    return {
+      messages: [
+        ...stableSystemMessages,
+        summaryMessage,
+        ...exactTail.retained,
+        ...transient,
+      ],
+      summaryUsage: summaryResult.usage,
+      summaryAttempts: summaryResult.attempts,
+    };
   }
 
   private async generateContinuationSummary(
@@ -266,7 +278,7 @@ export class CheckpointCompactionCoordinator {
     sessionKey: string,
     signal?: AbortSignal,
     recordMetrics = true,
-  ): Promise<string> {
+  ): Promise<{ summary: string; usage?: TokenUsage; attempts: number }> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
     let lastError: unknown;
@@ -303,7 +315,7 @@ export class CheckpointCompactionCoordinator {
         if (!summary) {
           throw new Error('checkpoint compaction returned an empty summary');
         }
-        return summary;
+        return { summary, usage: response.usage, attempts: attempt + 1 };
       } catch (error) {
         lastError = error;
         if (!isContextLengthError(error) || attemptMessages.length <= 1) {

@@ -112,6 +112,41 @@ test('candidate retries transient generation failures within one logical budget'
   assert.equal(candidate.status, 'ready');
 });
 
+test('candidate accumulates attributable summary usage across logical attempts', async () => {
+  const candidate = new CheckpointCandidate('candidate-usage', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+  }));
+  let attempts = 0;
+  const coordinator = {
+    compactIfNeeded: async (messages: Message[]) => {
+      attempts++;
+      const summaryUsage = {
+        promptTokens: 10,
+        completionTokens: 2,
+        totalTokens: 12,
+        cachedReadTokens: 3,
+        cachedWriteTokens: 1,
+      };
+      return attempts === 1
+        ? { messages, compacted: false, summaryUsage, summaryAttempts: 1 }
+        : { messages: [user('summary')], compacted: true, summaryUsage, summaryAttempts: 1 };
+    },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+  }), true);
+  assert.equal(candidate.summaryAttempts, 2);
+  assert.deepEqual(candidate.summaryUsage, {
+    promptTokens: 20,
+    completionTokens: 4,
+    totalTokens: 24,
+    cachedReadTokens: 6,
+    cachedWriteTokens: 2,
+  });
+});
+
 test('candidate does not retry coordinator-reported authentication failures', async () => {
   const candidate = new CheckpointCandidate('candidate-auth-result', createCheckpointSnapshot([user('root')], {
     revision: 1,
