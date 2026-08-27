@@ -9,6 +9,8 @@ import { estimateMessagesTokens } from './token-estimator';
 const CHECKPOINT_CANDIDATE_DEADLINE_MS = 5 * 60 * 1000;
 const CHECKPOINT_CANDIDATE_MAX_ATTEMPTS = 3;
 
+export type CheckpointCandidateFailureReason = 'authentication' | 'transient' | 'invalid' | 'deadline';
+
 export type CheckpointCandidateStatus =
   | 'running'
   | 'ready'
@@ -47,6 +49,7 @@ export class CheckpointCandidate {
   private _summaryUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   private _summaryAttempts = 0;
   private _stopReachedAt: number | undefined;
+  private _failureReason: CheckpointCandidateFailureReason | undefined;
 
   constructor(
     readonly id: string,
@@ -89,6 +92,10 @@ export class CheckpointCandidate {
     this._stopReachedAt ??= at;
   }
 
+  get failureReason(): CheckpointCandidateFailureReason | undefined {
+    return this._failureReason;
+  }
+
   complete(messages: Message[]): boolean {
     if (this._status !== 'running') return false;
     this._result = cloneMessages(messages);
@@ -97,9 +104,10 @@ export class CheckpointCandidate {
     return true;
   }
 
-  fail(): boolean {
+  fail(reason: CheckpointCandidateFailureReason = 'invalid'): boolean {
     if (this._status !== 'running') return false;
     this._status = 'failed';
+    this._failureReason = reason;
     this._settledAt = Date.now();
     return true;
   }
@@ -111,8 +119,12 @@ export class CheckpointCandidate {
   ): Promise<boolean> {
     if (this._status !== 'running') return false;
     const deadlineAt = this.snapshot.startedAt + CHECKPOINT_CANDIDATE_DEADLINE_MS;
+    let failureReason: CheckpointCandidateFailureReason = 'invalid';
     for (let attempt = 1; attempt <= CHECKPOINT_CANDIDATE_MAX_ATTEMPTS; attempt++) {
-      if (Date.now() >= deadlineAt || request.signal?.aborted || this._status !== 'running') break;
+      if (Date.now() >= deadlineAt || request.signal?.aborted || this._status !== 'running') {
+        failureReason = 'deadline';
+        break;
+      }
       this._attempts = attempt;
       try {
         const result = await coordinator.compactIfNeeded([...this.snapshot.messages], {
@@ -122,16 +134,23 @@ export class CheckpointCandidate {
         if (this._status !== 'running') return false;
         this.accumulateSummaryUsage(result.summaryUsage, result.summaryAttempts);
         if (result.compacted) return this.complete(result.messages);
-        if (result.error && (
-          isAuthenticationError(result.error)
-          || !isRetryableCandidateError(result.error)
-        )) break;
+        if (result.error && isAuthenticationError(result.error)) {
+          failureReason = 'authentication';
+          break;
+        }
+        if (result.error && !isRetryableCandidateError(result.error)) break;
+        if (result.error) failureReason = 'transient';
         if (attempt === CHECKPOINT_CANDIDATE_MAX_ATTEMPTS) break;
       } catch (error) {
-        if (isAuthenticationError(error) || !isRetryableCandidateError(error)) break;
+        if (isAuthenticationError(error)) {
+          failureReason = 'authentication';
+          break;
+        }
+        if (!isRetryableCandidateError(error)) break;
+        failureReason = 'transient';
       }
     }
-    this.fail();
+    this.fail(failureReason);
     return false;
   }
 

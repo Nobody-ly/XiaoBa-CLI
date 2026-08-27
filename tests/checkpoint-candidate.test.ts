@@ -179,6 +179,7 @@ test('candidate does not retry coordinator-reported authentication failures', as
   }), false);
   assert.equal(attempts, 1);
   assert.equal(candidate.status, 'failed');
+  assert.equal(candidate.failureReason, 'authentication');
 });
 
 test('candidate does not retry authentication failures', async () => {

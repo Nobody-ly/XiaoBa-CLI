@@ -1282,6 +1282,10 @@ export class AgentSession {
       this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
       if (candidate.status === 'failed') {
         this.checkpointCandidateSuppressed = true;
+        if (candidate.failureReason === 'authentication') {
+          this.checkpointBlockedReason = 'checkpoint_authentication';
+          this.lifecycleManager.saveContext(this.messages);
+        }
         this.checkpointCandidate = null;
       }
     });
@@ -1314,6 +1318,7 @@ export class AgentSession {
           category: 'checkpoint_summary',
           mode,
           outcome,
+          failure_reason: candidate.failureReason,
           candidate_id: candidate.id,
           model: config.model,
           provider: config.provider,
