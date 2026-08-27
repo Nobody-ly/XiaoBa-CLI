@@ -97,6 +97,7 @@ export const CONTEXT_COMPACTION_START_MESSAGE = '正在压缩上下文，整理�
 export const CONTEXT_COMPACTION_COMPLETE_MESSAGE = '上下文压缩完成，继续处理当前请求。';
 export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文继续处理。';
 const CHECKPOINT_CANDIDATE_TTL_MS = 5 * 60 * 1000;
+const CHECKPOINT_CANDIDATE_TRIGGER_PERCENT = 75;
 const CHECKPOINT_CANDIDATE_SERIAL_THRESHOLD_PERCENT = 85;
 
 // ─── 接口定义 ───────────────────────────────────────────
@@ -268,7 +269,10 @@ export class AgentSession {
     );
     this.checkpointCandidateCoordinator = new CheckpointCompactionCoordinator(
       services.aiService,
-      { maxContextTokens: contextWindow.promptBudgetTokens, compactionThreshold: 0.6 },
+      {
+        maxContextTokens: contextWindow.promptBudgetTokens,
+        compactionThreshold: CHECKPOINT_CANDIDATE_TRIGGER_PERCENT / 100,
+      },
     );
     this.useCheckpointCompaction = isCheckpointCompactionEnabled();
     this.useCheckpointCandidates = checkpointCandidatesEnabled;
@@ -1104,7 +1108,7 @@ export class AgentSession {
   ): void {
     if (!this.useCheckpointCompaction || !this.useCheckpointCandidates || this.checkpointCandidate) return;
     const usage = this.getContextUsageInfo(messages);
-    if (usage.usagePercent < 60
+    if (usage.usagePercent < CHECKPOINT_CANDIDATE_TRIGGER_PERCENT
       || this.isCheckpointCandidateSerialThresholdReached(usage)) return;
 
     const durableMessages = splitDurableAndTransient(

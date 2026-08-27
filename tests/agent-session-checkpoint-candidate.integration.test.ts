@@ -89,10 +89,10 @@ test('candidate persistence race keeps memory aligned with the persisted project
     });
     (session as any).messages.push({ role: 'user', content: 'history root' });
     (session as any).getContextUsageInfo = () => ({
-      usedTokens: 60,
+      usedTokens: 75,
       toolTokens: 0,
       maxTokens: 100,
-      usagePercent: 60,
+      usagePercent: 75,
     });
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
     (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => ({
@@ -170,10 +170,10 @@ test('handleMessage starts a candidate and commits it on the next turn with suff
     (session as any).getContextUsageInfo = (messages: Message[]) => {
       const compacted = messages.some(message => message.content === 'candidate summary');
       return {
-        usedTokens: compacted ? 20 : 60,
+        usedTokens: compacted ? 20 : 75,
         toolTokens: 0,
         maxTokens: 100,
-        usagePercent: compacted ? 20 : 60,
+        usagePercent: compacted ? 20 : 75,
       };
     };
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
@@ -205,7 +205,7 @@ test('handleMessage starts a candidate and commits it on the next turn with suff
 
 test('handleMessage preempts at 85 percent and ignores a late candidate result', async () => {
   await withCandidateMode(async () => {
-    let usagePercent = 60;
+    let usagePercent = 75;
     let releaseCandidate!: () => void;
     const candidateGate = new Promise<void>(resolve => { releaseCandidate = resolve; });
     const session = createInitializedSession('user:candidate-preempt-integration', {
@@ -259,10 +259,10 @@ test('cleared parent session discards a candidate result that returns after dele
     });
     (session as any).messages.push({ role: 'user', content: 'history root' });
     (session as any).getContextUsageInfo = () => ({
-      usedTokens: 60,
+      usedTokens: 75,
       toolTokens: 0,
       maxTokens: 100,
-      usagePercent: 60,
+      usagePercent: 75,
     });
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
     (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
