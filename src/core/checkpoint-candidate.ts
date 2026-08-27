@@ -102,6 +102,10 @@ export class CheckpointCandidate {
         });
         if (this._status !== 'running') return false;
         if (result.compacted) return this.complete(result.messages);
+        if (result.error && (
+          isAuthenticationError(result.error)
+          || !isRetryableCandidateError(result.error)
+        )) break;
         if (attempt === CHECKPOINT_CANDIDATE_MAX_ATTEMPTS) break;
       } catch (error) {
         if (isAuthenticationError(error) || !isRetryableCandidateError(error)) break;

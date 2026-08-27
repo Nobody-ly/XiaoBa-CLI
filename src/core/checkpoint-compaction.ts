@@ -58,6 +58,7 @@ export interface CheckpointCompactionStatusEvent {
 export interface CheckpointCompactionResult {
   messages: Message[];
   compacted: boolean;
+  error?: unknown;
   usedTokens: number;
   toolTokens: number;
   maxTokens: number;
@@ -201,7 +202,7 @@ export class CheckpointCompactionCoordinator {
         `[${request.sessionKey}] checkpoint compaction failed `
         + `phase=${request.phase}: ${describeError(error)}`,
       );
-      return { messages, compacted: false, ...usage };
+      return { messages, compacted: false, error, ...usage };
     }
   }
 

@@ -112,6 +112,28 @@ test('candidate retries transient generation failures within one logical budget'
   assert.equal(candidate.status, 'ready');
 });
 
+test('candidate does not retry coordinator-reported authentication failures', async () => {
+  const candidate = new CheckpointCandidate('candidate-auth-result', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+  }));
+  let attempts = 0;
+  const coordinator = {
+    compactIfNeeded: async (messages: Message[]) => {
+      attempts++;
+      const error: any = new Error('unauthorized');
+      error.status = 403;
+      return { messages, compacted: false, error };
+    },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+  }), false);
+  assert.equal(attempts, 1);
+  assert.equal(candidate.status, 'failed');
+});
+
 test('candidate does not retry authentication failures', async () => {
   const candidate = new CheckpointCandidate('candidate-auth', createCheckpointSnapshot([user('root')], {
     revision: 1,

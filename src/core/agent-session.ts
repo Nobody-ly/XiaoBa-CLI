@@ -1216,6 +1216,8 @@ export class AgentSession {
     this.checkpointCandidateAbortController = abortController;
     this.logCheckpointCandidateEvent(candidate, 'started', 'async_candidate');
 
+    const deadlineTimer = setTimeout(() => abortController.abort(), CHECKPOINT_CANDIDATE_TTL_MS);
+    deadlineTimer.unref?.();
     const generation = candidate.generate(this.checkpointCandidateCoordinator, {
       sessionKey: this.key,
       phase,
@@ -1226,6 +1228,7 @@ export class AgentSession {
     });
     this.checkpointCandidatePromise = generation;
     void generation.finally(() => {
+      clearTimeout(deadlineTimer);
       if (lifecycleGeneration !== this.lifecycleGeneration
         || this.checkpointCandidate !== candidate) {
         return;
