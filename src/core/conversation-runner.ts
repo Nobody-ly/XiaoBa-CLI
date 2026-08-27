@@ -1573,6 +1573,11 @@ export class ConversationRunner {
       if (!this.isPromptTooLongError(error)) {
         throw error;
       }
+      if (this.beforeModelRequest) {
+        const guardedError = new Error('Provider rejected the prompt after the checkpoint budget guard');
+        (guardedError as Error & { cause?: unknown }).cause = error;
+        throw guardedError;
+      }
 
       Logger.warning('检测到提示词超长，执行紧急上下文裁剪后重试一次');
       this.forceTrimForOverflow(messages);
