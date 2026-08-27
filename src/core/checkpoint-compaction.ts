@@ -314,7 +314,13 @@ export class CheckpointCompactionCoordinator {
           },
         );
         if (response.usage && recordMetrics) {
-          Metrics.recordAICall('stream', response.usage);
+          const config = typeof (this.aiService as any).getConfig === 'function'
+            ? (this.aiService as any).getConfig()
+            : undefined;
+          const modelLabel = config?.model
+            ? `${config.provider || 'unknown'}/${config.model}`
+            : 'checkpoint_summary';
+          Metrics.recordAICall(modelLabel, response.usage);
         }
         const summary = (streamed || response.content || '').trim();
         if (!summary) {

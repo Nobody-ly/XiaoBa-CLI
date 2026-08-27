@@ -167,6 +167,64 @@ test('runner coordinates a candidate after the complete tool batch before the ne
   assert.equal(modelRequests[1].some(message => message.role === 'tool'), false);
 });
 
+test('a candidate ready during tool execution commits only after the complete tool batch', async () => {
+  let releaseTool!: () => void;
+  let toolStarted!: () => void;
+  const toolGate = new Promise<void>(resolve => { releaseTool = resolve; });
+  const toolStartedGate = new Promise<void>(resolve => { toolStarted = resolve; });
+  let candidateReady = false;
+  const modelRequests: Message[][] = [];
+  const transcript: Message[] = [{ role: 'user', content: 'inspect' }];
+  const runner = new ConversationRunner({
+    chat: async (messages: Message[]) => {
+      modelRequests.push(messages.map(message => structuredClone(message)));
+      if (modelRequests.length === 1) {
+        return {
+          content: null,
+          toolCalls: [{ id: 'call-ready', type: 'function', function: { name: 'inspect', arguments: '{}' } }],
+          usage,
+        };
+      }
+      return { content: 'continued', toolCalls: [], usage };
+    },
+  } as any, {
+    getToolDefinitions: () => [{ name: 'inspect', description: 'inspect', parameters: { type: 'object', properties: {} } }],
+    executeTool: async (call: ToolCall): Promise<ToolResult> => {
+      toolStarted();
+      await toolGate;
+      return { role: 'tool', tool_call_id: call.id, name: call.function.name, content: 'complete evidence', ok: true };
+    },
+  }, {
+    stream: false,
+    onCheckpointCandidateBoundary: messages => {
+      if (!candidateReady) return messages;
+      const toolCallIndex = messages.findIndex(message => message.tool_calls?.some(call => call.id === 'call-ready'));
+      if (toolCallIndex < 0 || !messages.some(message => message.tool_call_id === 'call-ready')) return messages;
+      return [
+        { role: 'user', content: 'candidate summary' },
+        ...messages.slice(toolCallIndex),
+      ];
+    },
+  });
+
+  const running = runner.run(transcript);
+  await toolStartedGate;
+  candidateReady = true;
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(transcript.some(message => message.content === 'candidate summary'), false);
+  assert.equal(transcript.some(message => message.role === 'tool'), false);
+  assert.equal(modelRequests.length, 1);
+
+  releaseTool();
+  await running;
+
+  assert.equal(modelRequests.length, 2);
+  assert.ok(modelRequests[1].some(message => message.content === 'candidate summary'));
+  assert.ok(modelRequests[1].some(message => message.tool_calls?.some(call => call.id === 'call-ready')));
+  assert.ok(modelRequests[1].some(message => message.tool_call_id === 'call-ready'));
+});
+
 test('runner invokes the candidate boundary before every model request', async () => {
   const boundaryCalls: number[] = [];
   let modelCalls = 0;

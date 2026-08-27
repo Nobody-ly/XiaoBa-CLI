@@ -14,8 +14,13 @@ const OWNED_SESSION_KEYS = [
   'user:candidate-episode-end',
   'user:candidate-preempt-integration',
   'user:candidate-fallback-integration',
+  'user:candidate-early-failure-fallback',
+  'user:candidate-persist-failure-fallback',
   'user:candidate-budget-blocked',
   'user:candidate-parent-destroyed',
+  'user:candidate-interrupted',
+  'user:candidate-cleanup',
+  'user:candidate-authentication',
 ];
 
 before(cleanOwnedSessionArtifacts);
@@ -354,6 +359,90 @@ test('candidate failure at 85 percent falls back once with the latest transcript
   });
 });
 
+test('candidate failure before 85 percent still falls back at the stop point', async () => {
+  await withCandidateMode(async () => {
+    let usagePercent = 75;
+    const session = createInitializedSession('user:candidate-early-failure-fallback', {
+      async chatStream() { return { content: 'main answer', toolCalls: [], usage }; },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = (messages: Message[]) => ({
+      usedTokens: messages.some(message => message.content === 'serial fallback summary') ? 20 : usagePercent,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: messages.some(message => message.content === 'serial fallback summary') ? 20 : usagePercent,
+    });
+    let fallbackCalls = 0;
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: Message[]) => {
+      if (
+        usagePercent < 85
+        || messages.some(message => message.content === 'serial fallback summary')
+      ) return noCompaction(messages);
+      fallbackCalls++;
+      return {
+        messages: [{ role: 'user', content: 'serial fallback summary' }],
+        compacted: true,
+        usedTokens: 20,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: 20,
+      };
+    };
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      throw new Error('candidate failed early');
+    };
+
+    await session.handleMessage('start candidate');
+    usagePercent = 85;
+    const result = await session.handleMessage('reach stop point');
+
+    assert.equal(result.taskOutcome, 'completed');
+    assert.equal(fallbackCalls, 1);
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'serial fallback summary'));
+  });
+});
+
+test('candidate persistence failure still falls back at the stop point', async () => {
+  await withCandidateMode(async () => {
+    let usagePercent = 75;
+    const session = createInitializedSession('user:candidate-persist-failure-fallback', {
+      async chatStream() { return { content: 'main answer', toolCalls: [], usage }; },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = (messages: Message[]) => ({
+      usedTokens: messages.some(message => message.content === 'serial fallback summary') ? 20 : usagePercent,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: messages.some(message => message.content === 'serial fallback summary') ? 20 : usagePercent,
+    });
+    let fallbackCalls = 0;
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => ({
+      messages: [{ role: 'user', content: 'candidate summary' }],
+      compacted: true,
+    });
+    (session as any).persistCheckpoint = (messages: Message[]) => !messages.some(message => message.content === 'candidate summary');
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: Message[]) => {
+      if (!messages.some(message => message.content === 'serial fallback summary')) fallbackCalls++;
+      return {
+        messages: [{ role: 'user', content: 'serial fallback summary' }],
+        compacted: true,
+        usedTokens: 20,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: 20,
+      };
+    };
+
+    await session.handleMessage('start candidate');
+    usagePercent = 85;
+    const result = await session.handleMessage('reach stop point');
+
+    assert.equal(result.taskOutcome, 'completed');
+    assert.equal(fallbackCalls, 1);
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'serial fallback summary'));
+  });
+});
+
 test('oversized candidate and fallback fail closed before the next model request', async () => {
   await withCandidateMode(async () => {
     let mainModelCalls = 0;
@@ -397,6 +486,122 @@ test('oversized candidate and fallback fail closed before the next model request
     assert.match(blockedRetry.text, /会话已冻结/);
     assert.equal(mainModelCalls, 0);
     assert.equal((session as any).messages.some((message: Message) => message.content === 'oversized candidate summary'), false);
+  });
+});
+
+test('interrupt discards a candidate result that returns late', async () => {
+  await withCandidateMode(async () => {
+    let releaseCandidate!: () => void;
+    const candidateGate = new Promise<void>(resolve => { releaseCandidate = resolve; });
+    const session = createInitializedSession('user:candidate-interrupted', {
+      async chatStream() { return { content: 'main answer', toolCalls: [], usage }; },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = () => ({ usedTokens: 75, toolTokens: 0, maxTokens: 100, usagePercent: 75 });
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      await candidateGate;
+      return { compacted: true, messages: [{ role: 'user', content: 'late interrupted summary' }] };
+    };
+
+    await session.handleMessage('start candidate');
+    const candidate = (session as any).checkpointCandidate;
+    assert.equal(candidate.status, 'running');
+
+    session.requestInterrupt();
+    assert.equal(candidate.status, 'cancelled');
+    assert.equal((session as any).checkpointCandidate, null);
+    releaseCandidate();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(candidate.result, undefined);
+    assert.equal((session as any).messages.some((message: Message) => message.content === 'late interrupted summary'), false);
+  });
+});
+
+test('cleanup discards a candidate result that returns late', async () => {
+  await withCandidateMode(async () => {
+    let releaseCandidate!: () => void;
+    const candidateGate = new Promise<void>(resolve => { releaseCandidate = resolve; });
+    const session = createInitializedSession('user:candidate-cleanup', {
+      async chatStream() { return { content: 'main answer', toolCalls: [], usage }; },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = () => ({ usedTokens: 75, toolTokens: 0, maxTokens: 100, usagePercent: 75 });
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      await candidateGate;
+      return { compacted: true, messages: [{ role: 'user', content: 'late cleanup summary' }] };
+    };
+    (session as any).lifecycleManager.persistAndClear = (messages: Message[]) => ({
+      saved: true,
+      savedCount: messages.length,
+      messages: [],
+    });
+
+    await session.handleMessage('start candidate');
+    const candidate = (session as any).checkpointCandidate;
+    assert.equal(candidate.status, 'running');
+
+    await session.cleanup();
+    assert.equal(candidate.status, 'cancelled');
+    assert.equal((session as any).checkpointCandidate, null);
+    releaseCandidate();
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(candidate.result, undefined);
+    assert.equal((session as any).messages.some((message: Message) => message.content === 'late cleanup summary'), false);
+  });
+});
+
+test('authentication failure blocks the session without serial fallback', async () => {
+  await withCandidateMode(async () => {
+    let usagePercent = 75;
+    let releaseAuthentication!: () => void;
+    const authenticationGate = new Promise<void>(resolve => { releaseAuthentication = resolve; });
+    let candidateCalls = 0;
+    let fallbackCalls = 0;
+    let mainCalls = 0;
+    const session = createInitializedSession('user:candidate-authentication', {
+      async chatStream() {
+        mainCalls++;
+        return { content: 'main answer', toolCalls: [], usage };
+      },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: usagePercent,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent,
+    });
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: Message[]) => {
+      fallbackCalls++;
+      return noCompaction(messages);
+    };
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
+      candidateCalls++;
+      await authenticationGate;
+      throw Object.assign(new Error('unauthorized'), { status: 401 });
+    };
+
+    await session.handleMessage('start candidate');
+    fallbackCalls = 0;
+    usagePercent = 85;
+    const blockedTurn = session.handleMessage('must not reach model');
+    await new Promise(resolve => setImmediate(resolve));
+    releaseAuthentication();
+    const result = await blockedTurn;
+
+    assert.equal(result.taskOutcome, 'failed');
+    assert.match(result.text, /会话已冻结/);
+    assert.equal(candidateCalls, 1);
+    assert.equal(fallbackCalls, 0);
+    assert.equal(mainCalls, 1);
+    assert.equal((session as any).checkpointBlockedReason, 'checkpoint_authentication');
+    const retry = await session.handleMessage('still blocked');
+    assert.equal(retry.taskOutcome, 'failed');
+    assert.equal(mainCalls, 1);
   });
 });
 
