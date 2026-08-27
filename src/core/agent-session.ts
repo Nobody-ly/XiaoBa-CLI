@@ -1209,8 +1209,28 @@ export class AgentSession {
     if (!this.checkpointCandidate || !this.checkpointCandidatePromise) return;
     const usage = this.getContextUsageInfo(messages);
     if (!this.isCheckpointCandidateSerialThresholdReached(usage)) return;
-    this.checkpointCandidate.markStopReached();
-    await this.checkpointCandidatePromise;
+    const candidate = this.checkpointCandidate;
+    const generation = this.checkpointCandidatePromise;
+    candidate.markStopReached();
+    const remainingMs = Math.max(
+      0,
+      CHECKPOINT_CANDIDATE_TTL_MS - (Date.now() - candidate.snapshot.startedAt),
+    );
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'deadline'>(resolve => {
+      deadlineTimer = setTimeout(() => resolve('deadline'), remainingMs);
+      deadlineTimer.unref?.();
+    });
+    const outcome = await Promise.race([
+      generation.then(() => 'settled' as const),
+      deadline,
+    ]);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (outcome === 'deadline' && candidate.status === 'running') {
+      this.checkpointCandidateAbortController?.abort();
+      candidate.fail('deadline');
+      this.checkpointCandidatePromise = null;
+    }
   }
 
   private coordinateCheckpointCandidate(messages: Message[]): void {
