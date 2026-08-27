@@ -432,7 +432,7 @@ export class ConversationRunner {
       await this.beforeModelRequest?.(messages, requestTools);
       if (this.beforeModelRequest
         && estimateMessagesTokens(requestMessages) + estimateToolsTokens(requestTools) > this.maxPromptTokens) {
-        throw new Error('Context checkpoint failed to reduce the final provider prompt below budget');
+        throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
       }
       const promptTrimmed = this.ensurePromptBudget(requestMessages, requestTools);
       if (promptTrimmed && callbacks?.onThinking) {
@@ -860,7 +860,7 @@ export class ConversationRunner {
           estimateToolsTokens(tools),
         );
         if (usage.usedTokens + usage.toolTokens >= usage.maxTokens * 0.85) {
-          throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+          throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
         }
       }
       return;
@@ -885,7 +885,7 @@ export class ConversationRunner {
       );
       if (postCheckpointUsage.usedTokens + postCheckpointUsage.toolTokens
         >= postCheckpointUsage.maxTokens * 0.85) {
-        throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+        throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
       }
     }
 
@@ -1574,7 +1574,7 @@ export class ConversationRunner {
         throw error;
       }
       if (this.beforeModelRequest) {
-        const guardedError = new Error('Provider rejected the prompt after the checkpoint budget guard');
+        const guardedError = new Error('CONTEXT_CHECKPOINT_BLOCKED');
         (guardedError as Error & { cause?: unknown }).cause = error;
         throw guardedError;
       }

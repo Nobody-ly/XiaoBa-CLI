@@ -118,7 +118,7 @@ test('ConversationRunner checkpoint guard does not trim and retry a provider con
 
   await assert.rejects(
     () => runner.run([{ role: 'user', content: 'durable history' }]),
-    /Provider rejected the prompt after the checkpoint budget guard/,
+    /CONTEXT_CHECKPOINT_BLOCKED/,
   );
   assert.equal(calls, 1);
 });

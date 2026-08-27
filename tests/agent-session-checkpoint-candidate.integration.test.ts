@@ -391,6 +391,10 @@ test('oversized candidate and fallback fail closed before the next model request
     const result = await session.handleMessage('blocked input');
 
     assert.equal(result.taskOutcome, 'failed');
+    assert.match(result.text, /会话已冻结/);
+    const blockedRetry = await session.handleMessage('must remain blocked');
+    assert.equal(blockedRetry.taskOutcome, 'failed');
+    assert.match(blockedRetry.text, /会话已冻结/);
     assert.equal(mainModelCalls, 0);
     assert.equal((session as any).messages.some((message: Message) => message.content === 'oversized candidate summary'), false);
   });

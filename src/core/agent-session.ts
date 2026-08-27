@@ -96,6 +96,8 @@ export const MODEL_REQUEST_FAILED_MESSAGE = '模型服务暂时不稳定，本�
 export const CONTEXT_COMPACTION_START_MESSAGE = '正在压缩上下文，整理较早的对话内容。';
 export const CONTEXT_COMPACTION_COMPLETE_MESSAGE = '上下文压缩完成，继续处理当前请求。';
 export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文继续处理。';
+export const CONTEXT_CHECKPOINT_BLOCKED_MESSAGE = '上下文检查点创建失败，会话已冻结以保护完整历史。请清空会话或恢复模型配置后重试。';
+const CONTEXT_CHECKPOINT_BLOCKED_ERROR = 'CONTEXT_CHECKPOINT_BLOCKED';
 const CHECKPOINT_CANDIDATE_TTL_MS = 5 * 60 * 1000;
 const CHECKPOINT_CANDIDATE_TRIGGER_PERCENT = 75;
 const CHECKPOINT_CANDIDATE_SERIAL_THRESHOLD_PERCENT = 85;
@@ -231,6 +233,7 @@ export class AgentSession {
   private checkpointCandidatePromise: Promise<boolean> | null = null;
   private checkpointCandidateAbortController: AbortController | null = null;
   private checkpointCandidateSuppressed = false;
+  private checkpointBlockedReason: string | null = null;
   private checkpointCandidateSequence = 0;
   /** Epoch for destructive transcript replacement; tail appends keep the same epoch. */
   private checkpointRevision = 0;
@@ -316,7 +319,7 @@ export class AgentSession {
         const usage = this.getContextUsageInfo(messages);
         const toolTokens = estimateToolsTokens(tools);
         if (usage.usedTokens + toolTokens >= usage.maxTokens * 0.85) {
-          throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+          throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
         }
       },
     });
@@ -684,6 +687,13 @@ export class AgentSession {
       if (this.busy) {
         return { text: BUSY_MESSAGE, visibleToUser: true };
       }
+      if (this.checkpointBlockedReason) {
+        return {
+          text: CONTEXT_CHECKPOINT_BLOCKED_MESSAGE,
+          visibleToUser: true,
+          taskOutcome: 'failed',
+        };
+      }
       const lifecycleGeneration = this.lifecycleGeneration;
 
       const runtimeFeedback = this.consumeRuntimeFeedback(runtimeFeedbackInputs);
@@ -739,7 +749,7 @@ export class AgentSession {
           && this.isCheckpointCandidateSerialThresholdReached(
             this.getContextUsageInfo(this.messages),
           )) {
-          throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+          throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
         }
 
         failurePhase = 'session_init';
@@ -792,6 +802,21 @@ export class AgentSession {
           this.messages = this.turnContextBuilder.removeTransientMessages(this.messages);
           this.saveInterruptedContextIfCurrent(lifecycleGeneration);
           return { text: '已停止当前请求。', visibleToUser: true, taskOutcome: 'cancelled' };
+        }
+
+        if (String(err?.message || err) === CONTEXT_CHECKPOINT_BLOCKED_ERROR
+          || String(err?.cause?.message || '') === CONTEXT_CHECKPOINT_BLOCKED_ERROR) {
+          this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+          this.messages = stripAssistantArtifactsFromMessages(
+            this.turnContextBuilder.removeTransientMessages(this.messages),
+          );
+          this.lifecycleManager.saveContext(this.messages);
+          Logger.error(`[会话 ${this.key}] 上下文检查点失败，会话已冻结并保留完整历史`);
+          return {
+            text: CONTEXT_CHECKPOINT_BLOCKED_MESSAGE,
+            visibleToUser: true,
+            taskOutcome: 'failed',
+          };
         }
 
         const recoveredMessages = this.getPartialMessagesFromError(err);
@@ -965,6 +990,7 @@ export class AgentSession {
     this.lifecycleGeneration++;
     this.checkpointRevision++;
     this.cancelCheckpointCandidate();
+    this.checkpointBlockedReason = null;
     this.planRuntime.clear();
     this.stopSubAgents('父会话 reset');
     this.messages = [];
@@ -981,6 +1007,7 @@ export class AgentSession {
     this.lifecycleGeneration++;
     this.checkpointRevision++;
     this.cancelCheckpointCandidate();
+    this.checkpointBlockedReason = null;
     this.planRuntime.clear();
     this.stopSubAgents('父会话 clear');
     this.messages = [];
@@ -1164,7 +1191,7 @@ export class AgentSession {
         this.checkpointRevision++;
         return fallback.messages;
       }
-      throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+      throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
     }
 
     this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesBeforeCompaction, phase);
