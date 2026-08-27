@@ -810,8 +810,9 @@ export class AgentSession {
         if (String(err?.message || err) === CONTEXT_CHECKPOINT_BLOCKED_ERROR
           || String(err?.cause?.message || '') === CONTEXT_CHECKPOINT_BLOCKED_ERROR) {
           this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+          const blockedMessages = this.getPartialMessagesFromError(err) || this.messages;
           this.messages = stripAssistantArtifactsFromMessages(
-            this.turnContextBuilder.removeTransientMessages(this.messages),
+            this.turnContextBuilder.removeTransientMessages(blockedMessages),
           );
           this.lifecycleManager.saveContext(this.messages);
           Logger.error(`[会话 ${this.key}] 上下文检查点失败，会话已冻结并保留完整历史`);
