@@ -73,6 +73,8 @@ export interface ParsedCatsMessage {
   executionScope: ExecutionScope;
   /** 仅当前 turn 有效的 opaque Artifact context ref。 */
   artifactContextRef?: string;
+  /** 仅当前 turn 有效的 opaque Artifact task ref。 */
+  artifactTaskRef?: string;
   /** 服务端签发的当前 turn 用户设备授权 */
   deviceGrants?: ScopedDeviceGrant[];
   /** 服务端为当前 turn 选择的用户设备，或要求先选择设备 */

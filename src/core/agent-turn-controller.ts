@@ -81,6 +81,7 @@ export interface RunAgentTurnParams {
   sessionRoute?: SessionRoute;
   executionScope?: ExecutionScope;
   artifactContextRef?: string;
+  artifactTaskRef?: string;
   localDeviceGrant?: ScopedLocalDeviceGrant;
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
@@ -187,6 +188,7 @@ export class AgentTurnController {
         channel: params.channel,
         executionScope: params.executionScope,
         artifactContextRef: params.artifactContextRef,
+        artifactTaskRef: params.artifactTaskRef,
         localDeviceGrant: params.localDeviceGrant,
         deviceGrants: params.deviceGrants,
         deviceSelection: params.deviceSelection,
@@ -330,6 +332,7 @@ export class AgentTurnController {
     channel?: ChannelCallbacks;
     executionScope?: ExecutionScope;
     artifactContextRef?: string;
+    artifactTaskRef?: string;
     localDeviceGrant?: ScopedLocalDeviceGrant;
     deviceGrants?: ScopedDeviceGrant[];
     deviceSelection?: ScopedDeviceSelection;
@@ -381,6 +384,7 @@ export class AgentTurnController {
           channel: options.channel,
           executionScope: options.executionScope,
           artifactContextRef: options.artifactContextRef,
+          artifactTaskRef: options.artifactTaskRef,
           localDeviceGrant: options.localDeviceGrant,
           deviceGrants: options.deviceGrants,
           deviceSelection: options.deviceSelection,

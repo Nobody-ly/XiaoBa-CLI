@@ -15,6 +15,7 @@ describe('CatsCompany MessageSender retry behavior', () => {
 
     await sender.sendTaskStatus('p2p_1_2', {
       run_id: 'run-1',
+      artifact_task_ref: `atr_${'a'.repeat(43)}`,
       state: 'running',
       summary: '正在处理请求',
     });
@@ -23,6 +24,7 @@ describe('CatsCompany MessageSender retry behavior', () => {
     assert.equal(sent[0].type, 'task_status');
     assert.deepEqual(sent[0].content, {
       run_id: 'run-1',
+      artifact_task_ref: `atr_${'a'.repeat(43)}`,
       state: 'running',
       summary: '正在处理请求',
     });

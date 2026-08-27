@@ -271,6 +271,8 @@ export interface ToolExecutionContext {
   localFileGrants?: ScopedLocalFileGrant[];
   /** 当前 turn 的短期 Artifact context ref；只供本机工具子进程临时读取。 */
   artifactContextRef?: string;
+  /** 当前 turn 的短期 Artifact task ref；只供本机工具子进程临时读取。 */
+  artifactTaskRef?: string;
 }
 
 /**
