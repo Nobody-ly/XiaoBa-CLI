@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Message, TokenUsage } from '../types';
+import type { ProviderRequestBudget } from '../providers/provider';
 import type {
   CheckpointCompactionCoordinator,
   CheckpointCompactionRequest,
@@ -50,6 +51,7 @@ export class CheckpointCandidate {
   private _summaryAttempts = 0;
   private _stopReachedAt: number | undefined;
   private _failureReason: CheckpointCandidateFailureReason | undefined;
+  private _providerRequestBudget: ProviderRequestBudget | undefined;
 
   constructor(
     readonly id: string,
@@ -96,6 +98,10 @@ export class CheckpointCandidate {
     return this._failureReason;
   }
 
+  get providerRequestBudget(): Readonly<ProviderRequestBudget> | undefined {
+    return this._providerRequestBudget;
+  }
+
   complete(messages: Message[]): boolean {
     if (this._status !== 'running') return false;
     this._result = cloneMessages(messages);
@@ -119,6 +125,7 @@ export class CheckpointCandidate {
   ): Promise<boolean> {
     if (this._status !== 'running') return false;
     const deadlineAt = this.snapshot.startedAt + CHECKPOINT_CANDIDATE_DEADLINE_MS;
+    this._providerRequestBudget = request.providerRequestBudget;
     let failureReason: CheckpointCandidateFailureReason = 'invalid';
     for (let attempt = 1; attempt <= CHECKPOINT_CANDIDATE_MAX_ATTEMPTS; attempt++) {
       if (Date.now() >= deadlineAt || request.signal?.aborted || this._status !== 'running') {

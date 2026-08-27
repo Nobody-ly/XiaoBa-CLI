@@ -112,6 +112,35 @@ test('candidate retries transient generation failures within one logical budget'
   assert.equal(candidate.status, 'ready');
 });
 
+test('candidate shares one provider request budget across logical attempts', async () => {
+  const candidate = new CheckpointCandidate('candidate-request-budget', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+  }));
+  const budget = { maxRequests: 18, usedRequests: 0 };
+  const observedBudgets: unknown[] = [];
+  let attempts = 0;
+  const coordinator = {
+    compactIfNeeded: async (messages: Message[], request: any) => {
+      observedBudgets.push(request.providerRequestBudget);
+      request.providerRequestBudget.usedRequests++;
+      attempts++;
+      return attempts === 1
+        ? { messages, compacted: false, error: new Error('temporary network failure') }
+        : { messages: [user('summary')], compacted: true };
+    },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+    providerRequestBudget: budget,
+  }), true);
+  assert.equal(attempts, 2);
+  assert.equal(observedBudgets[0], budget);
+  assert.equal(observedBudgets[1], budget);
+  assert.deepEqual(candidate.providerRequestBudget, { maxRequests: 18, usedRequests: 2 });
+});
+
 test('candidate accumulates attributable summary usage across logical attempts', async () => {
   const candidate = new CheckpointCandidate('candidate-usage', createCheckpointSnapshot([user('root')], {
     revision: 1,

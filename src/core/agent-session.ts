@@ -99,6 +99,7 @@ export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保�
 export const CONTEXT_CHECKPOINT_BLOCKED_MESSAGE = '上下文检查点创建失败，会话已冻结以保护完整历史。请清空会话或恢复模型配置后重试。';
 const CONTEXT_CHECKPOINT_BLOCKED_ERROR = 'CONTEXT_CHECKPOINT_BLOCKED';
 const CHECKPOINT_CANDIDATE_TTL_MS = 5 * 60 * 1000;
+const CHECKPOINT_PROVIDER_REQUEST_LIMIT = 18;
 const CHECKPOINT_CANDIDATE_TRIGGER_PERCENT = 75;
 const CHECKPOINT_CANDIDATE_SERIAL_THRESHOLD_PERCENT = 85;
 
@@ -1160,6 +1161,10 @@ export class AgentSession {
 
     if (stopPointReached && candidateAtBoundary) {
       const fallbackStartedAt = Date.now();
+      const fallbackProviderBudget = {
+        maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT,
+        usedRequests: 0,
+      };
       const fallback = await this.checkpointCompactionCoordinator.compactIfNeeded(
         messagesBeforeCompaction,
         {
@@ -1167,6 +1172,7 @@ export class AgentSession {
           phase,
           toolTokens: this.getToolDefinitionTokens(),
           signal: this.activeAbortController?.signal,
+          providerRequestBudget: fallbackProviderBudget,
         },
       );
       const fallbackWithinBudget = fallback.compacted
@@ -1194,6 +1200,8 @@ export class AgentSession {
             duration_ms: Date.now() - fallbackStartedAt,
             snapshot_tokens: this.getContextUsageInfo(messagesBeforeCompaction).usedTokens,
             attempts: fallback.summaryAttempts || 1,
+            provider_requests: fallbackProviderBudget.usedRequests,
+            provider_request_limit: fallbackProviderBudget.maxRequests,
             summary_input_tokens: fallback.summaryUsage?.promptTokens || 0,
             summary_output_tokens: fallback.summaryUsage?.completionTokens || 0,
             cache_read_tokens: fallback.summaryUsage?.cachedReadTokens || 0,
@@ -1308,6 +1316,10 @@ export class AgentSession {
       episodeId,
       toolTokens: this.getToolDefinitionTokens(),
       signal: abortController.signal,
+      providerRequestBudget: {
+        maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT,
+        usedRequests: 0,
+      },
       recordMetrics: true,
     });
     this.checkpointCandidatePromise = generation;
@@ -1371,6 +1383,9 @@ export class AgentSession {
             ? undefined
             : Math.max(0, candidate.stopReachedAt - candidate.snapshot.startedAt),
           attempts: candidate.attempts,
+          provider_requests: candidate.providerRequestBudget?.usedRequests || 0,
+          provider_request_limit: candidate.providerRequestBudget?.maxRequests
+            || CHECKPOINT_PROVIDER_REQUEST_LIMIT,
           summary_attempts: candidate.summaryAttempts,
           summary_input_tokens: candidate.summaryUsage.promptTokens,
           summary_output_tokens: candidate.summaryUsage.completionTokens,

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Message, TokenUsage } from '../types';
 import { AIService } from '../utils/ai-service';
+import type { ProviderRequestBudget } from '../providers/provider';
 import { Logger } from '../utils/logger';
 import { Metrics } from '../utils/metrics';
 import { readRequiredBundledPromptFile } from '../utils/prompt-template';
@@ -39,6 +40,7 @@ export interface CheckpointCompactionRequest {
   episodeId?: string;
   toolTokens?: number;
   signal?: AbortSignal;
+  providerRequestBudget?: ProviderRequestBudget;
   recordMetrics?: boolean;
   onStatus?: (event: CheckpointCompactionStatusEvent) => void | Promise<void>;
 }
@@ -247,6 +249,7 @@ export class CheckpointCompactionCoordinator {
       request.sessionKey,
       request.signal,
       request.recordMetrics,
+      request.providerRequestBudget,
     );
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
@@ -278,6 +281,7 @@ export class CheckpointCompactionCoordinator {
     sessionKey: string,
     signal?: AbortSignal,
     recordMetrics = true,
+    providerRequestBudget?: ProviderRequestBudget,
   ): Promise<{ summary: string; usage?: TokenUsage; attempts: number }> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
@@ -300,6 +304,7 @@ export class CheckpointCompactionCoordinator {
           { onText: text => { streamed += text; } },
           {
             signal,
+            providerRequestBudget,
             streamOutputMode: 'buffered',
             promptCacheContext: {
               sessionKey,
