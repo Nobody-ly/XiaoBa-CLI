@@ -46,6 +46,7 @@ export class CheckpointCandidate {
   private _settledAt: number | undefined;
   private _summaryUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   private _summaryAttempts = 0;
+  private _stopReachedAt: number | undefined;
 
   constructor(
     readonly id: string,
@@ -78,6 +79,14 @@ export class CheckpointCandidate {
 
   get summaryAttempts(): number {
     return this._summaryAttempts;
+  }
+
+  get stopReachedAt(): number | undefined {
+    return this._stopReachedAt;
+  }
+
+  markStopReached(at = Date.now()): void {
+    this._stopReachedAt ??= at;
   }
 
   complete(messages: Message[]): boolean {

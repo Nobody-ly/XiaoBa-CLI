@@ -1175,6 +1175,7 @@ export class AgentSession {
     if (!this.checkpointCandidate || !this.checkpointCandidatePromise) return;
     const usage = this.getContextUsageInfo(messages);
     if (!this.isCheckpointCandidateSerialThresholdReached(usage)) return;
+    this.checkpointCandidate.markStopReached();
     await this.checkpointCandidatePromise;
   }
 
@@ -1294,6 +1295,9 @@ export class AgentSession {
           ready_at: candidate.readyAt,
           committed_at: outcome === 'committed' ? endedAt : undefined,
           duration_ms: Math.max(0, endedAt - candidate.snapshot.startedAt),
+          trigger_to_stop_duration_ms: candidate.stopReachedAt === undefined
+            ? undefined
+            : Math.max(0, candidate.stopReachedAt - candidate.snapshot.startedAt),
           attempts: candidate.attempts,
           summary_attempts: candidate.summaryAttempts,
           summary_input_tokens: candidate.summaryUsage.promptTokens,

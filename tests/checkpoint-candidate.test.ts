@@ -147,6 +147,18 @@ test('candidate accumulates attributable summary usage across logical attempts',
   });
 });
 
+test('candidate records the first trigger-to-stop boundary only once', () => {
+  const candidate = new CheckpointCandidate('candidate-stop-time', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+    startedAt: 100,
+  }));
+
+  candidate.markStopReached(160);
+  candidate.markStopReached(220);
+
+  assert.equal(candidate.stopReachedAt, 160);
+});
+
 test('candidate does not retry coordinator-reported authentication failures', async () => {
   const candidate = new CheckpointCandidate('candidate-auth-result', createCheckpointSnapshot([user('root')], {
     revision: 1,
