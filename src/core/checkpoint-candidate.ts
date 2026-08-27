@@ -6,6 +6,9 @@ import type {
 } from './checkpoint-compaction';
 import { estimateMessagesTokens } from './token-estimator';
 
+const CHECKPOINT_CANDIDATE_DEADLINE_MS = 5 * 60 * 1000;
+const CHECKPOINT_CANDIDATE_MAX_ATTEMPTS = 3;
+
 export type CheckpointCandidateStatus =
   | 'running'
   | 'ready'
@@ -71,21 +74,23 @@ export class CheckpointCandidate {
     request: Omit<CheckpointCompactionRequest, 'signal'> & { signal?: AbortSignal },
   ): Promise<boolean> {
     if (this._status !== 'running') return false;
-    try {
-      const result = await coordinator.compactIfNeeded([...this.snapshot.messages], {
-        ...request,
-        signal: request.signal,
-      });
-      if (this._status !== 'running') return false;
-      if (!result.compacted) {
-        this.fail();
-        return false;
+    const deadlineAt = this.snapshot.startedAt + CHECKPOINT_CANDIDATE_DEADLINE_MS;
+    for (let attempt = 1; attempt <= CHECKPOINT_CANDIDATE_MAX_ATTEMPTS; attempt++) {
+      if (Date.now() >= deadlineAt || request.signal?.aborted || this._status !== 'running') break;
+      try {
+        const result = await coordinator.compactIfNeeded([...this.snapshot.messages], {
+          ...request,
+          signal: request.signal,
+        });
+        if (this._status !== 'running') return false;
+        if (result.compacted) return this.complete(result.messages);
+        if (attempt === CHECKPOINT_CANDIDATE_MAX_ATTEMPTS) break;
+      } catch (error) {
+        if (isAuthenticationError(error) || !isRetryableCandidateError(error)) break;
       }
-      return this.complete(result.messages);
-    } catch {
-      this.fail();
-      return false;
     }
+    this.fail();
+    return false;
   }
 
   cancel(): boolean {
@@ -138,6 +143,27 @@ export class CheckpointCandidate {
   ): CheckpointCandidateResult {
     return { status: this._status, candidateId: this.id, ...(reason ? { reason } : {}), ...(messages ? { messages } : {}) };
   }
+}
+
+function isAuthenticationError(error: unknown): boolean {
+  const status = readErrorStatus(error);
+  return status === 401 || status === 403;
+}
+
+function isRetryableCandidateError(error: unknown): boolean {
+  const status = readErrorStatus(error);
+  if (status && [408, 429, 500, 502, 503, 504, 520, 524, 529].includes(status)) return true;
+  const text = String((error as any)?.message || error || '');
+  return /timeout|timed out|temporar|network|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up|empty summary|empty response|returned an empty summary|checkpoint compaction returned an empty summary/i.test(text);
+}
+
+function readErrorStatus(error: unknown): number | undefined {
+  const value = Number(
+    (error as any)?.status
+    ?? (error as any)?.statusCode
+    ?? (error as any)?.response?.status,
+  );
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 export function createCheckpointSnapshot(

@@ -87,6 +87,53 @@ test('candidate generates through the coordinator without mutating the snapshot'
   assert.deepEqual(candidate.snapshot.messages.map(message => message.content), ['root']);
 });
 
+test('candidate retries transient generation failures within one logical budget', async () => {
+  const candidate = new CheckpointCandidate('candidate-retry', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+  }));
+  let attempts = 0;
+  const coordinator = {
+    compactIfNeeded: async () => {
+      attempts++;
+      if (attempts < 3) {
+        const error: any = new Error('service unavailable');
+        error.status = 503;
+        throw error;
+      }
+      return { messages: [user('summary')], compacted: true };
+    },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+  }), true);
+  assert.equal(attempts, 3);
+  assert.equal(candidate.status, 'ready');
+});
+
+test('candidate does not retry authentication failures', async () => {
+  const candidate = new CheckpointCandidate('candidate-auth', createCheckpointSnapshot([user('root')], {
+    revision: 1,
+  }));
+  let attempts = 0;
+  const coordinator = {
+    compactIfNeeded: async () => {
+      attempts++;
+      const error: any = new Error('unauthorized');
+      error.status = 401;
+      throw error;
+    },
+  } as any;
+
+  assert.equal(await candidate.generate(coordinator, {
+    sessionKey: 'candidate-session',
+    phase: 'mid_turn',
+  }), false);
+  assert.equal(attempts, 1);
+  assert.equal(candidate.status, 'failed');
+});
+
 test('candidate generation failure enters failed state', async () => {
   const candidate = new CheckpointCandidate('candidate-failed', createCheckpointSnapshot([user('root')], {
     revision: 1,
