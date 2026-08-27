@@ -186,25 +186,6 @@ jobs:
           echo "path=$artifact" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$artifact" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      - name: Validate dedicated bake buckets
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          upload_bucket="$TOS_WORKER_BUCKET"
-          upload_config="$TOSUTIL_GZ_CONFIG"
-          if [[ -n "${TOS_WORKER_UPLOAD_BUCKET}" && "${TOS_WORKER_UPLOAD_BUCKET}" != "${TOS_WORKER_BUCKET}" ]]; then
-            upload_bucket="$TOS_WORKER_UPLOAD_BUCKET"
-            upload_config="$TOSUTIL_HK_CONFIG"
-          fi
-
-          # Bucket acceleration, the HK -> GZ replication rule, and the
-          # prefix-scoped three-day lifecycle are persistent TOS infrastructure.
-          # The bake only validates the buckets here and owns its run objects.
-          tosutil stat "tos://${upload_bucket}" -conf="$upload_config" >/dev/null
-          tosutil stat "tos://${TOS_WORKER_BUCKET}" -conf="$TOSUTIL_GZ_CONFIG" >/dev/null
-          echo "dedicated bake buckets ready: $upload_bucket -> $TOS_WORKER_BUCKET"
-
       - name: Stage private artifact for the builder
         id: artifact_transport
         timeout-minutes: 30
@@ -233,13 +214,15 @@ jobs:
           artifact_size="$(stat --format='%s' "$WORKER_ARTIFACT_PATH")"
           echo "artifact upload start: bytes=$artifact_size bucket=$upload_bucket key=$key"
           upload_started="$(date +%s)"
-          tosutil cp "$WORKER_ARTIFACT_PATH" "tos://${upload_bucket}/${key}" \
+          timeout --signal=TERM --kill-after=30s 20m \
+            tosutil cp "$WORKER_ARTIFACT_PATH" "tos://${upload_bucket}/${key}" \
             -acl=private -meta="sha256:${WORKER_ARTIFACT_SHA256}" \
             -vchecksum -threshold=52428800 -p=8 -ps=16777216 \
             -conf="$upload_config"
           echo "artifact upload complete: seconds=$(( $(date +%s) - upload_started ))"
           script_sha="$(sha256sum ops/ctyun-worker-image/prepare-image.sh | awk '{print $1}')"
-          tosutil cp ops/ctyun-worker-image/prepare-image.sh \
+          timeout --signal=TERM --kill-after=30s 3m \
+            tosutil cp ops/ctyun-worker-image/prepare-image.sh \
             "tos://${upload_bucket}/${script_key}" \
             -acl=private -meta="sha256:${script_sha}" -vchecksum \
             -conf="$upload_config"
@@ -252,9 +235,11 @@ jobs:
             replication_started="$(date +%s)"
             pending=1
             while (( $(date +%s) < deadline )); do
-              if tosutil stat "tos://${TOS_WORKER_BUCKET}/${key}" \
+              if timeout --signal=TERM --kill-after=5s 20s \
+                  tosutil stat "tos://${TOS_WORKER_BUCKET}/${key}" \
                   -conf="$TOSUTIL_GZ_CONFIG" >/dev/null 2>&1 \
-                && tosutil stat "tos://${TOS_WORKER_BUCKET}/${script_key}" \
+                && timeout --signal=TERM --kill-after=5s 20s \
+                  tosutil stat "tos://${TOS_WORKER_BUCKET}/${script_key}" \
                   -conf="$TOSUTIL_GZ_CONFIG" >/dev/null 2>&1; then
                 pending=0; break
               fi

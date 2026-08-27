@@ -23,7 +23,7 @@
 **技术栈：** bash（`prepare-image.sh`，bake 时在 builder 上以 root 执行）、Node test runner + `tsx`（静态断言测试）、GitHub Actions（workflow 不变）。
 
 **关键事实（部署 skill 2026-08 已实测验证）：**
-- **systemd 8.15 + glibc 8.7 组合有 `_dl_fini` bug**：journal 出现 `Caught <ABRT>` → `Freezing execution.`，之后所有 `systemctl` 调用超时。5 台 worker 命中 4 台（worker1/worker2/ck-worker/yjz-work）；zh-work 预装 8.16 + 8.8 从未 freeze——证明升级到 8.16+8.8 即可免疫。
+- **systemd 8.15 + glibc 8.7 组合有 `_dl_fini` bug**：journal 出现 `Caught <ABRT>` → `Freezing execution.`，之后所有 `systemctl` 调用超时。旧 worker 样本中多数机器命中；预装 8.16 + 8.8 的对照机器未出现 freeze，证明升级到 8.16 + 8.8 可规避该问题。
 - **systemd 8.16 上仍会因 fwupd 触发 ABRT（08-05）**：`fwupd.service` lifecycle 处理时 systemd 自身崩溃（`Caught <ABRT>, from our own process` → `Freezing execution.`）。解法：`systemctl mask fwupd.service` 且**必须同时 mask `fwupd-refresh.service`** 并 `reset-failed`，否则 refresh timer 下一次运行把主机打成 `degraded`。worker 服务器不需要固件更新守护进程。
 - **镜像可能携带损坏 dpkg file list**（"missing final newline"）：apt 直接中止，需 `printf '\n' >> /var/lib/dpkg/info/<pkg>.list` 修复。
 - **China region 直连 `registry.npmjs.org` 慢/截断损坏**（`node_modules/typescript/lib/lib.es2017.string.d.ts` 被截成 2378 字节 → `TS1127 Invalid character`）：必须用 `registry.npmmirror.com`。
