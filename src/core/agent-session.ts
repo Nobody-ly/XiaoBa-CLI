@@ -727,6 +727,12 @@ export class AgentSession {
         } else {
           this.messages = compactionResult.messages;
         }
+        if (this.useCheckpointCompaction
+          && this.isCheckpointCandidateSerialThresholdReached(
+            this.getContextUsageInfo(this.messages),
+          )) {
+          throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+        }
 
         failurePhase = 'session_init';
         await this.init({
@@ -1062,6 +1068,12 @@ export class AgentSession {
       return null;
     }
     const committedMessages = [...prepared.messages, ...transient];
+    if (this.isCheckpointCandidateSerialThresholdReached(
+      this.getContextUsageInfo(committedMessages),
+    )) {
+      this.cancelCheckpointCandidate();
+      return null;
+    }
     if (!hasCompleteToolExchanges(committedMessages)) {
       this.cancelCheckpointCandidate();
       return null;
@@ -1112,11 +1124,15 @@ export class AgentSession {
           signal: this.activeAbortController?.signal,
         },
       );
-      if (fallback.compacted && this.persistCheckpoint(fallback.messages)) {
+      if (fallback.compacted
+        && !this.isCheckpointCandidateSerialThresholdReached(
+          this.getContextUsageInfo(fallback.messages),
+        )
+        && this.persistCheckpoint(fallback.messages)) {
         this.checkpointRevision++;
         return fallback.messages;
       }
-      return messagesBeforeCompaction;
+      throw new Error('Context checkpoint failed to reduce prompt below the stop point');
     }
 
     this.startCheckpointCandidateIfEligible(lifecycleGeneration, messagesBeforeCompaction, phase);

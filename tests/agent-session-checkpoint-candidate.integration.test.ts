@@ -14,6 +14,7 @@ const OWNED_SESSION_KEYS = [
   'user:candidate-episode-end',
   'user:candidate-preempt-integration',
   'user:candidate-fallback-integration',
+  'user:candidate-budget-blocked',
   'user:candidate-parent-destroyed',
 ];
 
@@ -342,6 +343,48 @@ test('candidate failure at 85 percent falls back once with the latest transcript
     assert.ok(fallbackInputs[0].some(message => message.content === 'main answer'));
     assert.ok((session as any).messages.some((message: Message) => message.content === 'serial fallback summary'));
     assert.equal((session as any).checkpointCandidate, null);
+  });
+});
+
+test('oversized candidate and fallback fail closed before the next model request', async () => {
+  await withCandidateMode(async () => {
+    let mainModelCalls = 0;
+    const session = createInitializedSession('user:candidate-budget-blocked', {
+      async chatStream() {
+        mainModelCalls++;
+        return { content: 'must not run', toolCalls: [], usage };
+      },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: 85,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: 85,
+    });
+    const candidate = new (await import('../src/core/checkpoint-candidate')).CheckpointCandidate(
+      'oversized-ready',
+      (await import('../src/core/checkpoint-candidate')).createCheckpointSnapshot(
+        (session as any).messages,
+        { revision: 0 },
+      ),
+    );
+    candidate.complete([{ role: 'user', content: 'oversized candidate summary' }]);
+    (session as any).checkpointCandidate = candidate;
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: Message[]) => ({
+      messages,
+      compacted: false,
+      usedTokens: 85,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: 85,
+    });
+
+    const result = await session.handleMessage('blocked input');
+
+    assert.equal(result.taskOutcome, 'failed');
+    assert.equal(mainModelCalls, 0);
+    assert.equal((session as any).messages.some((message: Message) => message.content === 'oversized candidate summary'), false);
   });
 });
 
