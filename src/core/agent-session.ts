@@ -312,6 +312,13 @@ export class AgentSession {
       checkpointCandidateBoundary: messages => (
         this.handleCheckpointCandidateBoundary(messages, this.lifecycleGeneration)
       ),
+      beforeModelRequest: (messages, tools) => {
+        const usage = this.getContextUsageInfo(messages);
+        const toolTokens = estimateToolsTokens(tools);
+        if (usage.usedTokens + toolTokens >= usage.maxTokens * 0.85) {
+          throw new Error('Context checkpoint failed to reduce prompt below the stop point');
+        }
+      },
     });
 
     const runtimeFeedbackInbox = this.runtimeFeedbackInbox;

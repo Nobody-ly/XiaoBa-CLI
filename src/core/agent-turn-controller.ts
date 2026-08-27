@@ -15,6 +15,7 @@ import {
   ThinToolRpcTransport,
   ToolExecutionConfirmationRequest,
   ToolExecutionConfirmationResult,
+  ToolDefinition,
 } from '../types/tool';
 import type { StreamRetryInfo } from '../providers/provider';
 import { AIService } from '../utils/ai-service';
@@ -120,6 +121,7 @@ export interface AgentTurnControllerOptions {
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   persistCheckpoint?: (messages: Message[]) => void | Promise<void>;
   checkpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
+  beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
 }
 
 interface MemoryBranchSlot {
@@ -368,6 +370,7 @@ export class AgentTurnController {
         checkpointCompactionCoordinator: this.options.checkpointCompactionCoordinator,
         onCompactionCheckpoint: this.options.persistCheckpoint,
         onCheckpointCandidateBoundary: this.options.checkpointCandidateBoundary,
+        beforeModelRequest: this.options.beforeModelRequest,
         // AgentSession/ContextWindowManager compacts durable history before the turn.
         // Runner-level compaction can fold transient runtime feedback into summary.
         enableCompression: false,

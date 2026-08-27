@@ -204,6 +204,8 @@ export interface RunnerOptions {
   onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
   /** Coordinates an asynchronous checkpoint only after a complete tool batch. */
   onCheckpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
+  /** Rejects a provider request when the durable transcript remains over budget. */
+  beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
   /** Best-effort observer. Its result never participates in reply control flow. */
   cacheTraceSink?: CacheTraceSink;
 }
@@ -233,6 +235,7 @@ export class ConversationRunner {
   private checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   private onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
   private onCheckpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
+  private beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
 
   /** 截断字符串用于日志输出，避免日志过大 */
   private static truncateForLog(text: any, maxLen = 200): string {
@@ -261,6 +264,7 @@ export class ConversationRunner {
     this.checkpointCompactionCoordinator = options?.checkpointCompactionCoordinator;
     this.onCompactionCheckpoint = options?.onCompactionCheckpoint;
     this.onCheckpointCandidateBoundary = options?.onCheckpointCandidateBoundary;
+    this.beforeModelRequest = options?.beforeModelRequest;
     this.maxTurns = options?.maxTurns;
     this.suppressFinalResponse = options?.suppressFinalResponse === true;
 
@@ -425,6 +429,7 @@ export class ConversationRunner {
         currentDirectory,
       });
       nextTurnTransientHints = [];
+      await this.beforeModelRequest?.(messages, requestTools);
       const promptTrimmed = this.ensurePromptBudget(requestMessages, requestTools);
       if (promptTrimmed && callbacks?.onThinking) {
         await callbacks.onThinking(PROMPT_BUDGET_TRIM_MESSAGE);
