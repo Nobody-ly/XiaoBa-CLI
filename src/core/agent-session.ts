@@ -1169,9 +1169,18 @@ export class AgentSession {
           signal: this.activeAbortController?.signal,
         },
       );
-      const fallbackOutcome = fallback.compacted ? 'committed' : 'failed';
+      const fallbackWithinBudget = fallback.compacted
+        && !this.isCheckpointCandidateSerialThresholdReached(
+          this.getContextUsageInfo(fallback.messages),
+        );
+      const fallbackPersisted = fallbackWithinBudget
+        && this.persistCheckpoint(fallback.messages);
+      const fallbackOutcome = fallbackPersisted ? 'committed' : 'failed';
+      const config = typeof (this.services.aiService as any).getConfig === 'function'
+        ? (this.services.aiService as any).getConfig()
+        : {};
       Logger.runtimeEvent(
-        fallback.compacted ? 'INFO' : 'WARN',
+        fallbackPersisted ? 'INFO' : 'WARN',
         `[${this.key}] checkpoint_summary mode=serial_fallback outcome=${fallbackOutcome}`,
         {
           type: 'checkpoint_summary',
@@ -1179,6 +1188,8 @@ export class AgentSession {
             category: 'checkpoint_summary',
             mode: 'serial_fallback',
             outcome: fallbackOutcome,
+            model: config.model,
+            provider: config.provider,
             started_at: fallbackStartedAt,
             duration_ms: Date.now() - fallbackStartedAt,
             snapshot_tokens: this.getContextUsageInfo(messagesBeforeCompaction).usedTokens,
@@ -1190,11 +1201,7 @@ export class AgentSession {
           },
         },
       );
-      if (fallback.compacted
-        && !this.isCheckpointCandidateSerialThresholdReached(
-          this.getContextUsageInfo(fallback.messages),
-        )
-        && this.persistCheckpoint(fallback.messages)) {
+      if (fallbackPersisted) {
         this.checkpointRevision++;
         return fallback.messages;
       }
