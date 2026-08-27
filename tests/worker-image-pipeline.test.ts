@@ -750,7 +750,7 @@ if ($script:RequestCount -ne 3 -or $failure -ne 'Builder bootstrap returned malf
       workflow,
       /TOS_WORKER_UPLOAD_BUCKET: catsco-worker-image-bake-hk/,
     );
-    assert.match(workflow, /Validate dedicated bake buckets/);
+    assert.doesNotMatch(workflow, /Validate dedicated bake buckets/);
     assert.doesNotMatch(workflow, /TOS_WORKER_BUCKET: catsco-worker-release\s/);
     assert.doesNotMatch(workflow, /create-bucket|delete-bucket/);
     assert.doesNotMatch(workflow, /put-bucket-lifecycle-configuration/);
@@ -766,7 +766,9 @@ if ($script:RequestCount -ne 3 -or $failure -ne 'Builder bootstrap returned malf
       /find "\$package_dir\/tosutil" -type f -name tosutil \| head -n 1/,
     );
     assert.doesNotMatch(workflow, /-name tosutil -perm -u\+x/);
-    assert.match(workflow, /tosutil stat "tos:\/\/\$\{upload_bucket\}"/);
+    assert.match(workflow, /timeout --signal=TERM --kill-after=30s 20m[\s\S]*?tosutil cp "\$WORKER_ARTIFACT_PATH"/);
+    assert.match(workflow, /timeout --signal=TERM --kill-after=30s 3m[\s\S]*?tosutil cp ops\/ctyun-worker-image\/prepare-image\.sh/);
+    assert.match(workflow, /timeout --signal=TERM --kill-after=5s 20s[\s\S]*?tosutil stat "tos:\/\/\$\{TOS_WORKER_BUCKET\}\/\$\{key\}"/);
     assert.match(workflow, /tosutil cp "\$WORKER_ARTIFACT_PATH"/);
     assert.match(workflow, /artifact upload start: bytes=/);
     assert.match(workflow, /artifact upload complete: seconds=/);

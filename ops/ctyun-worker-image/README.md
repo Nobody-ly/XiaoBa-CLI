@@ -122,8 +122,8 @@ recognizable while preventing a rerun from colliding with an uncertain prior
 attempt.
 
 The script refuses to stop or delete any instance whose name does not begin
-with `catsco-img-`. Existing `worker1`, `worker2`, and `ck-work` instances are
-therefore outside its mutation boundary.
+with `catsco-img-`. Existing production instances are therefore outside its
+mutation boundary.
 
 ```powershell
 pwsh ops/ctyun-worker-image/New-CatsCoWorkerImage.ps1 `
@@ -261,7 +261,7 @@ Provisioning from this image must:
 Never place a long-lived account password, relay administrator key, or shared
 bot token in image metadata or Cloud-init user data.
 
-## Existing Worker Updates (Part A: Application Artifacts)
+## Existing Worker Updates (Application Artifacts)
 
 - **New workers** get the full baked image (`catsco-worker-*`, provisioned via
   the cloud control plane).
@@ -270,10 +270,10 @@ bot token in image metadata or Cloud-init user data.
   `/srv/catsco-agent` data is never touched. See `docs/worker-artifact-update.md`.
 - The worker-side updater is `scripts/update-worker-artifact.sh` (checksum +
   manifest verify, native-module smoke, symlink switch, restart, heartbeat
-  check, automatic rollback); the dispatcher is
-  `scripts/deploy-worker-artifact.mjs` (serial ssh/scp across targets).
-- CI trigger: stable tag + repo var `CTYUN_WORKER_APP_UPDATE=true`
-  (`.github/workflows/worker-app-update.yml`), or manual workflow_dispatch
-  with `update_workers` from `main`, or local dry-run via
-  `npm run worker:update:dry`.
-- Workers hold no cloud credentials: distribution goes over SSH only.
+  check, automatic rollback).
+- Every stable `vX.Y.Z` tag publishes the private artifact through
+  `.github/workflows/release.yml` and automatically starts this image bake.
+- Existing workers obtain artifacts through the cloud control plane. This
+  repository does not keep a customer host list and GitHub Actions does not
+  SSH-deploy to worker instances.
+- Workers hold no TOS or Tianyi Cloud account credentials.
