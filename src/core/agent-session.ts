@@ -230,6 +230,7 @@ export class AgentSession {
   private checkpointCandidate: CheckpointCandidate | null = null;
   private checkpointCandidatePromise: Promise<boolean> | null = null;
   private checkpointCandidateAbortController: AbortController | null = null;
+  private checkpointCandidateSuppressed = false;
   private checkpointCandidateSequence = 0;
   /** Epoch for destructive transcript replacement; tail appends keep the same epoch. */
   private checkpointRevision = 0;
@@ -1194,6 +1195,10 @@ export class AgentSession {
   ): void {
     if (!this.useCheckpointCompaction || !this.useCheckpointCandidates || this.checkpointCandidate) return;
     const usage = this.getContextUsageInfo(messages);
+    if (this.checkpointCandidateSuppressed && usage.usagePercent < CHECKPOINT_CANDIDATE_TRIGGER_PERCENT) {
+      this.checkpointCandidateSuppressed = false;
+    }
+    if (this.checkpointCandidateSuppressed) return;
     if (usage.usagePercent < CHECKPOINT_CANDIDATE_TRIGGER_PERCENT
       || this.isCheckpointCandidateSerialThresholdReached(usage)) return;
 
@@ -1236,7 +1241,10 @@ export class AgentSession {
       this.checkpointCandidateAbortController = null;
       this.checkpointCandidatePromise = null;
       this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
-      if (candidate.status === 'failed') this.checkpointCandidate = null;
+      if (candidate.status === 'failed') {
+        this.checkpointCandidateSuppressed = true;
+        this.checkpointCandidate = null;
+      }
     });
   }
 
@@ -1284,7 +1292,10 @@ export class AgentSession {
   private cancelCheckpointCandidate(): void {
     const candidate = this.checkpointCandidate;
     candidate?.cancel();
-    if (candidate) this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
+    if (candidate) {
+      this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
+      if (candidate.status === 'failed') this.checkpointCandidateSuppressed = true;
+    }
     this.checkpointCandidateAbortController?.abort();
     this.checkpointCandidate = null;
     this.checkpointCandidatePromise = null;
