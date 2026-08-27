@@ -430,6 +430,10 @@ export class ConversationRunner {
       });
       nextTurnTransientHints = [];
       await this.beforeModelRequest?.(messages, requestTools);
+      if (this.beforeModelRequest
+        && estimateMessagesTokens(requestMessages) + estimateToolsTokens(requestTools) > this.maxPromptTokens) {
+        throw new Error('Context checkpoint failed to reduce the final provider prompt below budget');
+      }
       const promptTrimmed = this.ensurePromptBudget(requestMessages, requestTools);
       if (promptTrimmed && callbacks?.onThinking) {
         await callbacks.onThinking(PROMPT_BUDGET_TRIM_MESSAGE);
