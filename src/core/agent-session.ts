@@ -316,6 +316,9 @@ export class AgentSession {
         this.handleCheckpointCandidateBoundary(messages, this.lifecycleGeneration)
       ),
       beforeModelRequest: (messages, tools) => {
+        if (this.checkpointBlockedReason) {
+          throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+        }
         const usage = this.getContextUsageInfo(messages);
         const toolTokens = estimateToolsTokens(tools);
         if (usage.usedTokens + toolTokens >= usage.maxTokens * 0.85) {
@@ -1140,6 +1143,9 @@ export class AgentSession {
     lifecycleGeneration: number,
     phase: CheckpointCompactionPhase = 'mid_turn',
   ): Promise<Message[]> {
+    if (this.checkpointBlockedReason) {
+      throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+    }
     const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(messages);
     const stopPointReached = this.isCheckpointCandidateSerialThresholdReached(
       this.getContextUsageInfo(messagesBeforeCompaction),
