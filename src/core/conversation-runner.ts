@@ -202,6 +202,8 @@ export interface RunnerOptions {
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   /** Persists a successful continuation checkpoint before execution resumes. */
   onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
+  /** Coordinates an asynchronous checkpoint only after a complete tool batch. */
+  onCheckpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
   /** Best-effort observer. Its result never participates in reply control flow. */
   cacheTraceSink?: CacheTraceSink;
 }
@@ -230,6 +232,7 @@ export class ConversationRunner {
   private suppressFinalResponse: boolean;
   private checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   private onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
+  private onCheckpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
 
   /** 截断字符串用于日志输出，避免日志过大 */
   private static truncateForLog(text: any, maxLen = 200): string {
@@ -257,6 +260,7 @@ export class ConversationRunner {
     this.episodeId = options?.episodeId;
     this.checkpointCompactionCoordinator = options?.checkpointCompactionCoordinator;
     this.onCompactionCheckpoint = options?.onCompactionCheckpoint;
+    this.onCheckpointCandidateBoundary = options?.onCheckpointCandidateBoundary;
     this.maxTurns = options?.maxTurns;
     this.suppressFinalResponse = options?.suppressFinalResponse === true;
 
@@ -706,6 +710,7 @@ export class ConversationRunner {
         };
       }
 
+      await this.coordinateCheckpointCandidateAtBoundary(messages);
       await this.compactMidTurnIfNeeded(messages, requestTools, turns, callbacks);
       await this.appendPendingUserInput(messages, newMessages, turns);
     }
@@ -795,6 +800,14 @@ export class ConversationRunner {
     );
 
     return true;
+  }
+
+  private async coordinateCheckpointCandidateAtBoundary(messages: Message[]): Promise<void> {
+    if (!this.onCheckpointCandidateBoundary) return;
+    const nextMessages = await this.onCheckpointCandidateBoundary(messages);
+    if (nextMessages === messages) return;
+    messages.splice(0, messages.length, ...nextMessages);
+    this.refreshRuntimeContextForPendingInput(messages);
   }
 
   private async compactMidTurnIfNeeded(

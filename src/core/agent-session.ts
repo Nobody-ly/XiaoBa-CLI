@@ -307,6 +307,9 @@ export class AgentSession {
           throw new Error('Failed to persist continuation checkpoint');
         }
       },
+      checkpointCandidateBoundary: messages => (
+        this.handleCheckpointCandidateBoundary(messages, this.lifecycleGeneration)
+      ),
     });
 
     const runtimeFeedbackInbox = this.runtimeFeedbackInbox;
@@ -1080,6 +1083,18 @@ export class AgentSession {
     return committedMessages;
   }
 
+  private handleCheckpointCandidateBoundary(
+    messages: Message[],
+    lifecycleGeneration: number,
+  ): Message[] {
+    const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(messages);
+    this.coordinateCheckpointCandidate(messagesBeforeCompaction);
+    const committed = this.commitReadyCheckpointCandidate(messagesBeforeCompaction);
+    const nextMessages = committed || messagesBeforeCompaction;
+    this.startCheckpointCandidateIfEligible(lifecycleGeneration, nextMessages, 'mid_turn');
+    return nextMessages;
+  }
+
   private coordinateCheckpointCandidate(messages: Message[]): void {
     if (!this.checkpointCandidate) return;
     if (Date.now() - this.checkpointCandidate.snapshot.startedAt >= CHECKPOINT_CANDIDATE_TTL_MS) {
@@ -1105,6 +1120,7 @@ export class AgentSession {
   private startCheckpointCandidateIfEligible(
     lifecycleGeneration: number,
     messages: Message[] = this.messages,
+    phase: CheckpointCompactionPhase = 'pre_turn',
   ): void {
     if (!this.useCheckpointCompaction || !this.useCheckpointCandidates || this.checkpointCandidate) return;
     const usage = this.getContextUsageInfo(messages);
@@ -1131,7 +1147,7 @@ export class AgentSession {
 
     void candidate.generate(this.checkpointCandidateCoordinator, {
       sessionKey: this.key,
-      phase: 'pre_turn',
+      phase,
       episodeId,
       toolTokens: this.getToolDefinitionTokens(),
       signal: abortController.signal,

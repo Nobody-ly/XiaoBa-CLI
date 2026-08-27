@@ -119,6 +119,7 @@ export interface AgentTurnControllerOptions {
   updateCurrentDirectory: (directory: string) => void;
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   persistCheckpoint?: (messages: Message[]) => void | Promise<void>;
+  checkpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
 }
 
 interface MemoryBranchSlot {
@@ -362,6 +363,7 @@ export class AgentTurnController {
         episodeId: options.episodeId,
         checkpointCompactionCoordinator: this.options.checkpointCompactionCoordinator,
         onCompactionCheckpoint: this.options.persistCheckpoint,
+        onCheckpointCandidateBoundary: this.options.checkpointCandidateBoundary,
         // AgentSession/ContextWindowManager compacts durable history before the turn.
         // Runner-level compaction can fold transient runtime feedback into summary.
         enableCompression: false,

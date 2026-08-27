@@ -117,6 +117,47 @@ test('runner checkpoints only after a complete tool result and resumes the same 
   assert.equal(JSON.stringify(modelRequests).includes(legacyArtifactSentinel), false);
 });
 
+test('runner coordinates a candidate after the complete tool batch before the next model request', async () => {
+  const events: string[] = [];
+  const modelRequests: Message[][] = [];
+  const aiService = {
+    chat: async (messages: Message[]) => {
+      modelRequests.push(messages.map(message => ({ ...message })));
+      if (modelRequests.length === 1) {
+        events.push('model:first');
+        return {
+          content: null,
+          toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'inspect', arguments: '{}' } }],
+          usage,
+        };
+      }
+      events.push('model:second');
+      return { content: 'continued', toolCalls: [], usage };
+    },
+  } as any;
+  const executor: ToolExecutor = {
+    getToolDefinitions: () => [{ name: 'inspect', description: 'inspect', parameters: { type: 'object', properties: {} } }],
+    executeTool: async (call: ToolCall): Promise<ToolResult> => {
+      events.push('tool:complete');
+      return { role: 'tool', tool_call_id: call.id, name: call.function.name, content: 'evidence', ok: true };
+    },
+  };
+  const runner = new ConversationRunner(aiService, executor, {
+    stream: false,
+    onCheckpointCandidateBoundary: async messages => {
+      events.push('candidate-boundary');
+      assert.ok(messages.some(message => message.role === 'tool' && message.content === 'evidence'));
+      return [{ role: 'user', content: 'candidate summary' }];
+    },
+  });
+
+  await runner.run([{ role: 'user', content: 'inspect' }]);
+
+  assert.deepEqual(events, ['model:first', 'tool:complete', 'candidate-boundary', 'model:second']);
+  assert.ok(modelRequests[1].some(message => message.content === 'candidate summary'));
+  assert.equal(modelRequests[1].some(message => message.role === 'tool'), false);
+});
+
 test('runner keeps the original transcript when checkpoint persistence fails', async () => {
   const modelRequests: Message[][] = [];
   const aiService = {
