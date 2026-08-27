@@ -346,6 +346,13 @@ export class ConversationRunner {
       }
       this.injectSyntheticObservations(messages, turns);
       const runtimeTransientHints = this.drainRuntimeTransientMessages(turns);
+      if (this.onCheckpointCandidateBoundary) {
+        const nextMessages = await this.onCheckpointCandidateBoundary(messages);
+        if (nextMessages !== messages) {
+          messages.splice(0, messages.length, ...nextMessages);
+          this.refreshRuntimeContextForPendingInput(messages);
+        }
+      }
       const requestTools = this.fitToolsToPromptBudget(activeTools);
       if (requestTools.length < activeTools.length && !notifiedToolBudgetDisabled) {
         notifiedToolBudgetDisabled = true;

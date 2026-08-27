@@ -146,16 +146,47 @@ test('runner coordinates a candidate after the complete tool batch before the ne
     stream: false,
     onCheckpointCandidateBoundary: async messages => {
       events.push('candidate-boundary');
-      assert.ok(messages.some(message => message.role === 'tool' && message.content === 'evidence'));
+      if (!messages.some(message => message.role === 'tool' && message.content === 'evidence')) {
+        return messages;
+      }
       return [{ role: 'user', content: 'candidate summary' }];
     },
   });
 
   await runner.run([{ role: 'user', content: 'inspect' }]);
 
-  assert.deepEqual(events, ['model:first', 'tool:complete', 'candidate-boundary', 'model:second']);
+  assert.deepEqual(events, [
+    'candidate-boundary',
+    'model:first',
+    'tool:complete',
+    'candidate-boundary',
+    'candidate-boundary',
+    'model:second',
+  ]);
   assert.ok(modelRequests[1].some(message => message.content === 'candidate summary'));
   assert.equal(modelRequests[1].some(message => message.role === 'tool'), false);
+});
+
+test('runner invokes the candidate boundary before every model request', async () => {
+  const boundaryCalls: number[] = [];
+  let modelCalls = 0;
+  const runner = new ConversationRunner({
+    chat: async () => {
+      modelCalls++;
+      return { content: 'done', toolCalls: [], usage };
+    },
+  } as any, { getToolDefinitions: () => [], executeTool: async () => ({}) } as any, {
+    stream: false,
+    onCheckpointCandidateBoundary: async messages => {
+      boundaryCalls.push(modelCalls);
+      return messages;
+    },
+  });
+
+  await runner.run([{ role: 'user', content: 'hello' }]);
+
+  assert.deepEqual(boundaryCalls, [0]);
+  assert.equal(modelCalls, 1);
 });
 
 test('runner keeps the original transcript when checkpoint persistence fails', async () => {

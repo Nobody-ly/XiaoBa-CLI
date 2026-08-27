@@ -91,12 +91,16 @@ test('candidate persistence keeps memory aligned with the persisted projection',
       },
     });
     (session as any).messages.push({ role: 'user', content: 'history root' });
-    (session as any).getContextUsageInfo = () => ({
-      usedTokens: 75,
-      toolTokens: 0,
-      maxTokens: 100,
-      usagePercent: 75,
-    });
+    (session as any).getContextUsageInfo = (messages: Message[]) => {
+      const compacted = messages.some(message => message.content === 'candidate summary');
+      const currentPercent = compacted ? 20 : 75;
+      return {
+        usedTokens: currentPercent,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: currentPercent,
+      };
+    };
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
     (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => ({
       compacted: true,
@@ -216,12 +220,16 @@ test('episode end commits a candidate that became ready during the model request
       },
     });
     (session as any).messages.push({ role: 'user', content: 'history root' });
-    (session as any).getContextUsageInfo = () => ({
-      usedTokens: 75,
-      toolTokens: 0,
-      maxTokens: 100,
-      usagePercent: 75,
-    });
+    (session as any).getContextUsageInfo = (messages: Message[]) => {
+      const compacted = messages.some(message => message.content === 'candidate summary');
+      const currentPercent = compacted ? 20 : 75;
+      return {
+        usedTokens: currentPercent,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: currentPercent,
+      };
+    };
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
     (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => new Promise(() => {});
     const persisted: Message[][] = [];
@@ -398,12 +406,16 @@ test('cleared parent session discards a candidate result that returns after dele
       },
     });
     (session as any).messages.push({ role: 'user', content: 'history root' });
-    (session as any).getContextUsageInfo = () => ({
-      usedTokens: 75,
-      toolTokens: 0,
-      maxTokens: 100,
-      usagePercent: 75,
-    });
+    (session as any).getContextUsageInfo = (messages: Message[]) => {
+      const compacted = messages.some(message => message.content === 'candidate summary');
+      const currentPercent = compacted ? 20 : 75;
+      return {
+        usedTokens: currentPercent,
+        toolTokens: 0,
+        maxTokens: 100,
+        usagePercent: currentPercent,
+      };
+    };
     (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
     (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => {
       await candidateGate;
