@@ -231,6 +231,10 @@ export class AgentTurnController {
           this.expireMemoryBranch(currentMemoryBranch, result ? 'current_branch_consumed' : 'turn_failed');
         }
       }
+
+      if (this.options.checkpointCandidateBoundary) {
+        result.messages = await this.options.checkpointCandidateBoundary(result.messages);
+      }
       const nextMessages = this.options.turnContextBuilder.removeTransientMessages(result.messages);
 
       const metrics = Metrics.getSummary();

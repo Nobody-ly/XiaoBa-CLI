@@ -11,6 +11,7 @@ const OWNED_SESSION_KEYS = [
   'user:legacy-persist',
   'user:candidate-persist-race',
   'user:candidate-integration',
+  'user:candidate-episode-end',
   'user:candidate-preempt-integration',
   'user:candidate-parent-destroyed',
 ];
@@ -80,7 +81,7 @@ test('disabling candidates falls back to legacy synchronous compaction', async (
   }
 });
 
-test('candidate persistence race keeps memory aligned with the persisted projection', async () => {
+test('candidate persistence keeps memory aligned with the persisted projection', async () => {
   await withCandidateMode(async () => {
     const session = createInitializedSession('user:candidate-persist-race', {
       async chatStream() {
@@ -106,15 +107,11 @@ test('candidate persistence race keeps memory aligned with the persisted project
     };
 
     await session.handleMessage('start candidate');
-    await waitFor(() => (session as any).checkpointCandidate?.status === 'ready');
-    const candidate = (session as any).checkpointCandidate;
-    candidate.confirmCommit = () => false;
-    await session.handleMessage('commit candidate');
 
     assert.ok(persisted.some(messages => messages.some(message => message.content === 'candidate summary')));
     assert.ok((session as any).messages.some((message: Message) => message.content === 'candidate summary'));
-    assert.equal(candidate.status, 'cancelled');
-    assert.notEqual((session as any).checkpointCandidate, candidate);
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'start candidate'));
+    assert.equal((session as any).checkpointCandidate, null);
   });
 });
 
@@ -156,7 +153,7 @@ test('three consecutive checkpoints retain state from the previous checkpoint', 
   assert.match(String(requests[2].map(message => message.content).join('\n')), /do not restart server/);
 });
 
-test('handleMessage starts a candidate and commits it on the next turn with suffix intact', async () => {
+test('handleMessage commits a candidate at episode end with suffix intact', async () => {
   await withCandidateMode(async () => {
     const modelRequests: Message[][] = [];
     let responseNumber = 0;
@@ -188,7 +185,6 @@ test('handleMessage starts a candidate and commits it on the next turn with suff
     };
 
     const first = await session.handleMessage('first suffix input');
-    await waitFor(() => (session as any).checkpointCandidate?.status === 'ready');
     const second = await session.handleMessage('second input');
 
     assert.equal(first.text, 'answer-1');
@@ -199,6 +195,46 @@ test('handleMessage starts a candidate and commits it on the next turn with suff
     assert.ok(persisted.some(messages =>
       messages.some(message => message.content === 'candidate summary')
       && messages.some(message => message.content === 'first suffix input')));
+    assert.equal((session as any).checkpointCandidate, null);
+  });
+});
+
+test('episode end commits a candidate that became ready during the model request', async () => {
+  await withCandidateMode(async () => {
+    let session!: AgentSession;
+    const modelRequests: Message[][] = [];
+    session = createInitializedSession('user:candidate-episode-end', {
+      async chatStream(messages: Message[]) {
+        modelRequests.push(messages.map(message => ({ ...message })));
+        const candidate = (session as any).checkpointCandidate;
+        if (candidate?.status === 'running') {
+          candidate.complete([{ role: 'user', content: 'episode-end summary' }]);
+        }
+        return { content: 'answer', toolCalls: [], usage };
+      },
+    });
+    (session as any).messages.push({ role: 'user', content: 'history root' });
+    (session as any).getContextUsageInfo = () => ({
+      usedTokens: 75,
+      toolTokens: 0,
+      maxTokens: 100,
+      usagePercent: 75,
+    });
+    (session as any).checkpointCompactionCoordinator.compactIfNeeded = noCompaction;
+    (session as any).checkpointCandidateCoordinator.compactIfNeeded = async () => new Promise(() => {});
+    const persisted: Message[][] = [];
+    (session as any).lifecycleManager.saveContext = (messages: Message[]) => {
+      persisted.push(messages.map(message => ({ ...message })));
+      return true;
+    };
+
+    await session.handleMessage('finish this episode');
+
+    assert.equal(modelRequests.length, 1);
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'episode-end summary'));
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'finish this episode'));
+    assert.ok((session as any).messages.some((message: Message) => message.content === 'answer'));
+    assert.ok(persisted.some(messages => messages.some(message => message.content === 'episode-end summary')));
     assert.equal((session as any).checkpointCandidate, null);
   });
 });

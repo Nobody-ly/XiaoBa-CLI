@@ -1091,7 +1091,9 @@ export class AgentSession {
     this.coordinateCheckpointCandidate(messagesBeforeCompaction);
     const committed = this.commitReadyCheckpointCandidate(messagesBeforeCompaction);
     const nextMessages = committed || messagesBeforeCompaction;
-    this.startCheckpointCandidateIfEligible(lifecycleGeneration, nextMessages, 'mid_turn');
+    if (!committed) {
+      this.startCheckpointCandidateIfEligible(lifecycleGeneration, nextMessages, 'mid_turn');
+    }
     return nextMessages;
   }
 
