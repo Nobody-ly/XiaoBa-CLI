@@ -36,6 +36,66 @@ export interface RelayModelProfile {
   capabilities: RelayModelCapabilities;
 }
 
+/** Non-secret catalog metadata supplied by CatsCompany for dynamic models. */
+export interface RelayModelRuntimeDescriptor {
+  model: string;
+  provider: RelayModelProvider;
+  contextWindowTokens: number;
+  openaiApiMode?: 'chat_completions' | 'responses';
+  capabilities: RelayModelCapabilities;
+}
+
+/**
+ * Converts cloud catalog metadata into a safe local profile. Endpoints and
+ * credentials are intentionally absent: they are still selected by the
+ * authenticated Relay config/key flow.
+ */
+export function relayModelProfileFromRuntimeDescriptor(
+  modelId: unknown,
+  descriptor: unknown,
+): RelayModelProfile | undefined {
+  const id = normalizeModelName(modelId);
+  if (!id || !descriptor || typeof descriptor !== 'object') return undefined;
+  const input = descriptor as Record<string, unknown>;
+  const model = String(input.model || '').trim();
+  const provider = input.provider === 'anthropic' || input.provider === 'openai'
+    ? input.provider
+    : undefined;
+  const contextWindowTokens = Number(input.contextWindowTokens);
+  const capabilities = input.capabilities as Record<string, unknown> | undefined;
+  const openaiApiMode = input.openaiApiMode === 'responses' || input.openaiApiMode === 'chat_completions'
+    ? input.openaiApiMode
+    : undefined;
+  if (!model || !provider || !Number.isInteger(contextWindowTokens)
+    || contextWindowTokens < 1_024 || contextWindowTokens > 4_000_000
+    || !capabilities || typeof capabilities.toolCalling !== 'boolean'
+    || typeof capabilities.streaming !== 'boolean'
+    || typeof capabilities.vision !== 'boolean'
+    || (provider === 'openai' && !openaiApiMode)) {
+    return undefined;
+  }
+  // A catalog descriptor can only describe the selected public model. Do not
+  // allow it to retarget a runtime to a different model identifier.
+  if (normalizeModelName(model) !== id) return undefined;
+  return {
+    id,
+    label: id,
+    model,
+    family: 'gpt',
+    quotaClass: id,
+    preferredProvider: provider,
+    ...(provider === 'openai' ? { openaiApiMode } : {}),
+    contextWindowTokens,
+    modelsDevProvider: '',
+    modelsDevModel: model,
+    capabilities: {
+      toolCalling: capabilities.toolCalling,
+      vision: capabilities.vision,
+      streaming: capabilities.streaming,
+    },
+  };
+}
+
 // Vision capabilities mirror the first-party provider entries in models.dev.
 // Relay input modalities may override them at runtime.
 export const RELAY_MODEL_PROFILES: RelayModelProfile[] = [

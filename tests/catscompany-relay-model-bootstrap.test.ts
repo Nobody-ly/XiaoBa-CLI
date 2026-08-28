@@ -5,8 +5,21 @@ import {
   refreshCatsRelayCatalogRuntimeCapabilities,
   retargetCatsRelayCatalogRuntime,
 } from '../src/catscompany/relay-model-bootstrap';
+import { relayModelProfileFromRuntimeDescriptor } from '../src/utils/relay-model-profiles';
 
 describe('CatsCo default relay model bootstrap', () => {
+  test('accepts a new cloud catalog model without a shipped local profile', () => {
+    const profile = relayModelProfileFromRuntimeDescriptor('new-model-2026', {
+      model: 'new-model-2026',
+      provider: 'anthropic',
+      contextWindowTokens: 128_000,
+      capabilities: { vision: false, toolCalling: true, streaming: true },
+    });
+    assert.equal(profile?.id, 'new-model-2026');
+    assert.equal(profile?.preferredProvider, 'anthropic');
+    assert.equal(profile?.contextWindowTokens, 128_000);
+  });
+
   test('materializes GLM 5.3 Flash from the cloud catalog with max reasoning', async () => {
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));

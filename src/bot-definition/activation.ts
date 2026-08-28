@@ -371,15 +371,17 @@ export async function prepareBoundBotDefinition(
         const cloudModel = {
           kind: 'catalog' as const,
           modelId: cloudSelection.modelId,
+          ...(cloudSelection.catalogRuntime ? { catalogRuntime: cloudSelection.catalogRuntime } : {}),
           ...(cloudSelection.reasoningEffort ? { reasoningEffort: cloudSelection.reasoningEffort } : {}),
         };
         const runtime = definitionService.readCloudCatalogRuntime(botId);
-        if (!runtime || !catalogRuntimeMatchesModelId(runtime, cloudSelection.modelId)) {
+        if (!runtime || !catalogRuntimeMatchesModelId(runtime, cloudSelection.modelId, cloudSelection.catalogRuntime)) {
           const materialized = await provisionCatsRelayCatalogRuntime({
             botId,
             modelId: cloudSelection.modelId,
             reasoningEffort: cloudSelection.reasoningEffort,
             contextWindowTokens: cloudSelection.contextWindowTokens,
+            catalogRuntime: cloudSelection.catalogRuntime,
             existingRuntime: runtime ?? definitionService.readCatalogRuntime(botId),
             auth,
             fetchImpl: options.fetchImpl,
@@ -399,6 +401,7 @@ export async function prepareBoundBotDefinition(
                 modelId: cloudSelection.modelId,
                 reasoningEffort: cloudSelection.reasoningEffort,
                 contextWindowTokens: cloudSelection.contextWindowTokens,
+                catalogRuntime: cloudSelection.catalogRuntime,
                 existingRuntime: runtime,
                 auth,
                 fetchImpl: options.fetchImpl,
@@ -428,6 +431,7 @@ export async function prepareBoundBotDefinition(
               ...(cloudSelection.contextWindowTokens !== undefined
                 ? { contextWindowTokens: cloudSelection.contextWindowTokens }
                 : {}),
+              ...(cloudSelection.catalogRuntime ? { catalogRuntime: cloudSelection.catalogRuntime } : {}),
             });
           }
         }
