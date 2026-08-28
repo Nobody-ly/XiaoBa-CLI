@@ -1,3 +1,5 @@
+import { DEEPSEEK_RELAY_MODEL_PROFILE } from '../providers/deepseek/catalog-profile';
+
 export type RelayModelFamily = 'catalog' | 'minimax' | 'deepseek' | 'glm' | 'gpt';
 export type RelayModelProvider = 'anthropic' | 'openai';
 
@@ -133,26 +135,7 @@ export const RELAY_MODEL_PROFILES: RelayModelProfile[] = [
       streaming: true,
     },
   },
-  {
-    id: 'deepseek-v4-flash',
-    label: 'DeepSeek V4 Flash',
-    model: 'deepseek-v4-flash',
-    family: 'deepseek',
-    quotaClass: 'flash-low',
-    preferredProvider: 'openai',
-    openaiApiMode: 'responses',
-    contextWindowTokens: 1_000_000,
-    modelsDevProvider: 'deepseek',
-    modelsDevModel: 'deepseek-v4-flash',
-    capabilities: {
-      toolCalling: true,
-      // Relay rewrites image requests to DeepSeek's
-      // deepseek-v4-flash-vision-exp sibling while keeping this public model
-      // id stable for quotas and runtime configuration.
-      vision: true,
-      streaming: true,
-    },
-  },
+  DEEPSEEK_RELAY_MODEL_PROFILE,
   {
     id: 'glm-5.3-flash',
     label: 'GLM 5.3 Flash',

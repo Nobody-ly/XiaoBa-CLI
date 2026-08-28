@@ -16,6 +16,12 @@ import { openAIApiModeOrDefault } from '../utils/openai-api-mode';
 import { Logger } from '../utils/logger';
 import { estimateJsonTokens } from '../core/token-estimator';
 import { createProviderStateReference, isProviderStateCompatible } from './provider-state';
+import {
+  applyDeepSeekResponsesRequestPolicy,
+  isDeepSeekResponses,
+  isDeepSeekResponsesReplayItem,
+  sanitizeDeepSeekResponsesReplayItem,
+} from './deepseek/responses-policy';
 
 const MAX_PROVIDER_ERROR_BODY_BYTES = 64 * 1024;
 const PROVIDER_ERROR_BODY_READ_TIMEOUT_MS = 2_000;
@@ -204,10 +210,8 @@ export class OpenAIProvider implements AIProvider {
     });
   }
 
-  /** DeepSeek V4 Vision-Exp has a distinct stateless Responses contract. */
-  private isDeepSeekResponses(): boolean {
-    return this.openaiApiMode === 'responses'
-      && /^deepseek-v4-flash$/i.test(this.model.trim());
+  private usesDeepSeekResponsesPolicy(): boolean {
+    return isDeepSeekResponses(this.openaiApiMode, this.model);
   }
 
   private canReplayProviderContent(message: Message, apiType: ProviderApiType): boolean {
@@ -534,25 +538,22 @@ export class OpenAIProvider implements AIProvider {
       input: layout.input,
       max_output_tokens: this.maxTokens,
     };
-    if (!this.isDeepSeekResponses()) body.store = false;
-
-    // DeepSeek Responses is stateless and manages context caching upstream;
-    // prompt_cache_key/prompt_cache_retention are unsupported there.
-    if (!this.isDeepSeekResponses()) {
-      body.prompt_cache_key = this.buildPromptCacheKey(
-        instructions,
-        responseTools,
-        options?.promptCacheContext?.sessionKey,
-      );
-    }
+    body.store = false;
+    body.prompt_cache_key = this.buildPromptCacheKey(
+      instructions,
+      responseTools,
+      options?.promptCacheContext?.sessionKey,
+    );
 
     if (instructions) body.instructions = instructions;
     if (Number.isFinite(this.temperature)) body.temperature = this.temperature;
     if (responseTools.length > 0) body.tools = responseTools;
-    if (!this.isDeepSeekResponses()) {
-      body.include = ['reasoning.encrypted_content'];
+    body.include = ['reasoning.encrypted_content'];
+    if (this.usesDeepSeekResponsesPolicy()) {
+      applyDeepSeekResponsesRequestPolicy(body, this.reasoningEffort);
+    } else {
+      this.applyResponsesReasoningOptions(body);
     }
-    this.applyResponsesReasoningOptions(body);
     this.logResponsesCacheLayout(
       body.prompt_cache_key || '',
       instructions,
@@ -761,14 +762,7 @@ export class OpenAIProvider implements AIProvider {
   private isResponsesReplayItem(item: any): boolean {
     if (!item || typeof item !== 'object') return false;
     const type = String(item.type || '');
-    if (this.isDeepSeekResponses()) {
-      // Tool turns only need the provider's plaintext reasoning and call
-      // item.  DeepSeek rejects encrypted_content/summary and does not need
-      // replayed output messages because the durable transcript is replayed.
-      if (type === 'function_call') return true;
-      if (type !== 'reasoning' || !Array.isArray(item.content) || item.content.length === 0) return false;
-      return item.content.some((block: any) => block && typeof block === 'object' && typeof block.text === 'string');
-    }
+    if (this.usesDeepSeekResponsesPolicy()) return isDeepSeekResponsesReplayItem(item);
     return ['message', 'function_call', 'reasoning'].includes(type);
   }
 
@@ -1078,17 +1072,6 @@ export class OpenAIProvider implements AIProvider {
       apiUrl: this.apiUrl,
       model: this.model,
     })) return;
-    if (this.isDeepSeekResponses()) {
-      const normalized = effort === 'disabled' || effort === 'none'
-        ? 'none'
-        : effort === 'max'
-          ? 'max'
-          : effort === 'low'
-            ? 'low'
-            : 'high';
-      body.reasoning = { effort: normalized };
-      return;
-    }
     body.reasoning = {
       effort: effort === 'max' ? 'xhigh' : effort === 'disabled' ? 'none' : effort,
     };
@@ -1273,16 +1256,8 @@ export class OpenAIProvider implements AIProvider {
   }
 
   private responsesReplayItem(item: any): any | undefined {
-    const clone = JSON.parse(JSON.stringify(item));
-    if (!this.isDeepSeekResponses() || clone?.type !== 'reasoning') return clone;
-    // DeepSeek accepts plaintext reasoning content for continuation only.
-    // Never persist or replay encrypted reasoning material.
-    delete clone.encrypted_content;
-    delete clone.summary;
-    if (!Array.isArray(clone.content) || !clone.content.some((block: any) => typeof block?.text === 'string')) {
-      return undefined;
-    }
-    return clone;
+    if (this.usesDeepSeekResponsesPolicy()) return sanitizeDeepSeekResponsesReplayItem(item);
+    return JSON.parse(JSON.stringify(item));
   }
 
   private async chatResponses(
