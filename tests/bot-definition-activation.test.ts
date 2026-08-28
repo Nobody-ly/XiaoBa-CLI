@@ -793,8 +793,8 @@ describe('BotDefinition activation', () => {
     assert.equal(prepared?.cloudApplyError, undefined);
     assert.equal(prepared?.cloudRevision, 12);
     assert.equal(runtime?.modelId, 'deepseek-v4-flash');
-    assert.equal(runtime?.provider, 'anthropic');
-    assert.equal(runtime?.apiBase, 'https://relay.example.test/anthropic');
+    assert.equal(runtime?.provider, 'openai');
+    assert.equal(runtime?.apiBase, 'https://relay.example.test/v1');
     assert.equal(runtime?.apiKey, 'sk-existing-owner-key');
     assert.equal(runtime?.reasoningEffort, 'max');
     assert.equal(requests.some(item => item.path === '/api/relay/config'), false);
