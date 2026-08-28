@@ -1,4 +1,4 @@
-export type RelayModelFamily = 'minimax' | 'deepseek' | 'glm' | 'gpt';
+export type RelayModelFamily = 'catalog' | 'minimax' | 'deepseek' | 'glm' | 'gpt';
 export type RelayModelProvider = 'anthropic' | 'openai';
 
 export const RELAY_MODEL_BASE_URLS: Record<RelayModelProvider, string> = {
@@ -81,7 +81,7 @@ export function relayModelProfileFromRuntimeDescriptor(
     id,
     label: id,
     model,
-    family: 'gpt',
+    family: 'catalog',
     quotaClass: id,
     preferredProvider: provider,
     ...(provider === 'openai' ? { openaiApiMode } : {}),
