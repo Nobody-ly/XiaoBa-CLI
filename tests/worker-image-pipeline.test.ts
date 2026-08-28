@@ -17,6 +17,16 @@ describe("Tianyi Cloud worker image pipeline", () => {
   );
   const imageOrchestrator = fs.readFileSync(imageOrchestratorPath, "utf8");
   const workflow = read(".github/workflows/worker-image.yml");
+  const hardeningPlan = read(
+    "docs/superpowers/plans/2026-08-05-worker-image-platform-hardening.md",
+  );
+
+  test("public operations notes do not contain a real routable IPv4 address", () => {
+    assert.doesNotMatch(
+      hardeningPlan,
+      /\b(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])(?:\.\d{1,3}){3}\b/,
+    );
+  });
 
   test("artifact is source-free and reproducible for one commit", () => {
     assert.match(artifactBuilder, /git\(sourceRoot, \[["']ls-files["']/);

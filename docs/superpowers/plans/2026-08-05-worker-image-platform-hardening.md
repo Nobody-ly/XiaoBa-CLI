@@ -154,7 +154,7 @@
   5. 镜像内 `catsco-agent.service` 为 disabled（首次供给由控制面启用）；无临时 key pair/builder 残留（`ecs GetEcsKeypairDetails` 查询 `catsco-img-key-*` 为空）
   6. 确认后删除验证用临时实例，避免计费残留
 
-  **验收结果（2026-08-07 实测，验证实例 IP 203.32.69.72）：**
+  **验收结果（2026-08-07 实测，验证实例地址已从公开记录中省略）：**
   1. ✅ bake 日志 `platform_systemd=255.4-1ubuntu8.16 glibc=2.39-0ubuntu8.8 kernel=6.8.0-90-generic` + `image_prepared=yes` + `finalized=yes` + `result: created`
   2. ✅ `readlink fwupd.service/fwupd-refresh.service/fwupd-refresh.timer` 均 = `/dev/null`；`systemctl is-system-running` = `running`
   3. ✅ `/root/.npmrc` 与 `/srv/catsco-agent/.npmrc` = `registry=https://registry.npmmirror.com`；`systemctl cat catsco-agent.service` 含 `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com`
