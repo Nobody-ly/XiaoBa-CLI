@@ -1012,47 +1012,47 @@ export class AgentSession {
     if (this.busy || this.resumeInFlight) return false;
     this.resumeInFlight = true;
     try {
-    const generation = this.lifecycleGeneration;
-    if (!this.checkpointBlockedReason) return true;
-    const source = stripAssistantArtifactsFromMessages(
-      this.turnContextBuilder.removeTransientMessages(this.messages),
-    );
-    // Recovery is deliberately synchronous; it must not launch another candidate.
-    const coordinator = this.checkpointCompactionCoordinator;
-    let result;
-    try {
-      result = await coordinator.compactIfNeeded(source, {
-      sessionKey: this.key,
-      phase: 'restore',
-      toolTokens: this.getToolDefinitionTokens(),
-      providerRequestBudget: { maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT, usedRequests: 0 },
-      recordMetrics: false,
-      metrics: this.metrics,
-    });
-    } catch (error) {
-      if (generation === this.lifecycleGeneration) {
-        this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+      const generation = this.lifecycleGeneration;
+      if (!this.checkpointBlockedReason) return true;
+      const source = stripAssistantArtifactsFromMessages(
+        this.turnContextBuilder.removeTransientMessages(this.messages),
+      );
+      // Recovery is deliberately synchronous; it must not launch another candidate.
+      const coordinator = this.checkpointCompactionCoordinator;
+      let result;
+      try {
+        result = await coordinator.compactIfNeeded(source, {
+          sessionKey: this.key,
+          phase: 'restore',
+          toolTokens: this.getToolDefinitionTokens(),
+          providerRequestBudget: { maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT, usedRequests: 0 },
+          recordMetrics: false,
+          metrics: this.metrics,
+        });
+      } catch (error) {
+        if (generation === this.lifecycleGeneration) {
+          this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+        }
+        Logger.warning(`[会话 ${this.key}] resume checkpoint failed closed: ${String((error as any)?.message || error)}`);
+        return false;
       }
-      Logger.warning(`[会话 ${this.key}] resume checkpoint failed closed: ${String((error as any)?.message || error)}`);
-      return false;
-    }
-    if (generation !== this.lifecycleGeneration) return false;
-    if (result.compacted) {
-      if (this.isCheckpointCandidateSerialThresholdReached(this.getContextUsageInfo(result.messages))
-        || !this.persistCheckpoint(result.messages)) {
+      if (generation !== this.lifecycleGeneration) return false;
+      if (result.compacted) {
+        if (this.isCheckpointCandidateSerialThresholdReached(this.getContextUsageInfo(result.messages))
+          || !this.persistCheckpoint(result.messages)) {
+          this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+          return false;
+        }
+        this.checkpointRevision++;
+        this.messages = result.messages;
+      } else if (this.isCheckpointCandidateSerialThresholdReached(this.getContextUsageInfo(source))) {
         this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
         return false;
       }
-      this.checkpointRevision++;
-      this.messages = result.messages;
-    } else if (this.isCheckpointCandidateSerialThresholdReached(this.getContextUsageInfo(source))) {
-      this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
-      return false;
-    }
-    this.checkpointBlockedReason = null;
-    this.checkpointCandidateFallbackRequired = false;
-    this.checkpointCandidateSuppressed = false;
-    return true;
+      this.checkpointBlockedReason = null;
+      this.checkpointCandidateFallbackRequired = false;
+      this.checkpointCandidateSuppressed = false;
+      return true;
     } finally {
       this.resumeInFlight = false;
     }

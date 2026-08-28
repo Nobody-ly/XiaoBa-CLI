@@ -78,6 +78,7 @@ export class MetricsCollector {
   getTotalSummary(): MetricsSummary {
     return summarizeMetrics([...this.aiCalls, ...this.backgroundAICalls], this.toolCalls);
   }
+  /** Clear the active turn while preserving background usage already emitted as checkpoint_summary events. */
   reset(): void { this.aiCalls = []; this.toolCalls = []; }
 }
 
