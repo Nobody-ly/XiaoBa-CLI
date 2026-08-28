@@ -1,4 +1,4 @@
-export type RelayModelFamily = 'minimax' | 'deepseek' | 'gpt';
+export type RelayModelFamily = 'minimax' | 'deepseek' | 'glm' | 'gpt';
 export type RelayModelProvider = 'anthropic' | 'openai';
 
 export const RELAY_MODEL_BASE_URLS: Record<RelayModelProvider, string> = {
@@ -86,6 +86,24 @@ export const RELAY_MODEL_PROFILES: RelayModelProfile[] = [
       // Relay rewrites image requests to DeepSeek's
       // deepseek-v4-flash-vision-exp sibling while keeping this public model
       // id stable for quotas and runtime configuration.
+      vision: true,
+      streaming: true,
+    },
+  },
+  {
+    id: 'glm-5.3-flash',
+    label: 'GLM 5.3 Flash',
+    model: 'glm-5.3-flash',
+    family: 'glm',
+    quotaClass: 'glm-5.3-flash',
+    preferredProvider: 'anthropic',
+    contextWindowTokens: 1_000_000,
+    // models.dev uses the Zhipu provider slug for GLM metadata. Relay's
+    // catalog remains authoritative when this capability fallback is absent.
+    modelsDevProvider: 'zhipuai',
+    modelsDevModel: 'glm-5.3-flash',
+    capabilities: {
+      toolCalling: true,
       vision: true,
       streaming: true,
     },

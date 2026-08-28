@@ -7,6 +7,52 @@ import {
 } from '../src/catscompany/relay-model-bootstrap';
 
 describe('CatsCo default relay model bootstrap', () => {
+  test('materializes GLM 5.3 Flash from the cloud catalog with max reasoning', async () => {
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/relay/config') {
+        return Response.json({
+          base_url: 'https://relay.example.test',
+          self_service_enabled: true,
+          endpoints: [{ protocol: 'Anthropic-compatible', base_url: 'https://relay.example.test/anthropic' }],
+          models: [{ id: 'glm-5.3-flash', enabled: true }],
+        });
+      }
+      if (url.pathname === '/api/relay/key' && init?.method === 'GET') {
+        return Response.json({ key: { key: 'sk-glm-test-key', state: 'active' } });
+      }
+      if (url.pathname === '/v1/models') {
+        return Response.json({ data: [{
+          id: 'glm-5.3-flash',
+          capabilities: { vision: true, tool_calling: true, streaming: true },
+        }] });
+      }
+      return new Response(JSON.stringify({ error: 'unexpected request' }), { status: 500 });
+    }) as typeof fetch;
+
+    const runtime = await provisionCatsRelayCatalogRuntime({
+      botId: 'bot-glm',
+      modelId: 'glm-5.3-flash',
+      reasoningEffort: 'max',
+      auth: {
+        token: 'user-token',
+        uid: 'user-1',
+        displayName: 'Alice',
+        httpBaseUrl: 'https://cats.example.test',
+        serverUrl: 'wss://cats.example.test/v0/channels',
+      },
+      fetchImpl,
+    });
+
+    assert.equal(runtime.modelId, 'glm-5.3-flash');
+    assert.equal(runtime.model, 'glm-5.3-flash');
+    assert.equal(runtime.provider, 'anthropic');
+    assert.equal(runtime.apiBase, 'https://relay.example.test/anthropic');
+    assert.equal(runtime.reasoningEffort, 'max');
+    assert.equal(runtime.contextWindowTokens, 1_000_000);
+    assert.deepStrictEqual(runtime.capabilities, { vision: true, toolCalling: true, streaming: true });
+  });
+
   test('materializes MiniMax M3 and creates a relay key for a fresh device', async () => {
     const requests: Array<{ path: string; method?: string }> = [];
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
