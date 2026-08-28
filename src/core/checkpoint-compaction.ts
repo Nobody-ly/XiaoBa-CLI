@@ -3,7 +3,7 @@ import { Message, TokenUsage } from '../types';
 import { AIService } from '../utils/ai-service';
 import type { ProviderRequestBudget } from '../providers/provider';
 import { Logger } from '../utils/logger';
-import { Metrics } from '../utils/metrics';
+import { Metrics, MetricsCollector, type MetricsRecordContext } from '../utils/metrics';
 import { readRequiredBundledPromptFile } from '../utils/prompt-template';
 import { collectRemoteContextWatermarks } from './remote-context-watermarks';
 import { estimateMessagesTokens } from './token-estimator';
@@ -42,7 +42,11 @@ export interface CheckpointCompactionRequest {
   signal?: AbortSignal;
   providerRequestBudget?: ProviderRequestBudget;
   recordMetrics?: boolean;
+  /** Keeps background checkpoint usage out of the active turn summary. */
+  metricsScope?: 'turn' | 'background';
   onStatus?: (event: CheckpointCompactionStatusEvent) => void | Promise<void>;
+  metrics?: MetricsCollector;
+  metricsContext?: MetricsRecordContext;
 }
 
 export interface CheckpointCompactionStatusEvent {
@@ -250,6 +254,9 @@ export class CheckpointCompactionCoordinator {
       request.signal,
       request.recordMetrics,
       request.providerRequestBudget,
+      request.metricsScope,
+      request.metrics,
+      request.metricsContext,
     );
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
@@ -282,6 +289,9 @@ export class CheckpointCompactionCoordinator {
     signal?: AbortSignal,
     recordMetrics = true,
     providerRequestBudget?: ProviderRequestBudget,
+    metricsScope: 'turn' | 'background' = 'turn',
+    metrics?: MetricsCollector,
+    metricsContext?: MetricsRecordContext,
   ): Promise<{ summary: string; usage?: TokenUsage; attempts: number }> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
@@ -320,7 +330,16 @@ export class CheckpointCompactionCoordinator {
           const modelLabel = config?.model
             ? `${config.provider || 'unknown'}/${config.model}`
             : 'checkpoint_summary';
-          Metrics.recordAICall(modelLabel, response.usage);
+          const metricsCollector = metrics ?? Metrics;
+          if (metricsScope === 'background') {
+            metricsCollector.recordBackgroundAICall(modelLabel, response.usage, {
+              sessionKey,
+              phase,
+              ...metricsContext,
+            });
+          } else {
+            metricsCollector.recordAICall(modelLabel, response.usage);
+          }
         }
         const summary = (streamed || response.content || '').trim();
         if (!summary) {

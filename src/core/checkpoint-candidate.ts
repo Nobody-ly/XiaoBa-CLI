@@ -137,6 +137,11 @@ export class CheckpointCandidate {
         const result = await coordinator.compactIfNeeded([...this.snapshot.messages], {
           ...request,
           signal: request.signal,
+          metricsContext: {
+            ...(request.metricsContext || {}),
+            attempt,
+            providerRequest: request.providerRequestBudget?.usedRequests,
+          },
         });
         if (this._status !== 'running') return false;
         this.accumulateSummaryUsage(result.summaryUsage, result.summaryAttempts);
@@ -273,7 +278,10 @@ export function compareSnapshotBoundary(
   currentEpisodeId?: string,
 ): CheckpointCandidateResult['reason'] | undefined {
   if (currentRevision !== snapshot.revision) return 'revision_mismatch';
-  if (currentEpisodeId !== snapshot.episodeId) return 'episode_mismatch';
+  // A candidate may start before the current root turn is stamped. In that
+  // case the snapshot has no episode identity; revision and prefix hash still
+  // provide the CAS guard, while a stamped snapshot must match exactly.
+  if (snapshot.episodeId !== undefined && currentEpisodeId !== snapshot.episodeId) return 'episode_mismatch';
   if (currentMessages.length < snapshot.boundaryMessageCount) return 'boundary_mismatch';
   const prefix = currentMessages.slice(0, snapshot.boundaryMessageCount);
   if (hashMessages(prefix) !== snapshot.durableHash) return 'boundary_mismatch';

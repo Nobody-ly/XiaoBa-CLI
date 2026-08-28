@@ -6,7 +6,7 @@ import { ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResul
 import { AIRequestOptions, StreamCallbacks, StreamRetryInfo } from '../providers/provider';
 import { Logger } from '../utils/logger';
 import { isRateLimitErrorCode } from '../utils/rate-limit-error';
-import { Metrics } from '../utils/metrics';
+import { Metrics, MetricsCollector } from '../utils/metrics';
 import { ContextCompressor } from './context-compressor';
 import type { CheckpointCompactionCoordinator } from './checkpoint-compaction';
 import { estimateMessagesTokens, estimateToolsTokens } from './token-estimator';
@@ -208,6 +208,7 @@ export interface RunnerOptions {
   beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
   /** Best-effort observer. Its result never participates in reply control flow. */
   cacheTraceSink?: CacheTraceSink;
+  metrics?: MetricsCollector;
 }
 
 /**
@@ -236,6 +237,7 @@ export class ConversationRunner {
   private onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
   private onCheckpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
   private beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
+  private metrics: MetricsCollector;
 
   /** 截断字符串用于日志输出，避免日志过大 */
   private static truncateForLog(text: any, maxLen = 200): string {
@@ -267,6 +269,7 @@ export class ConversationRunner {
     this.beforeModelRequest = options?.beforeModelRequest;
     this.maxTurns = options?.maxTurns;
     this.suppressFinalResponse = options?.suppressFinalResponse === true;
+    this.metrics = options?.metrics ?? new MetricsCollector();
 
     this.maxPromptTokens = this.resolvePromptBudget(options?.maxContextTokens);
     this.sessionLabel = this.toolExecutionContext?.sessionId
@@ -491,7 +494,7 @@ export class ConversationRunner {
       Logger.info(`[${this.sessionLabel}Turn ${turns}] AI推理完成，耗时: ${aiDuration}ms`);
 
       if (response.usage) {
-        Metrics.recordAICall(this.stream ? 'stream' : 'chat', response.usage);
+        this.metrics.recordAICall(this.stream ? 'stream' : 'chat', response.usage);
         Logger.info(`[${this.sessionLabel}Turn ${turns}] AI返回 tokens: ${response.usage.promptTokens}+${response.usage.completionTokens}=${response.usage.totalTokens}`);
       }
 
@@ -658,7 +661,7 @@ export class ConversationRunner {
           hasRecordedDecision = true;
         }
         const toolDuration = Date.now() - toolStart;
-        Metrics.recordToolCall(toolName, toolDuration);
+        this.metrics.recordToolCall(toolName, toolDuration);
         this.promptTraceLogger.recordToolResult(turns, toolCall, result, toolDuration);
         Logger.info(`[${this.sessionLabel}Turn ${turns}] 工具完成: ${toolName} | 耗时: ${toolDuration}ms | 结果: ${ConversationRunner.truncateForLog(result.content, 300)}`);
         callbacks?.onToolEnd?.(toolName, toolUseId, contentToString(result.content));
