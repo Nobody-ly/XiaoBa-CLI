@@ -215,12 +215,12 @@ describe('CatsCo default relay model bootstrap', () => {
     }, 'deepseek-v4-flash', 'max');
 
     assert.equal(runtime.modelId, 'deepseek-v4-flash');
-    assert.equal(runtime.provider, 'anthropic');
-    assert.equal(runtime.apiBase, 'https://relay.example.test/anthropic');
+    assert.equal(runtime.provider, 'openai');
+    assert.equal(runtime.apiBase, 'https://relay.example.test/v1');
     assert.equal(runtime.apiKey, 'sk-existing-owner-key');
     assert.equal(runtime.model, 'deepseek-v4-flash');
     assert.equal(runtime.reasoningEffort, 'max');
-    assert.equal(runtime.openaiApiMode, 'chat_completions');
+    assert.equal(runtime.openaiApiMode, 'responses');
     assert.deepStrictEqual(runtime.capabilities, {
       toolCalling: true,
       vision: true,
