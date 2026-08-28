@@ -1,4 +1,4 @@
-export type RelayModelFamily = 'minimax' | 'deepseek' | 'gpt';
+export type RelayModelFamily = 'catalog' | 'minimax' | 'deepseek' | 'glm' | 'gpt';
 export type RelayModelProvider = 'anthropic' | 'openai';
 
 export const RELAY_MODEL_BASE_URLS: Record<RelayModelProvider, string> = {
@@ -34,6 +34,68 @@ export interface RelayModelProfile {
   modelsDevProvider: string;
   modelsDevModel: string;
   capabilities: RelayModelCapabilities;
+}
+
+/** Non-secret catalog metadata supplied by CatsCompany for dynamic models. */
+export interface RelayModelRuntimeDescriptor {
+  catalogModelId?: string;
+  model: string;
+  provider: RelayModelProvider;
+  contextWindowTokens: number;
+  openaiApiMode?: 'chat_completions' | 'responses';
+  capabilities: RelayModelCapabilities;
+}
+
+/**
+ * Converts cloud catalog metadata into a safe local profile. Endpoints and
+ * credentials are intentionally absent: they are still selected by the
+ * authenticated Relay config/key flow.
+ */
+export function relayModelProfileFromRuntimeDescriptor(
+  modelId: unknown,
+  descriptor: unknown,
+): RelayModelProfile | undefined {
+  const id = normalizeModelName(modelId);
+  if (!id || !descriptor || typeof descriptor !== 'object') return undefined;
+  const input = descriptor as Record<string, unknown>;
+  const model = String(input.model || '').trim();
+  const catalogModelId = String(input.catalogModelId || '').trim().toLowerCase();
+  const provider = input.provider === 'anthropic' || input.provider === 'openai'
+    ? input.provider
+    : undefined;
+  const contextWindowTokens = Number(input.contextWindowTokens);
+  const capabilities = input.capabilities as Record<string, unknown> | undefined;
+  const openaiApiMode = input.openaiApiMode === 'responses' || input.openaiApiMode === 'chat_completions'
+    ? input.openaiApiMode
+    : undefined;
+  if (!model || model.length > 256 || /[\u0000-\u001f\u007f]/.test(model)
+    || (catalogModelId && catalogModelId !== id)
+    || !provider || !Number.isInteger(contextWindowTokens)
+    || contextWindowTokens < 1_024 || contextWindowTokens > 4_000_000
+    || !capabilities || typeof capabilities.toolCalling !== 'boolean'
+    || typeof capabilities.streaming !== 'boolean'
+    || typeof capabilities.vision !== 'boolean'
+    || (provider === 'openai' && !openaiApiMode)) {
+    return undefined;
+  }
+  return {
+    id,
+    ...(catalogModelId ? { catalogModelId } : {}),
+    label: id,
+    model,
+    family: 'catalog',
+    quotaClass: id,
+    preferredProvider: provider,
+    ...(provider === 'openai' ? { openaiApiMode } : {}),
+    contextWindowTokens,
+    modelsDevProvider: '',
+    modelsDevModel: model,
+    capabilities: {
+      toolCalling: capabilities.toolCalling,
+      vision: capabilities.vision,
+      streaming: capabilities.streaming,
+    },
+  };
 }
 
 // Vision capabilities mirror the first-party provider entries in models.dev.
@@ -86,6 +148,24 @@ export const RELAY_MODEL_PROFILES: RelayModelProfile[] = [
       // Relay rewrites image requests to DeepSeek's
       // deepseek-v4-flash-vision-exp sibling while keeping this public model
       // id stable for quotas and runtime configuration.
+      vision: true,
+      streaming: true,
+    },
+  },
+  {
+    id: 'glm-5.3-flash',
+    label: 'GLM 5.3 Flash',
+    model: 'glm-5.3-flash',
+    family: 'glm',
+    quotaClass: 'glm-5.3-flash',
+    preferredProvider: 'anthropic',
+    contextWindowTokens: 1_000_000,
+    // models.dev uses the Zhipu provider slug for GLM metadata. Relay's
+    // catalog remains authoritative when this capability fallback is absent.
+    modelsDevProvider: 'zhipuai',
+    modelsDevModel: 'glm-5.3-flash',
+    capabilities: {
+      toolCalling: true,
       vision: true,
       streaming: true,
     },
