@@ -403,6 +403,7 @@ function parseCloudCatalogRuntime(value: unknown): RelayModelRuntimeDescriptor |
     : undefined;
   if (provider === 'openai' && !openaiApiMode) return undefined;
   return {
+    ...(String(input.catalogModelId || '').trim() ? { catalogModelId: String(input.catalogModelId).trim() } : {}),
     model,
     provider,
     contextWindowTokens,

@@ -10,7 +10,8 @@ import { relayModelProfileFromRuntimeDescriptor } from '../src/utils/relay-model
 describe('CatsCo default relay model bootstrap', () => {
   test('accepts a new cloud catalog model without a shipped local profile', () => {
     const profile = relayModelProfileFromRuntimeDescriptor('new-model-2026', {
-      model: 'new-model-2026',
+      catalogModelId: 'new-model-2026',
+      model: 'provider-new-model',
       provider: 'anthropic',
       contextWindowTokens: 128_000,
       capabilities: { vision: false, toolCalling: true, streaming: true },
@@ -18,6 +19,7 @@ describe('CatsCo default relay model bootstrap', () => {
     assert.equal(profile?.id, 'new-model-2026');
     assert.equal(profile?.preferredProvider, 'anthropic');
     assert.equal(profile?.contextWindowTokens, 128_000);
+    assert.equal(profile?.model, 'provider-new-model');
   });
 
   test('materializes GLM 5.3 Flash from the cloud catalog with max reasoning', async () => {

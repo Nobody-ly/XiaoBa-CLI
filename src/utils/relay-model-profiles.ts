@@ -38,6 +38,7 @@ export interface RelayModelProfile {
 
 /** Non-secret catalog metadata supplied by CatsCompany for dynamic models. */
 export interface RelayModelRuntimeDescriptor {
+  catalogModelId?: string;
   model: string;
   provider: RelayModelProvider;
   contextWindowTokens: number;
@@ -58,6 +59,7 @@ export function relayModelProfileFromRuntimeDescriptor(
   if (!id || !descriptor || typeof descriptor !== 'object') return undefined;
   const input = descriptor as Record<string, unknown>;
   const model = String(input.model || '').trim();
+  const catalogModelId = String(input.catalogModelId || '').trim().toLowerCase();
   const provider = input.provider === 'anthropic' || input.provider === 'openai'
     ? input.provider
     : undefined;
@@ -66,7 +68,9 @@ export function relayModelProfileFromRuntimeDescriptor(
   const openaiApiMode = input.openaiApiMode === 'responses' || input.openaiApiMode === 'chat_completions'
     ? input.openaiApiMode
     : undefined;
-  if (!model || !provider || !Number.isInteger(contextWindowTokens)
+  if (!model || model.length > 256 || /[\u0000-\u001f\u007f]/.test(model)
+    || (catalogModelId && catalogModelId !== id)
+    || !provider || !Number.isInteger(contextWindowTokens)
     || contextWindowTokens < 1_024 || contextWindowTokens > 4_000_000
     || !capabilities || typeof capabilities.toolCalling !== 'boolean'
     || typeof capabilities.streaming !== 'boolean'
@@ -74,11 +78,9 @@ export function relayModelProfileFromRuntimeDescriptor(
     || (provider === 'openai' && !openaiApiMode)) {
     return undefined;
   }
-  // A catalog descriptor can only describe the selected public model. Do not
-  // allow it to retarget a runtime to a different model identifier.
-  if (normalizeModelName(model) !== id) return undefined;
   return {
     id,
+    ...(catalogModelId ? { catalogModelId } : {}),
     label: id,
     model,
     family: 'catalog',
