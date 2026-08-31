@@ -9,6 +9,7 @@ import { isRateLimitErrorCode } from '../utils/rate-limit-error';
 import { Metrics, MetricsCollector } from '../utils/metrics';
 import { ContextCompressor } from './context-compressor';
 import type { CheckpointCompactionCoordinator } from './checkpoint-compaction';
+import { CHECKPOINT_SUMMARY_STOP_RATIO } from './checkpoint-candidate';
 import { estimateMessagesTokens, estimateToolsTokens } from './token-estimator';
 import {
   buildExplicitPlanRequestHintIfUseful,
@@ -862,7 +863,7 @@ export class ConversationRunner {
           messages,
           estimateToolsTokens(tools),
         );
-        if (usage.usedTokens + usage.toolTokens >= usage.maxTokens * 0.85) {
+        if (usage.usedTokens + usage.toolTokens >= usage.maxTokens * CHECKPOINT_SUMMARY_STOP_RATIO) {
           throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
         }
       }
@@ -887,7 +888,7 @@ export class ConversationRunner {
         estimateToolsTokens(tools),
       );
       if (postCheckpointUsage.usedTokens + postCheckpointUsage.toolTokens
-        >= postCheckpointUsage.maxTokens * 0.85) {
+        >= postCheckpointUsage.maxTokens * CHECKPOINT_SUMMARY_STOP_RATIO) {
         throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
       }
     }
