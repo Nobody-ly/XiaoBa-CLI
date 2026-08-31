@@ -132,7 +132,7 @@ export class CheckpointCompactionCoordinator {
   needsCompaction(messages: Message[], toolTokens = 0): boolean {
     const usage = this.getUsageInfo(messages, toolTokens);
     return usage.usedTokens + usage.toolTokens
-      >= this.maxContextTokens * this.compactionThreshold;
+      > this.maxContextTokens * this.compactionThreshold;
   }
 
   async compactIfNeeded(
