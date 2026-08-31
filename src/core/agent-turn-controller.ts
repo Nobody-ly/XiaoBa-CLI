@@ -15,6 +15,7 @@ import {
   ThinToolRpcTransport,
   ToolExecutionConfirmationRequest,
   ToolExecutionConfirmationResult,
+  ToolDefinition,
 } from '../types/tool';
 import type { StreamRetryInfo } from '../providers/provider';
 import { AIService } from '../utils/ai-service';
@@ -26,8 +27,13 @@ import {
   TurnSkillSnapshotStore,
 } from '../skills/turn-skill-snapshot';
 import { Logger } from '../utils/logger';
-import { Metrics } from '../utils/metrics';
-import { ConversationRunner, RunnerCallbacks, PendingUserInputProvider } from './conversation-runner';
+import { MetricsCollector } from '../utils/metrics';
+import {
+  ConversationRunner,
+  RunnerCallbacks,
+  PendingUserInputProvider,
+  SyntheticObservationProvider,
+} from './conversation-runner';
 import { resolveSessionSurface } from './session-surface';
 import { TurnContextBuilder } from './turn-context-builder';
 import { TurnLogRecorder } from './turn-log-recorder';
@@ -42,10 +48,16 @@ import {
   SyntheticObservationTiming,
   withSyntheticObservationTiming,
 } from './synthetic-observation';
-import { MemorySidecarBranchHandle, startMemorySidecarBranch } from './sidecar-memory-branch';
+import {
+  MemoryBranchActivationContext,
+  MemoryBranchPreviousInjection,
+  MemorySidecarBranchHandle,
+  startMemorySidecarBranch,
+} from './sidecar-memory-branch';
 import type { CheckpointCompactionCoordinator } from './checkpoint-compaction';
 
 const EMPTY_FINAL_RESPONSE_MESSAGE = '模型本轮未返回有效内容。请重新发送上一条消息；若仍失败，请切换模型或稍后再试。';
+export const DEFAULT_MEMORY_BRANCH_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 
 export interface AgentTurnServices {
   aiService: AIService;
@@ -118,7 +130,12 @@ export interface AgentTurnControllerOptions {
   getCurrentDirectory: () => string;
   updateCurrentDirectory: (directory: string) => void;
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
+  metrics?: MetricsCollector;
   persistCheckpoint?: (messages: Message[]) => void | Promise<void>;
+  /** Test/deployment override for repeated memory searches within one episode. */
+  memoryBranchRefreshIntervalMs?: number;
+  checkpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
+  beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
 }
 
 interface MemoryBranchSlot {
@@ -126,6 +143,18 @@ interface MemoryBranchSlot {
   handle: MemorySidecarBranchHandle;
   originTurn: number;
   done: boolean;
+  completedAt?: number;
+}
+
+interface EpisodeMemoryRuntime {
+  episodeId: string;
+  turnNumber: number;
+  taskAnchor: string;
+  abortSignal?: AbortSignal;
+  activeSlot: MemoryBranchSlot | null;
+  progressCursor: number;
+  previousInjections: MemoryBranchPreviousInjection[];
+  stopped: boolean;
 }
 
 /**
@@ -177,8 +206,9 @@ export class AgentTurnController {
         planRuntime: this.options.planRuntime,
       });
 
-      const currentMemoryBranch = this.startMemorySidecarIfEnabled({
+      const currentMemoryRuntime = this.startEpisodeMemoryRuntime({
         turnNumber,
+        episodeId,
         input: params.input,
         messages: params.messages,
         abortSignal: params.abortSignal,
@@ -200,9 +230,10 @@ export class AgentTurnController {
         pendingUserInputProvider: params.pendingUserInputProvider,
         confirmToolExecution: params.callbacks?.confirmToolExecution,
         episodeId,
-        syntheticObservationProvider: () => this.drainMemoryObservations(
+        syntheticObservationProvider: progressMessages => this.drainMemoryObservations(
           carryoverMemoryBranch,
-          currentMemoryBranch,
+          currentMemoryRuntime,
+          progressMessages,
         ),
         abortSignal: params.abortSignal,
         suppressFinalResponse: params.suppressFinalResponse,
@@ -224,15 +255,23 @@ export class AgentTurnController {
         throw error;
       } finally {
         this.expireMemoryBranch(carryoverMemoryBranch, 'carryover_ttl_expired');
-        if (result && currentMemoryBranch && this.shouldCarryMemoryBranch(currentMemoryBranch)) {
-          this.memoryBranchCarryover = currentMemoryBranch;
+        if (currentMemoryRuntime) currentMemoryRuntime.stopped = true;
+        const activeMemoryBranch = currentMemoryRuntime?.activeSlot ?? null;
+        if (result && activeMemoryBranch && this.shouldCarryMemoryBranch(activeMemoryBranch)) {
+          this.memoryBranchCarryover = activeMemoryBranch;
         } else {
-          this.expireMemoryBranch(currentMemoryBranch, result ? 'current_branch_consumed' : 'turn_failed');
+          this.expireMemoryBranch(activeMemoryBranch, result ? 'current_branch_consumed' : 'turn_failed');
         }
+      }
+
+      if (this.options.checkpointCandidateBoundary) {
+        result.messages = await this.options.checkpointCandidateBoundary(result.messages);
       }
       const nextMessages = this.options.turnContextBuilder.removeTransientMessages(result.messages);
 
-      const metrics = Metrics.getSummary();
+      // User-facing turn reports intentionally remain main-turn scoped; the
+      // total ledger is reserved for aggregate billing/observability callers.
+      const metrics = (this.options.metrics ?? new MetricsCollector()).getSummary();
       this.logMetrics(metrics);
 
       this.replaceBase64Images(nextMessages);
@@ -344,7 +383,7 @@ export class AgentTurnController {
     pendingUserInputProvider?: PendingUserInputProvider;
     confirmToolExecution?: AgentTurnCallbacks['confirmToolExecution'];
     episodeId?: string;
-    syntheticObservationProvider?: () => SyntheticObservation[];
+    syntheticObservationProvider?: SyntheticObservationProvider;
     abortSignal?: AbortSignal;
     suppressFinalResponse?: boolean;
     shouldContinue: () => boolean;
@@ -361,7 +400,10 @@ export class AgentTurnController {
         syntheticObservationProvider: options.syntheticObservationProvider,
         episodeId: options.episodeId,
         checkpointCompactionCoordinator: this.options.checkpointCompactionCoordinator,
+        metrics: this.options.metrics,
         onCompactionCheckpoint: this.options.persistCheckpoint,
+        onCheckpointCandidateBoundary: this.options.checkpointCandidateBoundary,
+        beforeModelRequest: this.options.beforeModelRequest,
         // AgentSession/ContextWindowManager compacts durable history before the turn.
         // Runner-level compaction can fold transient runtime feedback into summary.
         enableCompression: false,
@@ -426,18 +468,113 @@ export class AgentTurnController {
     };
     slot.handle.done.finally(() => {
       slot.done = true;
+      slot.completedAt = Date.now();
     });
     return slot;
   }
 
+  private startEpisodeMemoryRuntime(options: {
+    turnNumber: number;
+    episodeId: string;
+    input: string | ContentBlock[];
+    messages: Message[];
+    abortSignal?: AbortSignal;
+  }): EpisodeMemoryRuntime | null {
+    const activeSlot = this.startMemorySidecarIfEnabled(options);
+    if (!activeSlot) return null;
+    return {
+      episodeId: options.episodeId,
+      turnNumber: options.turnNumber,
+      taskAnchor: contentToMemoryText(options.input),
+      abortSignal: options.abortSignal,
+      activeSlot,
+      progressCursor: 0,
+      previousInjections: [],
+      stopped: false,
+    };
+  }
+
   private drainMemoryObservations(
     carryover: MemoryBranchSlot | null,
-    current: MemoryBranchSlot | null,
+    current: EpisodeMemoryRuntime | null,
+    progressMessages: readonly Message[],
   ): SyntheticObservation[] {
+    const currentObservations = this.drainMemoryBranch(current?.activeSlot ?? null, 'current_turn');
+    if (current) {
+      this.rememberMemoryInjections(current, currentObservations);
+      this.maybeStartMemoryRefresh(current, progressMessages);
+    }
     return [
       ...this.drainMemoryBranch(carryover, 'late_previous_turn'),
-      ...this.drainMemoryBranch(current, 'current_turn'),
+      ...currentObservations,
     ];
+  }
+
+  private rememberMemoryInjections(
+    runtime: EpisodeMemoryRuntime,
+    observations: SyntheticObservation[],
+  ): void {
+    for (const observation of observations) {
+      const summary = String(observation.summary || '').trim();
+      const refs = Array.isArray(observation.metadata?.refs)
+        ? observation.metadata!.refs.map(ref => String(ref || '').trim()).filter(Boolean)
+        : [];
+      if (!summary) continue;
+      runtime.previousInjections.push({ summary, refs });
+    }
+  }
+
+  private maybeStartMemoryRefresh(
+    runtime: EpisodeMemoryRuntime,
+    progressMessages: readonly Message[],
+  ): void {
+    const previousSlot = runtime.activeSlot;
+    if (runtime.stopped || !previousSlot?.done || !previousSlot.completedAt) return;
+    const interval = Math.max(
+      0,
+      this.options.memoryBranchRefreshIntervalMs ?? DEFAULT_MEMORY_BRANCH_REFRESH_INTERVAL_MS,
+    );
+    if (Date.now() - previousSlot.completedAt < interval) return;
+
+    const nextProgress = progressMessages.slice(runtime.progressCursor);
+    const delta = nextProgress
+      .filter(message => !message.__syntheticObservation)
+      .map(memoryProgressEntry)
+      .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+    if (delta.length === 0) return;
+
+    const activationContext: MemoryBranchActivationContext = {
+      taskAnchor: runtime.taskAnchor,
+      deltaSinceLastRun: delta,
+      previousInjections: runtime.previousInjections.map(item => ({
+        summary: item.summary,
+        refs: [...item.refs],
+      })),
+    };
+    const queue = new InMemorySyntheticObservationQueue();
+    const slot: MemoryBranchSlot = {
+      queue,
+      originTurn: runtime.turnNumber,
+      done: false,
+      handle: this.createMemorySidecarHandle({
+        input: runtime.taskAnchor,
+        messages: [],
+        queue,
+        abortSignal: runtime.abortSignal,
+        activationContext,
+      }),
+    };
+    slot.handle.done.finally(() => {
+      slot.done = true;
+      slot.completedAt = Date.now();
+    });
+    runtime.progressCursor = progressMessages.length;
+    runtime.activeSlot = slot;
+    Logger.info(
+      `[${this.options.sessionKey}] started repeated memory branch: `
+      + `origin_turn=${runtime.turnNumber} delta_messages=${delta.length} `
+      + `previous_injections=${runtime.previousInjections.length}`,
+    );
   }
 
   private drainMemoryBranch(
@@ -493,6 +630,7 @@ export class AgentTurnController {
     messages: Message[];
     queue: SyntheticObservationQueue;
     abortSignal?: AbortSignal;
+    activationContext?: MemoryBranchActivationContext;
   }): MemorySidecarBranchHandle {
     return startMemorySidecarBranch({
       sessionKey: this.options.sessionKey,
@@ -502,6 +640,7 @@ export class AgentTurnController {
       aiService: this.options.services.memoryBranch?.aiService ?? this.options.services.aiService,
       queue: options.queue,
       signal: options.abortSignal,
+      activationContext: options.activationContext,
     });
   }
 
@@ -536,7 +675,7 @@ export class AgentTurnController {
     };
   }
 
-  private logMetrics(metrics: ReturnType<typeof Metrics.getSummary>): void {
+  private logMetrics(metrics: ReturnType<MetricsCollector['getSummary']>): void {
     if (metrics.aiCalls === 0 && metrics.toolCalls === 0) return;
     Logger.info(
       `[Metrics] AI调用: ${metrics.aiCalls}次, `
@@ -567,4 +706,25 @@ export class AgentTurnController {
       },
     });
   }
+}
+
+function contentToMemoryText(content: string | ContentBlock[] | null | undefined): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  return content.map(block => block.type === 'text' ? block.text : '[image]').join('\n');
+}
+
+function memoryProgressEntry(message: Message): Record<string, unknown> | null {
+  const content = contentToMemoryText(message.content);
+  const toolCalls = message.tool_calls?.map(call => ({
+    name: call.function.name,
+    arguments: call.function.arguments,
+  }));
+  if (!content.trim() && (!toolCalls || toolCalls.length === 0)) return null;
+  return {
+    role: message.role,
+    ...(message.name ? { name: message.name } : {}),
+    ...(content.trim() ? { content } : {}),
+    ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+  };
 }
