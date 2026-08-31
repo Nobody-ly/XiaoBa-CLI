@@ -863,7 +863,7 @@ export class ConversationRunner {
           messages,
           estimateToolsTokens(tools),
         );
-        if (usage.usedTokens + usage.toolTokens >= usage.maxTokens * CHECKPOINT_SUMMARY_STOP_RATIO) {
+        if (usage.usedTokens + usage.toolTokens > usage.maxTokens * CHECKPOINT_SUMMARY_STOP_RATIO) {
           throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
         }
       }
@@ -888,7 +888,7 @@ export class ConversationRunner {
         estimateToolsTokens(tools),
       );
       if (postCheckpointUsage.usedTokens + postCheckpointUsage.toolTokens
-        >= postCheckpointUsage.maxTokens * CHECKPOINT_SUMMARY_STOP_RATIO) {
+        > postCheckpointUsage.maxTokens * CHECKPOINT_SUMMARY_STOP_RATIO) {
         throw new Error('CONTEXT_CHECKPOINT_BLOCKED');
       }
     }
