@@ -31,6 +31,7 @@ export type CheckpointCompactionPhase = 'pre_turn' | 'mid_turn' | 'restore';
 export interface CheckpointCompactionCoordinatorOptions {
   maxContextTokens: number;
   compactionThreshold?: number;
+  triggerAboveThreshold?: boolean;
   retainedUserTokenBudget?: number;
 }
 
@@ -90,6 +91,7 @@ export function isCheckpointCompactionEnabled(
 export class CheckpointCompactionCoordinator {
   private readonly maxContextTokens: number;
   private readonly compactionThreshold: number;
+  private readonly triggerAboveThreshold: boolean;
   private readonly retainedUserTokenBudget: number;
 
   constructor(
@@ -101,6 +103,7 @@ export class CheckpointCompactionCoordinator {
       options.compactionThreshold,
       DEFAULT_COMPACTION_THRESHOLD,
     );
+    this.triggerAboveThreshold = options.triggerAboveThreshold === true;
     this.retainedUserTokenBudget = Math.max(
       256,
       Math.min(
@@ -131,8 +134,11 @@ export class CheckpointCompactionCoordinator {
 
   needsCompaction(messages: Message[], toolTokens = 0): boolean {
     const usage = this.getUsageInfo(messages, toolTokens);
-    return usage.usedTokens + usage.toolTokens
-      > this.maxContextTokens * this.compactionThreshold;
+    const usedTokens = usage.usedTokens + usage.toolTokens;
+    const thresholdTokens = this.maxContextTokens * this.compactionThreshold;
+    return this.triggerAboveThreshold
+      ? usedTokens > thresholdTokens
+      : usedTokens >= thresholdTokens;
   }
 
   async compactIfNeeded(

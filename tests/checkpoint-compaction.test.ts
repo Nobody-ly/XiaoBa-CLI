@@ -43,10 +43,26 @@ test('checkpoint compaction switch defaults on and supports explicit rollback', 
   } as NodeJS.ProcessEnv), false);
 });
 
-test('checkpoint compaction triggers only above the configured threshold', () => {
+test('checkpoint compaction retains inclusive threshold behavior by default', () => {
   const coordinator = new CheckpointCompactionCoordinator({} as any, {
     maxContextTokens: 100,
     compactionThreshold: 0.85,
+  });
+  (coordinator as any).getUsageInfo = () => ({
+    usedTokens: 85,
+    toolTokens: 0,
+    maxTokens: 100,
+    usagePercent: 85,
+  });
+
+  assert.equal(coordinator.needsCompaction([]), true);
+});
+
+test('checkpoint compaction supports a strict threshold for Branch Summary', () => {
+  const coordinator = new CheckpointCompactionCoordinator({} as any, {
+    maxContextTokens: 100,
+    compactionThreshold: 0.85,
+    triggerAboveThreshold: true,
   });
   (coordinator as any).getUsageInfo = () => ({
     usedTokens: 85,
