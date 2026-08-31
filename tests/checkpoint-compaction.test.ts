@@ -42,6 +42,45 @@ test('checkpoint compaction switch defaults on and supports explicit rollback', 
     XIAOBA_CHECKPOINT_COMPACTION_ENABLED: 'false',
   } as NodeJS.ProcessEnv), false);
 });
+
+test('checkpoint compaction retains inclusive threshold behavior by default', () => {
+  const coordinator = new CheckpointCompactionCoordinator({} as any, {
+    maxContextTokens: 100,
+    compactionThreshold: 0.85,
+  });
+  (coordinator as any).getUsageInfo = () => ({
+    usedTokens: 85,
+    toolTokens: 0,
+    maxTokens: 100,
+    usagePercent: 85,
+  });
+
+  assert.equal(coordinator.needsCompaction([]), true);
+});
+
+test('checkpoint compaction supports a strict threshold for Branch Summary', () => {
+  const coordinator = new CheckpointCompactionCoordinator({} as any, {
+    maxContextTokens: 100,
+    compactionThreshold: 0.85,
+    triggerAboveThreshold: true,
+  });
+  (coordinator as any).getUsageInfo = () => ({
+    usedTokens: 85,
+    toolTokens: 0,
+    maxTokens: 100,
+    usagePercent: 85,
+  });
+
+  assert.equal(coordinator.needsCompaction([]), false);
+  (coordinator as any).getUsageInfo = () => ({
+    usedTokens: 86,
+    toolTokens: 0,
+    maxTokens: 100,
+    usagePercent: 86,
+  });
+  assert.equal(coordinator.needsCompaction([]), true);
+});
+
 test('checkpoint compaction preserves stable system and transient runtime messages', async () => {
   const { service } = createService(() => [
     'Objective: finish the active task.',
@@ -164,6 +203,26 @@ test('restore checkpoint explicitly marks runtime state for re-verification', as
   const prompt = String(requests[0][0]?.content || '');
   assert.match(prompt, /unknown until reverified/i);
   assert.match(prompt, /processes, ports, files, devices/i);
+});
+
+test('checkpoint generation can opt out of global metrics recording', async () => {
+  const { service } = createService(() => 'candidate summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 200,
+    compactionThreshold: 0.5,
+  });
+  const { Metrics } = await import('../src/utils/metrics');
+  Metrics.reset();
+
+  await coordinator.compactIfNeeded([
+    { role: 'user', content: largeText('candidate source') },
+  ], {
+    sessionKey: 'candidate-metrics',
+    phase: 'pre_turn',
+    recordMetrics: false,
+  });
+
+  assert.equal(Metrics.getSummary().aiCalls, 0);
 });
 
 test('checkpoint failure preserves the original transcript for emergency fallback', async () => {
