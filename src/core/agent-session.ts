@@ -275,7 +275,10 @@ export class AgentSession {
       services.aiService,
       {
         maxContextTokens: contextWindow.promptBudgetTokens,
-        ...(checkpointCandidatesEnabled ? { compactionThreshold: CHECKPOINT_SUMMARY_STOP_RATIO } : {}),
+        ...(checkpointCandidatesEnabled ? {
+          compactionThreshold: CHECKPOINT_SUMMARY_STOP_RATIO,
+          triggerAboveThreshold: true,
+        } : {}),
       },
     );
     this.checkpointCandidateCoordinator = new CheckpointCompactionCoordinator(
@@ -283,6 +286,7 @@ export class AgentSession {
       {
         maxContextTokens: contextWindow.promptBudgetTokens,
         compactionThreshold: CHECKPOINT_SUMMARY_START_RATIO,
+        triggerAboveThreshold: true,
       },
     );
     this.useCheckpointCompaction = isCheckpointCompactionEnabled();
