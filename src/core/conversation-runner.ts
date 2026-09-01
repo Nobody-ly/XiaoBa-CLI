@@ -8,7 +8,10 @@ import { Logger } from '../utils/logger';
 import { isRateLimitErrorCode } from '../utils/rate-limit-error';
 import { Metrics } from '../utils/metrics';
 import { ContextCompressor } from './context-compressor';
-import type { CheckpointCompactionCoordinator } from './checkpoint-compaction';
+import {
+  CheckpointPersistenceError,
+  type CheckpointCompactionCoordinator,
+} from './checkpoint-compaction';
 import { estimateMessagesTokens, estimateToolsTokens } from './token-estimator';
 import {
   buildExplicitPlanRequestHintIfUseful,
@@ -817,7 +820,7 @@ export class ConversationRunner {
           } else if (event.status === 'complete') {
             await callbacks.onThinking?.('Continuation checkpoint created. Preparing to resume the same task.');
           } else {
-            await callbacks.onThinking?.('Checkpoint creation failed. Continuing with the original context.');
+            await callbacks.onThinking?.('Checkpoint creation failed. Stopping this turn with the original context preserved.');
           }
         }
         : undefined,
@@ -827,11 +830,11 @@ export class ConversationRunner {
     try {
       await this.onCompactionCheckpoint?.(result.messages);
     } catch (error) {
-      Logger.warning(
+      Logger.error(
         `[${this.sessionLabel}Turn ${turns}] continuation checkpoint persistence failed; `
-        + `keeping original transcript: ${error instanceof Error ? error.message : String(error)}`,
+        + `stopping before another model turn: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return;
+      throw new CheckpointPersistenceError(error);
     }
 
     messages.splice(0, messages.length, ...result.messages);

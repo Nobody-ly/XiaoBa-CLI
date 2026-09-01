@@ -166,10 +166,14 @@ test('restore checkpoint explicitly marks runtime state for re-verification', as
   assert.match(prompt, /processes, ports, files, devices/i);
 });
 
-test('checkpoint failure preserves the original transcript for emergency fallback', async () => {
+test('checkpoint failure preserves the transcript and propagates after provider retries are exhausted', async () => {
+  const providerError = Object.assign(
+    new Error('API错误 (502): Responses API stream ended without a terminal response'),
+    { status: 502 },
+  );
   const service = {
     chatStream: async () => {
-      throw new Error('provider unavailable');
+      throw providerError;
     },
   } as any;
   const coordinator = new CheckpointCompactionCoordinator(service, {
@@ -180,14 +184,19 @@ test('checkpoint failure preserves the original transcript for emergency fallbac
     { role: 'user', content: largeText('must not be lost') },
   ];
 
-  const result = await coordinator.compactIfNeeded(messages, {
-    sessionKey: 'failure-session',
-    phase: 'pre_turn',
-  });
+  const statuses: string[] = [];
+  await assert.rejects(
+    coordinator.compactIfNeeded(messages, {
+      sessionKey: 'failure-session',
+      phase: 'pre_turn',
+      onStatus: event => { statuses.push(event.status); },
+    }),
+    error => error === providerError,
+  );
 
-  assert.equal(result.compacted, false);
-  assert.equal(result.messages, messages);
-  assert.equal(result.messages[0].content, messages[0].content);
+  assert.deepEqual(statuses, ['start', 'error']);
+  assert.equal(messages.length, 1);
+  assert.match(String(messages[0].content), /must not be lost/);
 });
 
 test('checkpoint prompt distinguishes pre-turn, mid-turn, and restored history', () => {

@@ -64,6 +64,7 @@ import {
 import { collectRemoteContextWatermarks } from './remote-context-watermarks';
 import {
   CheckpointCompactionCoordinator,
+  CheckpointPersistenceError,
   type CheckpointCompactionPhase,
   isCheckpointCompactionEnabled,
 } from './checkpoint-compaction';
@@ -88,7 +89,7 @@ export const MODEL_RECOVERY_FAILED_MESSAGE = '模型服务暂时不稳定，系�
 export const MODEL_REQUEST_FAILED_MESSAGE = '模型服务暂时不稳定，本次处理未能完成，请稍后继续。';
 export const CONTEXT_COMPACTION_START_MESSAGE = '正在压缩上下文，整理较早的对话内容。';
 export const CONTEXT_COMPACTION_COMPLETE_MESSAGE = '上下文压缩完成，继续处理当前请求。';
-export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文继续处理。';
+export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文并安全停止本轮。';
 
 // ─── 接口定义 ───────────────────────────────────────────
 
@@ -430,8 +431,9 @@ export class AgentSession {
         if (this.persistCheckpoint(compactionResult.messages)) {
           this.messages = compactionResult.messages;
         } else {
-          Logger.warning(`[会话 ${this.key}] 恢复检查点持久化失败，保留原始上下文`);
+          Logger.error(`[会话 ${this.key}] 恢复检查点持久化失败，停止初始化以保留原始上下文`);
           this.messages = messagesBeforeRestoreCompaction;
+          throw new CheckpointPersistenceError();
         }
       } else {
         this.messages = compactionResult.messages;
@@ -682,8 +684,9 @@ export class AgentSession {
           if (this.persistCheckpoint(compactionResult.messages)) {
             this.messages = compactionResult.messages;
           } else {
-            Logger.warning(`[会话 ${this.key}] 处理前检查点持久化失败，保留原始上下文`);
+            Logger.error(`[会话 ${this.key}] 处理前检查点持久化失败，停止本轮以保留原始上下文`);
             this.messages = messagesBeforeCompaction;
+            throw new CheckpointPersistenceError();
           }
         } else {
           this.messages = compactionResult.messages;
