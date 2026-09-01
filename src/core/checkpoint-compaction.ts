@@ -63,6 +63,23 @@ export interface CheckpointCompactionResult {
   usagePercent: number;
 }
 
+export class CheckpointPersistenceError extends Error {
+  constructor(cause?: unknown) {
+    super('Continuation checkpoint could not be persisted; the current turn was stopped before another model request.');
+    this.name = 'CheckpointPersistenceError';
+    if (cause === undefined) return;
+    try {
+      Object.defineProperty(this, 'cause', {
+        value: cause,
+        configurable: true,
+        enumerable: false,
+      });
+    } catch {
+      // The stable error message is sufficient on runtimes without Error.cause.
+    }
+  }
+}
+
 export function isCheckpointCompactionEnabled(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
@@ -200,7 +217,12 @@ export class CheckpointCompactionCoordinator {
         `[${request.sessionKey}] checkpoint compaction failed `
         + `phase=${request.phase}: ${describeError(error)}`,
       );
-      return { messages, compacted: false, ...usage };
+      // AIService owns the bounded provider retry policy for this checkpoint
+      // request. Once that policy is exhausted, returning the unchanged
+      // transcript would let the runner execute another tool and create a new
+      // checkpoint request with a fresh retry budget. Propagate the terminal
+      // failure instead so the current episode stops at this safe boundary.
+      throw error;
     }
   }
 

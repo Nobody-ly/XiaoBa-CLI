@@ -117,7 +117,7 @@ test('runner checkpoints only after a complete tool result and resumes the same 
   assert.equal(JSON.stringify(modelRequests).includes(legacyArtifactSentinel), false);
 });
 
-test('runner keeps the original transcript when checkpoint persistence fails', async () => {
+test('runner stops before another model request when checkpoint persistence fails', async () => {
   const modelRequests: Message[][] = [];
   const aiService = {
     chat: async (messages: Message[]) => {
@@ -175,14 +175,81 @@ test('runner keeps the original transcript when checkpoint persistence fails', a
     },
   });
 
-  const result = await runner.run([{
-    role: 'user',
-    content: 'inspect and continue',
-    __episodeId: 'episode-main',
-  }]);
+  await assert.rejects(
+    runner.run([{
+      role: 'user',
+      content: 'inspect and continue',
+      __episodeId: 'episode-main',
+    }]),
+    error => error instanceof Error && error.name === 'CheckpointPersistenceError',
+  );
 
-  assert.equal(result.response, 'continued with original transcript');
-  assert.ok(modelRequests[1].some(message =>
-    message.role === 'tool' && message.content === 'verified tool evidence'));
-  assert.equal(modelRequests[1].some(message => message.__checkpointSummary), false);
+  assert.equal(modelRequests.length, 1);
+});
+
+test('runner does not create a fresh checkpoint retry budget after a terminal 502', async () => {
+  let modelRequests = 0;
+  let toolExecutions = 0;
+  let checkpointRequests = 0;
+  const aiService = {
+    chat: async () => {
+      modelRequests++;
+      return {
+        content: null,
+        toolCalls: [{
+          id: `call-${modelRequests}`,
+          type: 'function',
+          function: { name: 'inspect', arguments: '{}' },
+        }],
+        usage,
+      };
+    },
+  } as any;
+  const tool: ToolDefinition = {
+    name: 'inspect',
+    description: 'inspect',
+    parameters: { type: 'object', properties: {} },
+  };
+  const executor: ToolExecutor = {
+    getToolDefinitions: () => [tool],
+    executeTool: async (call: ToolCall): Promise<ToolResult> => {
+      toolExecutions++;
+      return {
+        role: 'tool',
+        tool_call_id: call.id,
+        name: call.function.name,
+        content: 'verified tool evidence',
+        ok: true,
+      };
+    },
+  };
+  const terminalError = Object.assign(
+    new Error('API错误 (502): Responses API stream ended without a terminal response'),
+    { status: 502 },
+  );
+  const coordinator = {
+    compactIfNeeded: async () => {
+      checkpointRequests++;
+      throw terminalError;
+    },
+  } as any;
+  const runner = new ConversationRunner(aiService, executor, {
+    stream: false,
+    episodeId: 'episode-502',
+    checkpointCompactionCoordinator: coordinator,
+    onCompactionCheckpoint: async () => undefined,
+  });
+
+  await assert.rejects(
+    runner.run([{
+      role: 'user',
+      content: 'inspect repeatedly',
+      __episodeId: 'episode-502',
+    }]),
+    error => error === terminalError,
+  );
+
+  assert.equal(modelRequests, 1);
+  assert.equal(toolExecutions, 1);
+  assert.equal(checkpointRequests, 1);
 });
