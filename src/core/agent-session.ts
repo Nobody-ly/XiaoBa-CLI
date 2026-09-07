@@ -916,6 +916,7 @@ export class AgentSession {
   /** 重置会话状态（仅清内存，保留历史文件） */
   reset(): void {
     this.lifecycleGeneration++;
+    this.activeAbortController?.abort();
     this.planRuntime.clear();
     this.stopSubAgents('父会话 reset');
     this.messages = [];
@@ -930,6 +931,7 @@ export class AgentSession {
   /** 清空历史（同时删除文件），返回本地文件与状态是否都删除成功。 */
   clear(): boolean {
     this.lifecycleGeneration++;
+    this.activeAbortController?.abort();
     this.planRuntime.clear();
     this.stopSubAgents('父会话 clear');
     this.messages = [];
@@ -1153,7 +1155,11 @@ export class AgentSession {
     const durable = this.turnContextBuilder.removeTransientMessages(
       stripAssistantArtifactsFromMessages(messages),
     );
-    return this.lifecycleManager.saveContext(durable);
+    if (!this.lifecycleManager.saveContext(durable)) return false;
+    // Cancellation/error cleanup saves session-owned memory. Publish a saved
+    // mid-turn checkpoint here so cleanup cannot overwrite it with pre-turn data.
+    this.messages = durable;
+    return true;
   }
 
   private createContextCompactionNotifier(

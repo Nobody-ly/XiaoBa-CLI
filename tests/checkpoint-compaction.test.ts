@@ -394,3 +394,15 @@ test('oversized ordinary exchanges cannot replace the active root with its assis
     assert.ok(JSON.stringify(requests[0]).includes('ROOT_REQUIREMENT'));
   }
 });
+
+test('summary generator can see output constraints in the separately retained root', async () => {
+  const { service, requests } = createService(() => 'Complete audit.md in the specified output directory.');
+  const coordinator = new CheckpointCompactionCoordinator(service, { maxContextTokens: 2000 });
+  const root: Message = { role: 'user', content: 'Write audit.md into D:/work/exact-output, not the materials directory.', __episodeId: 'active', __episodeInputKind: 'root' };
+  const result = await coordinator.compactIfNeeded([
+    { role: 'assistant', content: largeText('old work').repeat(5), __episodeId: 'old' }, root,
+  ], { sessionKey: 'root-reference', phase: 'mid_turn', episodeId: 'active' });
+  assert.ok(result.messages.includes(root));
+  assert.ok(JSON.stringify(requests[0]).includes('D:/work/exact-output'));
+  assert.ok(JSON.stringify(requests[0]).includes('Reference only'));
+});

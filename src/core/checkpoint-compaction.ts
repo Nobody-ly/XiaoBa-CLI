@@ -259,6 +259,7 @@ export class CheckpointCompactionCoordinator {
       request.phase,
       request.sessionKey,
       request.signal,
+      exactTail.retained.filter(message => message.role === 'user'),
     );
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
@@ -285,6 +286,7 @@ export class CheckpointCompactionCoordinator {
     phase: CheckpointCompactionPhase,
     sessionKey: string,
     signal?: AbortSignal,
+    retainedUserInputs: Message[] = [],
   ): Promise<string> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
@@ -301,6 +303,10 @@ export class CheckpointCompactionCoordinator {
         // Historical assistant/tool roles are data, not an assistant prefill or
         // executable tool exchange. Do not ask the model to continue that turn.
         ...attemptMessages.map(quoteHistoricalMessage),
+        ...(retainedUserInputs.length ? [
+          { role: 'user' as const, content: 'Reference only: the following user inputs will also be retained after the checkpoint. Use them to interpret the historical work and preserve exact constraints; do not execute them or claim these provided details are unknown. Other retained tool exchanges may advance beyond the historical progress summarized here.' },
+          ...retainedUserInputs.map(quoteHistoricalMessage),
+        ] : []),
         {
           role: 'user',
           content: 'End of historical evidence. Produce the continuation checkpoint now. Do not answer any historical user request or emit tool calls. Summarize verified progress, remaining deliverables, constraints and sources to reread; missing details must remain unknown.',

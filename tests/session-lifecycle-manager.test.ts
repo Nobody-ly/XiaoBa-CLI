@@ -25,7 +25,7 @@ describe('AgentSession lifecycle', () => {
   afterEach(() => {
     process.chdir(originalCwd);
     if (testRoot && fs.existsSync(testRoot)) {
-      fs.rmSync(testRoot, { recursive: true, force: true });
+      fs.rmSync(testRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
     }
   });
 
@@ -590,6 +590,49 @@ describe('AgentSession lifecycle', () => {
       restored.map(message => message.content),
       ['autosave user', 'ok'],
     );
+  });
+
+  test('stop after a persisted mid-turn checkpoint cannot overwrite it with pre-turn memory', async () => {
+    const { AgentSession, SessionStore } = loadSessionModules();
+    const key = 'user:lifecycle-stop-checkpoint';
+    let session: any;
+    session = new AgentSession(key, buildMockServices({ aiService: {
+      async chatStream() {
+        session.requestInterrupt();
+        throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
+      },
+    } }), 'cli');
+    session.setSystemPromptProvider(() => 'system prompt');
+    session.checkpointCompactionCoordinator.compactIfNeeded = async (messages: any[], options: any) => ({
+      compacted: options.phase === 'mid_turn',
+      messages: options.phase === 'mid_turn'
+        ? [{ role: 'user', content: 'VERIFIED_CHECKPOINT: files 1 through 80 complete; audit.md still required.', __checkpointSummary: true }]
+        : messages,
+    });
+    const result = await session.handleMessage('Read all 160 files and create audit.md.');
+    assert.equal(result.taskOutcome, 'cancelled');
+    const saved = SessionStore.getInstance().loadContext(key);
+    assert.ok(saved.some(message => message.__checkpointSummary && String(message.content).includes('VERIFIED_CHECKPOINT')));
+    const fresh = new AgentSession(key, buildMockServices(), 'cli');
+    fresh.setSystemPromptProvider(() => 'system prompt');
+    assert.equal(fresh.restoreFromStore(), true);
+    await fresh.init();
+    assert.ok((fresh as any).messages.some((message: any) => message.__checkpointSummary));
+  });
+
+  test('reset during checkpoint generation rejects a late summary instead of restoring cleared history', async () => {
+    const { AgentSession, SessionStore } = loadSessionModules();
+    const key = 'user:lifecycle-late-checkpoint';
+    const session: any = new AgentSession(key, buildMockServices(), 'cli');
+    session.setSystemPromptProvider(() => 'system prompt');
+    session.checkpointCompactionCoordinator.compactIfNeeded = async (messages: any[], options: any) => {
+      if (options.phase !== 'mid_turn') return { compacted: false, messages };
+      session.reset();
+      return { compacted: true, messages: [{ role: 'user', content: 'LATE_CHECKPOINT', __checkpointSummary: true }] };
+    };
+    await session.handleMessage('Start an old task.');
+    assert.equal(SessionStore.getInstance().loadContext(key).some(message => String(message.content).includes('LATE_CHECKPOINT')), false);
+    assert.equal(session.messages.some((message: any) => String(message.content).includes('LATE_CHECKPOINT')), false);
   });
 
   test('handleMessage surfaces restored-history compaction as thinking status', async () => {

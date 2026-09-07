@@ -835,6 +835,7 @@ export class ConversationRunner {
         : undefined,
     });
     if (!result.compacted) return;
+    this.toolExecutionContext?.abortSignal?.throwIfAborted();
 
     try {
       await this.onCompactionCheckpoint?.(result.messages);
