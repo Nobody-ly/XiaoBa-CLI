@@ -25,6 +25,7 @@ const SUMMARY_TOOL_RESULT_HEAD_CHARS = 16_000;
 const SUMMARY_TOOL_RESULT_TAIL_CHARS = 4_000;
 const CHECKPOINT_TOOL_EVIDENCE_PREFIX = '[checkpoint_tool_evidence]';
 const CHECKPOINT_USER_INPUT_EVIDENCE_PREFIX = '[checkpoint_user_input_evidence]';
+const CHECKPOINT_SOURCE_VERIFICATION = 'This checkpoint is a lossy reference, not an exact data source. Re-read original files or tool evidence before using exact fields. Never pad, normalize, or extrapolate identifiers or checksums from a summary. Before declaring a generated report correct, compare every field against its original source; counts and uniqueness alone do not establish correctness.';
 
 export type CheckpointCompactionPhase = 'pre_turn' | 'mid_turn' | 'restore';
 
@@ -264,7 +265,7 @@ export class CheckpointCompactionCoordinator {
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
       role: 'user',
-      content: `${CHECKPOINT_SUMMARY_PREFIX}\n\n${summary}`,
+      content: `${CHECKPOINT_SUMMARY_PREFIX}\n\n${CHECKPOINT_SOURCE_VERIFICATION}\n\n${summary}`,
       __checkpointSummary: true,
       __checkpointPhase: request.phase,
       ...(activeEpisodeId ? { __episodeId: activeEpisodeId } : {}),
