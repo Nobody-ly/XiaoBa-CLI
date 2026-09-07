@@ -10,6 +10,12 @@
 
 ## 文件与生命周期
 
+Skill 包跟随现有仓库资源布局，位于 `skills/xiaoba-knowledge/`，与 `skills/catsco-prompt-editor/` 同级；`prompts/` 只保留系统提示及压缩提示。Electron 和 Worker 发布配置均已包含根目录 `skills/`。
+
+这里有三个不同用途的目录：安装目录 `skills/xiaoba-knowledge/` 是程序提供的指导和 helper；`<userData>/skills/` 是当前 bot 的可变 Skill 工作区，受 CatsCompany 的 BotDefinition、SkillHub 安装和同步流程管理；`<userData>/knowledge/` 是同实例共享的持久知识正文。
+
+当前知识库 Skill 由 SkillManager 在工作区没有同名 Skill 时补入，保障同一实例各 bot 默认可用；它没有注册成云端 SkillHub 包，也不属于 BotDefinition 的 Skill 清单。CatsCompany 网页对 bot Skill 的安装、删除和版本控制不会关闭这个内置回退。若以后要纳入云端开关，需另外实现实例能力配置或改变安装策略，单纯移动源码目录不能完成。既有 prompt-editor 是按需复制到 bot 工作区的 seed，三个 PDF/图片默认 Skill 则由 SkillHub 安装，两者与知识库的加载策略不同。
+
 - `documents/KB-<uuid>.md`：文档正文和单行 JSON/YAML frontmatter，包含固定 ID、标题、摘要、分类、来源、更新时间、修改原因。
 - `index.md`：面向阅读的分类/摘要索引，可重建。
 - `changes.md`：根据当前文档与历史版本生成的修改记录，可重建。

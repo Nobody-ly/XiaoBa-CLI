@@ -1,11 +1,11 @@
 import * as path from 'path';
-import { DEFAULT_PROMPTS_DIR } from '../utils/prompt-template';
 import { PathResolver } from '../utils/path-resolver';
 import { SkillParser } from './skill-parser';
 import { Skill } from '../types/skill';
 
 export const KNOWLEDGE_SKILL_NAME = 'xiaoba-knowledge';
-export const KNOWLEDGE_SKILL_FILE = path.join(DEFAULT_PROMPTS_DIR, 'skills', KNOWLEDGE_SKILL_NAME, 'SKILL.md');
+// Package resources, separate from the mutable per-bot Skill workspace.
+export const KNOWLEDGE_SKILL_FILE = path.resolve(__dirname, '../../skills', KNOWLEDGE_SKILL_NAME, 'SKILL.md');
 
 export function isBuiltinKnowledgeSkillFile(file: string): boolean {
   return path.resolve(file) === path.resolve(KNOWLEDGE_SKILL_FILE);

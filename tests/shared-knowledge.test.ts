@@ -13,7 +13,7 @@ import { PromptComposer } from '../src/runtime/prompt-composer';
 import { DEFAULT_PROMPTS_DIR } from '../src/utils/prompt-template';
 import { ToolManager } from '../src/tools/tool-manager';
 
-const helper = path.resolve(__dirname, '../prompts/skills/xiaoba-knowledge/scripts/knowledge.cjs');
+const helper = path.resolve(__dirname, '../skills/xiaoba-knowledge/scripts/knowledge.cjs');
 const { KnowledgeStore } = require(helper);
 const run = promisify(execFile);
 const request = (overrides: Record<string, unknown> = {}) => ({
