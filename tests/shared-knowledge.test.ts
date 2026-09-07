@@ -63,6 +63,28 @@ describe('instance shared knowledge', () => {
     assert.equal(unchanged.revision, updated.revision);
   });
 
+  test('resolves short citations uniquely and searches full IDs and prefixes', async () => {
+    const store = new KnowledgeStore(root);
+    const created = await store.put(request());
+    const shortId = created.id.slice(0, 11);
+    assert.equal(store.read(shortId).id, created.id);
+    assert.equal(store.read(shortId).revision, created.revision);
+    assert.equal(store.index(shortId).items[0].id, created.id);
+    assert.equal(store.index(created.id).items[0].id, created.id);
+    assert.throws(() => new KnowledgeStore(path.join(temp, 'empty')).read(shortId), { code: 'NOT_FOUND' });
+    assert.equal(fs.existsSync(path.join(temp, 'empty')), false);
+
+    // Two legitimate full IDs can share their first eight UUID characters.
+    const secondId = created.id.slice(0, -1) + (created.id.endsWith('0') ? '1' : '0');
+    const raw = fs.readFileSync(path.join(root, 'documents', `${created.id}.md`), 'utf8');
+    fs.writeFileSync(path.join(root, 'documents', `${secondId}.md`), raw.replace(created.id, secondId));
+    assert.equal(store.index(shortId).total, 2);
+    assert.throws(() => store.read(shortId), { code: 'AMBIGUOUS_ID' });
+    assert.equal(store.read(created.id).id, created.id);
+    assert.equal(store.read(secondId).id, secondId);
+    await assert.rejects(store.put(request({ id: shortId, expectedRevision: created.revision })), { code: 'INVALID_ID' });
+  });
+
   test('independent processes serialize writes and keep a complete shared index', async () => {
     const writes = Array.from({ length: 4 }, (_, i) => {
       const input = path.join(temp, `请求 ${i}.json`);

@@ -20,8 +20,10 @@
 通过 `skill` 工具加载 `xiaoba-knowledge`，工具结果会提供知识目录、脚本和 Node 绝对路径。按 SKILL.md 操作即可；脚本仅使用 Node 标准库，复用 `execute_shell` 的本机路由和既有权限流程。
 
 `index` / `search` 每页最多 30 条，`read` 每页最多 12000 字符，返回 nextOffset。索引与搜索直接读取当前文档，避免派生 index.md 过时导致查不到更新。长文分页读取时检查 revision 是否一致。
+简短引用可使用 `KB-` 加 UUID 前八位。`read` 仅在唯一匹配时接受短 ID，并返回完整 ID；多个文档共享前缀时返回 `AMBIGUOUS_ID`，需通过 search 检索完整 ID 后再读。search 同时支持正文、标题、分类和 ID/前缀。写入仍必须使用完整 ID，以避免短引用碰撞造成误更新。
 
 写入使用 UTF-8 JSON 请求文件；创建需 `expectedRevision:null`，更新需 `id` 和 read 返回的 SHA-256 revision。脚本持有跨进程锁，检查版本，归档旧正文，再原子替换当前文档。过期版本返回 `REVISION_CONFLICT`，必须重读合并。内容未变化不会新增版本。
+Skill 要求忠实区分已确认事实和建议，不把额外推断写成用户约定；更新前查重、更新后读回核对。此类内容质量约束由模型遵循，脚本负责存储一致性，不能自动判断事实真假。
 
 正文保存后若派生索引写入失败，返回 `saved:true` 和 warning，使用 `reindex` 修复；不能将其误认为未保存而重复创建。每份文件原子替换，index.md 和 changes.md 不构成跨文件事务，helper 查询仍以正文为准。
 

@@ -11,6 +11,7 @@ const MAX_FILE_BYTES = 256 * 1024;
 const PAGE_SIZE = 30;
 const READ_SIZE = 12000;
 const ID_PATTERN = /^KB-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const SHORT_ID_PATTERN = /^KB-[a-f0-9]{8}$/;
 
 function fail(code, message) {
   throw Object.assign(new Error(message), { code });
@@ -48,6 +49,18 @@ class KnowledgeStore {
     return this.safePath('documents', `${id}.md`);
   }
 
+  resolveReadId(id) {
+    if (typeof id !== 'string' || !SHORT_ID_PATTERN.test(id)) return id;
+    const directory = this.safePath('documents');
+    const matches = fileStat(directory) ? fs.readdirSync(directory)
+      .filter(name => name.endsWith('.md'))
+      .map(name => name.slice(0, -3))
+      .filter(name => ID_PATTERN.test(name) && name.startsWith(`${id}-`)) : [];
+    if (!matches.length) fail('NOT_FOUND', `No document matches ${id}.`);
+    if (matches.length > 1) fail('AMBIGUOUS_ID', `Multiple documents match ${id}. Search this ID prefix and use a complete ID.`);
+    return matches[0];
+  }
+
   readRaw(file) {
     const stat = fileStat(file);
     if (!stat) fail('NOT_FOUND', `Document not found: ${file}`);
@@ -70,6 +83,7 @@ class KnowledgeStore {
   }
 
   read(id, offset = 0) {
+    id = this.resolveReadId(id);
     const file = this.documentPath(id);
     const doc = this.parse(this.readRaw(file), file);
     if (doc.id !== id) fail('INVALID_DOCUMENT', 'Document ID differs from filename.');
@@ -92,7 +106,7 @@ class KnowledgeStore {
   index(query = '', offset = 0) {
     const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const docs = this.documents().filter(doc => {
-      const text = `${doc.title}\n${doc.summary}\n${doc.category}\n${doc.body}`.toLocaleLowerCase();
+      const text = `${doc.id}\n${doc.title}\n${doc.summary}\n${doc.category}\n${doc.body}`.toLocaleLowerCase();
       return terms.every(term => text.includes(term));
     });
     return {
