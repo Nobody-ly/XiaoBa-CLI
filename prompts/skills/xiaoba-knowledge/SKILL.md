@@ -14,6 +14,7 @@ Node 可执行文件：<KNOWLEDGE_NODE>
 ## 调用方式
 
 使用本运行环境的 execute_shell（不带远程 target），运行 Node 脚本。将下面的 ROOT、SCRIPT 替换成上面的绝对路径，并按当前 shell 正确引用路径（包括空格、中文）；不要假设当前 cwd 就是用户数据目录。打包版 Node 使用运行环境提供的 Node 路径。
+脚本路径必须原样使用本次加载结果，不凭记忆重拼。MODULE_NOT_FOUND 或路径错误时，重新加载本 Skill，对照完整绝对路径重试；仍失败就报告阻碍，不能用 write_file、edit_file 或自行编写 shell 直接修改知识正文、索引、历史来绕过 put。临时 JSON 请求文件放知识目录外的临时目录。
 
 ```text
 node SCRIPT --root ROOT index

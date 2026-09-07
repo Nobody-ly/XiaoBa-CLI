@@ -346,6 +346,9 @@ export class ConversationRunner {
       this.injectSyntheticObservations(messages, turns);
       const runtimeTransientHints = this.drainRuntimeTransientMessages(turns);
       const requestTools = this.fitToolsToPromptBudget(activeTools);
+      // Includes the incoming root/pending input, which was not yet present in
+      // AgentSession's pre-turn check. Compact before mechanical budget trimming.
+      await this.compactMidTurnIfNeeded(messages, requestTools, turns, callbacks);
       if (requestTools.length < activeTools.length && !notifiedToolBudgetDisabled) {
         notifiedToolBudgetDisabled = true;
         if (callbacks?.onThinking) {

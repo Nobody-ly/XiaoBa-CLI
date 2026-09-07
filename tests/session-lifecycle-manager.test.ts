@@ -646,7 +646,7 @@ describe('AgentSession lifecycle', () => {
       },
     });
 
-    assert.deepStrictEqual(compactReasons, ['pre_turn', 'restore']);
+    assert.deepStrictEqual(compactReasons, ['pre_turn', 'restore', 'mid_turn']);
     assert.deepStrictEqual(thinking, [
       CONTEXT_COMPACTION_START_MESSAGE,
       CONTEXT_COMPACTION_GENERATED_MESSAGE,

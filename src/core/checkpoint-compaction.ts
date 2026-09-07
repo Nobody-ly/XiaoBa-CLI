@@ -288,6 +288,7 @@ export class CheckpointCompactionCoordinator {
   ): Promise<string> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
+    let invalidSummaryAttempts = 0;
     let lastError: unknown;
 
     for (let attempt = 0; attempt < MAX_CONTEXT_RETRY_ATTEMPTS; attempt++) {
@@ -297,7 +298,13 @@ export class CheckpointCompactionCoordinator {
           role: 'system',
           content: buildCheckpointCompactionPrompt(phase, omittedMessageCount),
         },
-        ...attemptMessages,
+        // Historical assistant/tool roles are data, not an assistant prefill or
+        // executable tool exchange. Do not ask the model to continue that turn.
+        ...attemptMessages.map(quoteHistoricalMessage),
+        {
+          role: 'user',
+          content: 'End of historical evidence. Produce the continuation checkpoint now. Do not answer any historical user request or emit tool calls. Summarize verified progress, remaining deliverables, constraints and sources to reread; missing details must remain unknown.',
+        },
       ];
       let streamed = '';
       try {
@@ -321,8 +328,9 @@ export class CheckpointCompactionCoordinator {
           Metrics.recordAICall('stream', response.usage);
         }
         const summary = (streamed || response.content || '').trim();
-        if (!summary) {
-          throw new Error('checkpoint compaction returned an empty summary');
+        if (!summary || response.toolCalls?.length || /<\s*(?:minimax:)?tool_call\b|<invoke\s+name\s*=|\]<\]minimax\[>/i.test(summary)) {
+          if (invalidSummaryAttempts++ < 1) continue;
+          throw new Error('checkpoint compaction returned an invalid summary; original context preserved');
         }
         return summary;
       } catch (error) {
@@ -355,6 +363,28 @@ export class CheckpointCompactionCoordinator {
       );
     }
   }
+}
+
+function quoteHistoricalMessage(message: Message): Message {
+  const metadata = {
+    historicalRole: message.role,
+    ...(message.name ? { toolName: message.name } : {}),
+    ...(message.tool_calls ? { toolCalls: message.tool_calls } : {}),
+    ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
+  };
+  if (!Array.isArray(message.content)) {
+    return { role: 'user', content: JSON.stringify({ ...metadata, content: message.content }) };
+  }
+  // Preserve vision blocks as images, never stringify their base64 into tokens.
+  return {
+    role: 'user',
+    content: [
+      { type: 'text', text: JSON.stringify({ ...metadata, content: 'Historical multimodal evidence follows.' }) },
+      ...message.content.map(block => block.type === 'text'
+        ? { type: 'text' as const, text: JSON.stringify({ historicalText: block.text }) }
+        : block),
+    ],
+  };
 }
 
 /**
@@ -486,14 +516,23 @@ function selectExactTail(
     let groupTokens = estimateMessagesTokens(retainedGroup);
     let sourceIndexes = indexesForGroup(group);
     if (groupTokens > remaining) {
-      const recentAssistant = recentAssistantFromOversizedOrdinaryExchange(group);
+      const recentAssistant = group.belongsToActiveEpisode && group.hasUserInput
+        ? undefined
+        : recentAssistantFromOversizedOrdinaryExchange(group);
       if (recentAssistant && estimateMessagesTokens([recentAssistant]) <= remaining) {
         retainedGroup = [recentAssistant];
         groupTokens = estimateMessagesTokens(retainedGroup);
         sourceIndexes = [group.end];
       } else {
         retainedGroup = buildBoundedExactGroup(group.messages, remaining);
+        if (!retainedGroup.length && group.belongsToActiveEpisode && group.hasUserInput) {
+          retainedGroup = buildBoundedExactGroup(group.messages.filter(message => message.role === 'user'), remaining);
+        }
         groupTokens = estimateMessagesTokens(retainedGroup);
+        // Bounded evidence is not the original exchange. Its omitted content
+        // must remain available to the summary generator.
+        if (retainedGroup.length !== group.messages.length
+          || retainedGroup.some((message, index) => message !== group.messages[index])) sourceIndexes = [];
       }
     }
     if (retainedGroup.length === 0 || groupTokens > remaining) continue;
@@ -507,8 +546,9 @@ function selectExactTail(
   const selectedSourceCount = [...selected.values()]
     .reduce((total, value) => total + value.sourceIndexes.length, 0);
   if (selectedSourceCount === messages.length && groups.length > 0) {
-    const oldestSelected = [...selected.keys()].sort((left, right) => left.start - right.start)[0];
-    selected.delete(oldestSelected);
+    const oldestSelected = [...selected.keys()].sort((left, right) => left.start - right.start)
+      .find(group => !(group.belongsToActiveEpisode && group.hasUserInput));
+    if (oldestSelected) selected.delete(oldestSelected);
   }
 
   const selectedIndexes = new Set<number>();
@@ -520,7 +560,9 @@ function selectExactTail(
   }
   return {
     retained,
-    summarySource: messages.filter((_, index) => !selectedIndexes.has(index)),
+    summarySource: selectedIndexes.size === messages.length
+      ? messages
+      : messages.filter((_, index) => !selectedIndexes.has(index)),
   };
 }
 
@@ -580,9 +622,10 @@ function buildExactTailGroups(
 }
 
 function exactTailPriority(group: ExactTailGroup): number {
-  if (group.belongsToActiveEpisode && group.hasToolExchange) return 0;
+  if (group.belongsToActiveEpisode && group.messages.some(message => message.__episodeInputKind === 'root')) return 0;
   if (group.belongsToActiveEpisode && group.hasUserInput) return 1;
-  return 2;
+  if (group.belongsToActiveEpisode && group.hasToolExchange) return 2;
+  return 3;
 }
 
 function buildBoundedExactGroup(messages: Message[], maxTokens: number): Message[] {
