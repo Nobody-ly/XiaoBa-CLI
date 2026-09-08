@@ -142,12 +142,21 @@ class KnowledgeStore {
       }
     }
     if (handle === undefined) fail('LOCK_BUSY', `Knowledge writer is busy. Retry; inspect ${lock} if the owning process has exited.`);
+    const owner = JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), token: crypto.randomUUID() });
+    const identity = fs.fstatSync(handle);
     try {
-      fs.writeFileSync(handle, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
+      fs.writeFileSync(handle, owner);
       return operation();
     } finally {
       fs.closeSync(handle);
-      fs.unlinkSync(lock);
+      // Do not release a lock replaced by an operator or another process.
+      // No automatic stale-lock reclamation: age/PID alone cannot establish ownership.
+      const current = fileStat(lock);
+      if (current?.isFile() && current.nlink === 1
+          && current.dev === identity.dev && current.ino === identity.ino
+          && fs.readFileSync(lock, 'utf8') === owner) {
+        fs.unlinkSync(lock);
+      }
     }
   }
 

@@ -1,3 +1,4 @@
+import { setTimeout as abortableDelay } from 'node:timers/promises';
 import { Message, ContentBlock, ChatConfig, ChatResponse } from '../types';
 import type { ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalFileGrant } from '../types/session-identity';
 import type { TargetRoutes } from '../types/tool';
@@ -331,6 +332,7 @@ export class ConversationRunner {
 
     while (true) {
       turns++;
+      if (this.toolExecutionContext?.abortSignal?.aborted) break;
       if (this.shouldContinue && !this.shouldContinue()) {
         break;
       }
@@ -472,6 +474,9 @@ export class ConversationRunner {
         throw error;
       }
 
+      // Providers may resolve successfully after cancellation (including reset/clear).
+      // Never turn a late response into another tool execution or final reply.
+      this.toolExecutionContext?.abortSignal?.throwIfAborted();
       const aiDuration = Date.now() - aiStartTime;
       this.runObservation(() => this.promptTraceLogger.recordResponse(turns, response, aiDuration));
       Logger.info(`[${this.sessionLabel}Turn ${turns}] AI推理完成，耗时: ${aiDuration}ms`);
@@ -617,6 +622,8 @@ export class ConversationRunner {
       let shouldPauseTurn = false;
 
       for (const toolCall of response.toolCalls) {
+        // Flush already completed records below before leaving a cancelled batch.
+        if (this.toolExecutionContext?.abortSignal?.aborted) break;
         if (this.shouldContinue && !this.shouldContinue()) {
           break;
         }
@@ -629,12 +636,18 @@ export class ConversationRunner {
         Logger.info(`[${this.sessionLabel}Turn ${turns}] 执行工具: ${toolName} | 参数: ${ConversationRunner.truncateForLog(toolCall.function.arguments, 500)}`);
         const activeToolNames = allTools.map(tool => tool.name);
         const toolStart = Date.now();
-        const result = await this.executeToolWithRetry(
-          toolCall,
-          messages,
-          this.toolExecutionContext || {},
-          turns,
-        );
+        let result: ToolResult;
+        try {
+          result = await this.executeToolWithRetry(
+            toolCall, messages, this.toolExecutionContext || {}, turns,
+          );
+        } catch (error) {
+          // Preserve earlier successful calls if a later tool fails or aborts.
+          const completed = this.buildTurnMessages(assistantMsg, executionRecords, toolDefinitions);
+          messages.push(...completed);
+          newMessages.push(...completed);
+          throw error;
+        }
         executedToolCalls++;
         if (toolName === PLAN_TOOL_NAME) {
           hasUpdatedPlan = true;
@@ -1837,15 +1850,25 @@ export class ConversationRunner {
     context: Partial<ToolExecutionContext>,
     turn: number,
   ): Promise<ToolResult> {
+    context.abortSignal?.throwIfAborted();
     let lastResult = await this.toolExecutor.executeTool(toolCall, messages, context);
 
     for (let attempt = 1; attempt <= ConversationRunner.MAX_RETRIES; attempt++) {
       if (!ConversationRunner.isRateLimitError(lastResult)) {
         return lastResult;
       }
+      if (context.abortSignal?.aborted) return lastResult;
+      if (this.shouldContinue && !this.shouldContinue()) return lastResult;
       const delay = ConversationRunner.RETRY_BASE_DELAY_MS * attempt;
       Logger.warning(`[${this.sessionLabel}Turn ${turn}] ${toolCall.function.name} 触发限流 (429)，${delay}ms 后重试 (${attempt}/${ConversationRunner.MAX_RETRIES})`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      try {
+        await abortableDelay(delay, undefined, { signal: context.abortSignal });
+      } catch (error) {
+        if (!context.abortSignal?.aborted) throw error;
+        return lastResult;
+      }
+      if (context.abortSignal?.aborted) return lastResult;
+      if (this.shouldContinue && !this.shouldContinue()) return lastResult;
       lastResult = await this.toolExecutor.executeTool(toolCall, messages, context);
     }
 

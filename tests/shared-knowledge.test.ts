@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { SkillManager } from '../src/skills/skill-manager';
 import { SkillTool } from '../src/tools/skill-tool';
@@ -111,6 +112,50 @@ describe('instance shared knowledge', () => {
     assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
     const rejected = results.find(result => result.status === 'rejected') as PromiseRejectedResult;
     assert.equal(JSON.parse(rejected.reason.stderr).code, 'REVISION_CONFLICT');
+  });
+
+  test('a live owner and a crashed owner both block writes until explicit recovery', { timeout: 15000 }, async () => {
+    const child = spawn(process.execPath, ['-e', `
+      const {KnowledgeStore}=require(process.argv[1]);
+      new KnowledgeStore(process.argv[2]).withLock(() => {
+        process.stdout.write('LOCKED\\n');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      });
+    `, helper, root], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const exited = once(child, 'exit');
+    try {
+      await Promise.race([
+        once(child.stdout!, 'data'),
+        exited.then(() => { throw new Error('lock owner exited before acquiring the lock'); }),
+      ]);
+      const lock = path.join(root, '.write.lock');
+      const original = fs.readFileSync(lock, 'utf8');
+      assert.equal(JSON.parse(original).pid, child.pid);
+      await assert.rejects(new KnowledgeStore(root).put(request()), { code: 'LOCK_BUSY' });
+      assert.equal(fs.readFileSync(lock, 'utf8'), original);
+      child.kill('SIGKILL');
+      await exited;
+      await assert.rejects(new KnowledgeStore(root).put(request()), { code: 'LOCK_BUSY' });
+      assert.equal(fs.readFileSync(lock, 'utf8'), original);
+      assert.equal(new KnowledgeStore(root).index().total, 0);
+      // The owner is now known to have exited. Simulate the documented operator recovery.
+      fs.unlinkSync(lock);
+      const saved = await new KnowledgeStore(root).put(request());
+      assert.equal(new KnowledgeStore(root).read(saved.id).body, request().body);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited;
+    }
+  });
+
+  test('finishing an old write does not delete a replacement lock', async () => {
+    const lock = path.join(root, '.write.lock');
+    const replacement = JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString(), token: 'replacement-owner' });
+    await new KnowledgeStore(root).withLock(() => {
+      fs.unlinkSync(lock);
+      fs.writeFileSync(lock, replacement, { flag: 'wx' });
+    });
+    assert.equal(fs.readFileSync(lock, 'utf8'), replacement);
   });
 
   test('bounds reads, searches full bodies, and rebuilds index after manual edits', async () => {

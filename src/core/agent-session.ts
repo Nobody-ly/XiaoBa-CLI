@@ -734,6 +734,7 @@ export class AgentSession {
         });
         if (this.interruptRequested || this.activeAbortController.signal.aborted) {
           Logger.info(`[会话 ${this.key}] 当前请求已取消，忽略模型在中断后的返回`);
+          if (lifecycleGeneration === this.lifecycleGeneration) this.messages = result.messages;
           this.messages = this.turnContextBuilder.removeTransientMessages(this.messages);
           this.saveInterruptedContextIfCurrent(lifecycleGeneration);
           return { text: '已停止当前请求。', visibleToUser: true, taskOutcome: 'cancelled' };
@@ -745,6 +746,9 @@ export class AgentSession {
       } catch (err: any) {
         if (this.isAbortError(err) || this.interruptRequested || this.activeAbortController.signal.aborted) {
           Logger.info(`[会话 ${this.key}] 当前请求已取消`);
+          if (lifecycleGeneration === this.lifecycleGeneration) {
+            this.messages = this.getPartialMessagesFromError(err) ?? this.messages;
+          }
           this.messages = this.turnContextBuilder.removeTransientMessages(this.messages);
           this.saveInterruptedContextIfCurrent(lifecycleGeneration);
           return { text: '已停止当前请求。', visibleToUser: true, taskOutcome: 'cancelled' };

@@ -25,6 +25,27 @@ const unchanged = (messages: Message[]) => ({
   maxTokens: 100, usagePercent: 20,
 });
 
+test('cancellation during a tool rate-limit backoff prevents another execution', { timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  let executions = 0;
+  let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+  const runner = new ConversationRunner({
+    chat: async () => ({ content: '', toolCalls: [{ id: 'limited', type: 'function', function: { name: 'inspect', arguments: '{}' } }] }),
+  } as any, {
+    getToolDefinitions: () => [{ name: 'inspect', description: 'inspect', parameters: { type: 'object', properties: {} } }],
+    executeTool: async call => {
+      executions++;
+      cancelTimer = setTimeout(() => controller.abort(), 50);
+      return { role: 'tool', tool_call_id: call.id, name: 'inspect', content: 'rate limited', ok: false, errorCode: 'HTTP_429' };
+    },
+  }, { stream: false, toolExecutionContext: { abortSignal: controller.signal } });
+  try {
+    const result = await runner.run([{ role: 'user', content: 'inspect once' }]);
+    assert.equal(executions, 1);
+    assert.ok(result.messages.some(message => message.role === 'tool' && message.tool_call_id === 'limited'));
+  } finally { clearTimeout(cancelTimer); }
+});
+
 test('runner checkpoints only after a complete tool result and resumes the same episode', async () => {
   const events: string[] = [];
   const modelRequests: Message[][] = [];
