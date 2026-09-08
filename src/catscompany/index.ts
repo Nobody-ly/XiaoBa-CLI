@@ -78,6 +78,7 @@ import {
   SkillHubThinRpcError,
   SkillHubThinRpcHandler,
   SKILLHUB_THIN_RPC_TOOLS,
+  SKILLHUB_WORKSPACE_PAGINATION_CAPABILITY,
 } from './skillhub-rpc';
 
 interface PendingAttachment {
@@ -190,6 +191,7 @@ export const CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES: DeviceGrantOperatio
   'send_file',
   'execute_shell',
   SKILLHUB_THIN_RPC_TOOLS.workspace,
+  SKILLHUB_WORKSPACE_PAGINATION_CAPABILITY,
   SKILLHUB_THIN_RPC_TOOLS.share,
   SKILLHUB_THIN_RPC_TOOLS.finalize,
   SKILLHUB_THIN_RPC_TOOLS.delete,

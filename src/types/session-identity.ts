@@ -103,6 +103,7 @@ export type DeviceGrantOperation =
   | 'browser_control'
   | 'desktop_control'
   | 'skillhub.localWorkspace.get'
+  | 'skillhub.localWorkspace.pagination.v1'
   | 'skillhub.localSkill.share'
   | 'skillhub.localSkill.finalize'
   | 'skillhub.localSkill.delete'

@@ -31,6 +31,11 @@ export const SKILLHUB_THIN_RPC_TOOLS = {
   switchBot: 'skillhub.localBot.switch',
 } as const;
 
+// Capability marker, not an invokable tool. Web clients require this marker
+// before requesting a workspace so Runtimes that predate transport-safe
+// pagination cannot accidentally send the legacy 200-item response.
+export const SKILLHUB_WORKSPACE_PAGINATION_CAPABILITY = 'skillhub.localWorkspace.pagination.v1' as const;
+
 const DEFAULT_WORKSPACE_PAGE_SIZE = 200;
 const MAX_WORKSPACE_PAGE_SIZE = 200;
 const MAX_WORKSPACE_OFFSET = 1_000_000;
