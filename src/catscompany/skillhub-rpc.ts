@@ -31,12 +31,21 @@ export const SKILLHUB_THIN_RPC_TOOLS = {
   switchBot: 'skillhub.localBot.switch',
 } as const;
 
+// Capability marker, not an invokable tool. Web clients require this marker
+// before requesting a workspace so Runtimes that predate transport-safe
+// pagination cannot accidentally send the legacy 200-item response.
+export const SKILLHUB_WORKSPACE_PAGINATION_CAPABILITY = 'skillhub.localWorkspace.pagination.v1' as const;
+
 const DEFAULT_WORKSPACE_PAGE_SIZE = 200;
 const MAX_WORKSPACE_PAGE_SIZE = 200;
 const MAX_WORKSPACE_OFFSET = 1_000_000;
 const MAX_WORKSPACE_SKILLS = 10_000;
 const MAX_WORKSPACE_PACKAGE_BYTES = 128 * 1024 * 1024;
 const MAX_WORKSPACE_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+// CatsCo currently accepts WebSocket messages up to 64 KiB. Leave room for
+// the thin-tool envelope, request metadata, and JSON escaping around this
+// result instead of relying on an item count to predict the wire size.
+const MAX_WORKSPACE_PAGE_RESPONSE_BYTES = 48 * 1024;
 const MAX_WORKSPACE_SNAPSHOTS = 4;
 const WORKSPACE_SNAPSHOT_TTL_MS = 5 * 60_000;
 const MAX_REJECTED_FINGERPRINT_FILES = 10_000;
@@ -221,22 +230,23 @@ export class SkillHubThinRpcHandler {
       if (pageOffset > snapshot.skills.length) {
         throw new SkillHubThinRpcError('INVALID_REQUEST', 'offset is outside the workspace snapshot.');
       }
-      const pageSkills = snapshot.skills.slice(pageOffset, pageOffset + pageLimit);
-      const nextOffset = pageOffset + pageSkills.length;
-      const hasMore = nextOffset < snapshot.skills.length;
-      return {
-        schema: 'xiaoba.skillhub.local_workspace.v1',
-        bot_uid: botUid,
-        active_bot_uid: snapshot.activeBotUid,
-        skills_path: snapshot.skillsPath,
-        workspace_revision: snapshot.revision,
-        total_skills: snapshot.skills.length,
-        page_offset: pageOffset,
-        page_limit: pageLimit,
-        next_offset: hasMore ? nextOffset : null,
-        truncated: hasMore,
-        skills: pageSkills,
-      };
+      const pageSkills: Array<Record<string, unknown>> = [];
+      const pageEnd = Math.min(snapshot.skills.length, pageOffset + pageLimit);
+      for (let index = pageOffset; index < pageEnd; index += 1) {
+        const candidate = [...pageSkills, snapshot.skills[index]];
+        const candidateResponse = buildWorkspacePageResponse(snapshot, pageOffset, pageLimit, candidate);
+        if (Buffer.byteLength(JSON.stringify(candidateResponse), 'utf8') > MAX_WORKSPACE_PAGE_RESPONSE_BYTES) {
+          if (pageSkills.length === 0) {
+            throw new SkillHubThinRpcError(
+              'WORKSPACE_ENTRY_TOO_LARGE',
+              'A local Skill has too much listing metadata to send safely.',
+            );
+          }
+          break;
+        }
+        pageSkills.push(snapshot.skills[index]);
+      }
+      return buildWorkspacePageResponse(snapshot, pageOffset, pageLimit, pageSkills);
     }, { runtimeRoot: this.runtimeRoot });
   }
 
@@ -640,6 +650,29 @@ export class SkillHubThinRpcHandler {
       throw new SkillHubThinRpcError('BOT_NOT_ACTIVE', 'The selected Bot workspace is not active on this device.');
     }
   }
+}
+
+function buildWorkspacePageResponse(
+  snapshot: SkillHubWorkspaceSnapshot,
+  pageOffset: number,
+  pageLimit: number,
+  skills: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  const nextOffset = pageOffset + skills.length;
+  const hasMore = nextOffset < snapshot.skills.length;
+  return {
+    schema: 'xiaoba.skillhub.local_workspace.v1',
+    bot_uid: snapshot.botUid,
+    active_bot_uid: snapshot.activeBotUid,
+    skills_path: snapshot.skillsPath,
+    workspace_revision: snapshot.revision,
+    total_skills: snapshot.skills.length,
+    page_offset: pageOffset,
+    page_limit: pageLimit,
+    next_offset: hasMore ? nextOffset : null,
+    truncated: hasMore,
+    skills,
+  };
 }
 
 export function scheduleDashboardBotSwitch(

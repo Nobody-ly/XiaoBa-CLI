@@ -145,31 +145,75 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(first.next_offset, 75);
     assert.equal(first.truncated, true);
 
-    const second = await handler.execute(request({
-      request_id: 'workspace-page-2',
-      payload: {
-        bot_uid: '42',
-        offset: first.next_offset,
-        limit: 200,
-        workspace_revision: first.workspace_revision,
-      },
-    }));
-    assert.equal(second.workspace_revision, first.workspace_revision);
-    assert.equal((second.skills as unknown[]).length, 131);
-    assert.equal(second.page_offset, 75);
-    assert.equal(second.next_offset, null);
-    assert.equal(second.truncated, false);
-
-    const combined = [
-      ...(first.skills as Array<Record<string, unknown>>),
-      ...(second.skills as Array<Record<string, unknown>>),
-    ];
+    const combined = [...(first.skills as Array<Record<string, unknown>>)];
+    let nextOffset = first.next_offset as number | null;
+    let pageNumber = 2;
+    while (nextOffset !== null) {
+      const page = await handler.execute(request({
+        request_id: `workspace-page-${pageNumber}`,
+        payload: {
+          bot_uid: '42',
+          offset: nextOffset,
+          limit: 75,
+          workspace_revision: first.workspace_revision,
+        },
+      }));
+      assert.equal(page.workspace_revision, first.workspace_revision);
+      assert.equal(page.page_offset, nextOffset);
+      combined.push(...(page.skills as Array<Record<string, unknown>>));
+      nextOffset = page.next_offset as number | null;
+      pageNumber += 1;
+    }
     assert.equal(combined.length, 206);
     assert.equal(new Set(combined.map(skill => skill.local_skill_id)).size, 206);
     assert.deepEqual(
       combined.map(skill => String(skill.local_skill_id)),
       [...combined.map(skill => String(skill.local_skill_id))].sort(),
     );
+  });
+
+  test('keeps multibyte workspace pages below the thin-tool transport budget', async () => {
+    const skillsRoot = path.join(runtimeRoot, 'skills');
+    for (let index = 0; index < 80; index += 1) {
+      const name = `large-${String(index).padStart(3, '0')}`;
+      const skillRoot = path.join(skillsRoot, name);
+      fs.mkdirSync(skillRoot, { recursive: true });
+      fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+        '---',
+        `name: ${name}`,
+        `description: ${'图像生成能力'.repeat(125)}`,
+        '---',
+        '',
+      ].join('\n'));
+    }
+
+    const seen: string[] = [];
+    let offset = 0;
+    let revision = '';
+    let pageNumber = 0;
+    do {
+      const page = await handler.execute(request({
+        request_id: `workspace-byte-page-${pageNumber}`,
+        payload: {
+          bot_uid: '42',
+          offset,
+          limit: 200,
+          ...(revision ? { workspace_revision: revision } : {}),
+        },
+      }));
+      assert.ok(Buffer.byteLength(JSON.stringify(page), 'utf8') <= 48 * 1024);
+      seen.push(...(page.skills as Array<Record<string, string>>).map(skill => skill.local_skill_id));
+      revision = String(page.workspace_revision);
+      const nextOffset = page.next_offset as number | null;
+      if (nextOffset === null) break;
+      assert.ok(nextOffset > offset);
+      offset = nextOffset;
+      pageNumber += 1;
+    } while (pageNumber < 100);
+
+    assert.equal(seen.length, 81);
+    assert.equal(new Set(seen).size, 81);
+    assert.ok(pageNumber > 0);
   });
 
   test('serves later pages from one cached snapshot and refreshes only on a new listing', async () => {
