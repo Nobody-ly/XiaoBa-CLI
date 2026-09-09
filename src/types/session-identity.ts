@@ -104,6 +104,7 @@ export type DeviceGrantOperation =
   | 'desktop_control'
   | 'skillhub.localWorkspace.get'
   | 'skillhub.localWorkspace.pagination.v1'
+  | 'skillhub.localWorkspace.syncToAgent'
   | 'skillhub.localSkill.share'
   | 'skillhub.localSkill.finalize'
   | 'skillhub.localSkill.delete'

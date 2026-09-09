@@ -7,6 +7,7 @@ import type { CatsThinToolRpcMessage } from './client';
 import {
   BotSkillWorkspaceChangingError,
   finalizeCurrentBotPublicSkillNow,
+  pushCurrentBotSkillWorkspaceToCloudNow,
   withCurrentBotSkillWorkspaceWrite,
 } from '../bot-skills/runtime';
 import {
@@ -25,6 +26,7 @@ import { Logger } from '../utils/logger';
 
 export const SKILLHUB_THIN_RPC_TOOLS = {
   workspace: 'skillhub.localWorkspace.get',
+  syncWorkspace: 'skillhub.localWorkspace.syncToAgent',
   share: 'skillhub.localSkill.share',
   finalize: 'skillhub.localSkill.finalize',
   delete: 'skillhub.localSkill.delete',
@@ -93,6 +95,7 @@ export interface SkillHubThinRpcHandlerOptions {
   runtimeRoot?: string;
   scheduleBotSwitch?: (botUid: string) => void;
   finalizeCurrentBotSkill?: typeof finalizeCurrentBotPublicSkillNow;
+  pushCurrentBotSkillWorkspace?: typeof pushCurrentBotSkillWorkspaceToCloudNow;
   isShuttingDown?: () => boolean;
   enabled?: boolean;
   allowBotSwitch?: boolean;
@@ -103,6 +106,7 @@ export class SkillHubThinRpcHandler {
   private readonly runtimeRoot: string;
   private readonly scheduleBotSwitch: (botUid: string) => void;
   private readonly finalizeCurrentBotSkill: typeof finalizeCurrentBotPublicSkillNow;
+  private readonly pushCurrentBotSkillWorkspace: typeof pushCurrentBotSkillWorkspaceToCloudNow;
   private readonly isShuttingDown: () => boolean;
   private readonly enabled: boolean;
   private readonly allowBotSwitch: boolean;
@@ -120,6 +124,8 @@ export class SkillHubThinRpcHandler {
       ?? ((botUid) => scheduleDashboardBotSwitch(botUid, this.isShuttingDown));
     this.finalizeCurrentBotSkill = options.finalizeCurrentBotSkill
       ?? finalizeCurrentBotPublicSkillNow;
+    this.pushCurrentBotSkillWorkspace = options.pushCurrentBotSkillWorkspace
+      ?? pushCurrentBotSkillWorkspaceToCloudNow;
     this.enabled = options.enabled !== false;
     this.allowBotSwitch = options.allowBotSwitch !== false;
     this.now = options.now ?? (() => new Date());
@@ -193,6 +199,8 @@ export class SkillHubThinRpcHandler {
     switch (request.tool_name) {
       case SKILLHUB_THIN_RPC_TOOLS.workspace:
         return this.readWorkspace(botUid, payload, request);
+      case SKILLHUB_THIN_RPC_TOOLS.syncWorkspace:
+        return this.syncWorkspaceToAgent(botUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.share:
         return this.shareSkill(botUid, scope.ownerUid, payload, request);
       case SKILLHUB_THIN_RPC_TOOLS.finalize:
@@ -440,6 +448,73 @@ export class SkillHubThinRpcHandler {
         uploaded_at: String(result.skillHub.uploadedAt || ''),
       } : {},
       requires_confirmation: Boolean(result?.requiresConfirmation),
+    };
+  }
+
+  private async syncWorkspaceToAgent(
+    botUid: string,
+    payload: Record<string, unknown>,
+    request: CatsThinToolRpcMessage,
+  ): Promise<Record<string, unknown>> {
+    const expectedRevision = requiredContentHash(payload.workspace_revision, 'workspace_revision');
+    let workspaceSkillCount = 0;
+    let result;
+    try {
+      result = await this.pushCurrentBotSkillWorkspace(botUid, {
+        runtimeRoot: this.runtimeRoot,
+        validateScope: () => {
+          this.assertOperational(request);
+          this.assertRequestScope(request, botUid, true);
+        },
+        validateWorkspace: (context) => {
+          this.assertActiveWorkspace(botUid, context.botId, context.activeBotId);
+          const snapshot = this.createWorkspaceSnapshot(
+            botUid,
+            context.activeBotId,
+            context.skillsRoot,
+            this.now().getTime(),
+          );
+          if (snapshot.revision !== expectedRevision) {
+            throw new SkillHubThinRpcError(
+              'WORKSPACE_CHANGED',
+              'The local Skill workspace changed after it was reviewed. Refresh and confirm again.',
+            );
+          }
+          const invalid = snapshot.skills.find(skill => Boolean(skill.share_error));
+          if (invalid) {
+            throw new SkillHubThinRpcError(
+              'LOCAL_SKILL_INVALID',
+              'The local Skill workspace contains an invalid Skill. Fix it before syncing.',
+            );
+          }
+          workspaceSkillCount = snapshot.skills.length;
+          if (workspaceSkillCount === 0) {
+            throw new SkillHubThinRpcError(
+              'EMPTY_WORKSPACE',
+              'The local Skill workspace is empty and cannot replace the current Agent abilities.',
+            );
+          }
+        },
+      });
+    } catch (error: any) {
+      if (error instanceof SkillHubThinRpcError) throw error;
+      throw new SkillHubThinRpcError(
+        String(error?.code || 'SKILLHUB_WORKSPACE_SYNC_FAILED'),
+        error?.message || 'The Runtime workspace could not be synced to the current Agent.',
+      );
+    }
+    const privateSkills = result.skills.filter(reference => isPrivateSkillReference(reference.skillId)).length;
+    return {
+      schema: 'xiaoba.skillhub.workspace_sync.v1',
+      bot_uid: botUid,
+      workspace_revision: expectedRevision,
+      workspace_skills: workspaceSkillCount,
+      synced_skills: result.skills.length,
+      private_skills: privateSkills,
+      public_skills: result.skills.length - privateSkills,
+      cloud_revision: result.cloudRevision,
+      direction: result.direction,
+      apply_status: result.applyStatus,
     };
   }
 
@@ -916,6 +991,14 @@ function optionalContentHash(value: unknown, field: string): string {
   const normalized = String(value).trim().toLowerCase();
   if (!CONTENT_HASH_PATTERN.test(normalized)) {
     throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is invalid.`);
+  }
+  return normalized;
+}
+
+function requiredContentHash(value: unknown, field: string): string {
+  const normalized = optionalContentHash(value, field);
+  if (!normalized) {
+    throw new SkillHubThinRpcError('INVALID_REQUEST', `${field} is required.`);
   }
   return normalized;
 }

@@ -104,6 +104,33 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     assert.equal(new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.definitionRevision, 2);
   });
 
+  test('explicit owner sync pushes the Runtime workspace even when Cloud changed', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'local v1');
+    await fixture.sync();
+    const cloudOnly = createPackage(roots, 'cloud-only', 'cloud-only', 'remote change');
+    fixture.packages.set(refKey(cloudOnly.reference), cloudOnly);
+    fixture.cloud = {
+      revision: fixture.cloud.revision + 1,
+      skills: [definitionRef(cloudOnly)],
+    };
+
+    const result = await fixture.pushWorkspace();
+
+    assert.equal(result.direction, 'local_to_cloud');
+    assert.equal(result.applyStatus, 'applied');
+    assert.equal(result.skills.length, 1);
+    assert.equal(result.skills[0].skillId.startsWith('private/'), true);
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'local-a', 'SKILL.md')), true);
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'cloud-only')), false);
+  });
+
+  test('explicit owner sync refuses an empty Runtime workspace', async () => {
+    const fixture = createFixture(roots);
+    await assert.rejects(fixture.pushWorkspace(), /workspace is empty/i);
+    assert.equal(fixture.patches, 0);
+  });
+
   test('restores all cloud Skills when a legacy preferred directory collides with a newer package', async () => {
     const fixture = createFixture(roots);
     writeSkill(fixture.skillsRoot, 'shared-name', 'shared-name', 'legacy private package');
@@ -2297,6 +2324,20 @@ function createFixture(
       skillHubBaseUrl: 'https://hub.test',
       definitionService,
     }).sync(),
+    pushWorkspace: async () => new BotSkillSyncService({
+      runtimeRoot,
+      skillsRoot,
+      botId,
+      workspaceExisted: true,
+      auth: {
+        apiKey: 'bot-key',
+        httpBaseUrl: 'https://cats.test',
+        serverUrl: 'wss://cats.test',
+      },
+      fetchImpl,
+      skillHubBaseUrl: 'https://hub.test',
+      definitionService,
+    }).pushWorkspaceToCloud(),
     activate: async (workspaceExisted = true) => new BotSkillSyncService({
       runtimeRoot,
       skillsRoot,

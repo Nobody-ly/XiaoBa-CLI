@@ -95,6 +95,11 @@ export interface FinalizePublicBotSkillOptions {
   validateScope?: () => Promise<void> | void;
 }
 
+export interface PushBotSkillWorkspaceOptions {
+  validateScope?: () => Promise<void> | void;
+  validateWorkspace?: () => Promise<void> | void;
+}
+
 export class BotSkillCloudRestoreError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message);
@@ -288,6 +293,41 @@ export class BotSkillSyncService {
       applyStatus: 'already_applied',
       skills: cloud.skills,
     };
+  }
+
+  /**
+   * Explicitly publishes the active local workspace as this Bot's desired
+   * Skill set. Unlike sync(), this operation never restores Cloud over Local:
+   * the owner has deliberately selected the Runtime workspace as the source.
+   */
+  async pushWorkspaceToCloud(
+    options: PushBotSkillWorkspaceOptions = {},
+  ): Promise<BotSkillSyncResult> {
+    BotSkillSyncService.recoverInterruptedRestore(
+      this.runtimeRoot,
+      this.botId,
+      this.skillsRoot,
+    );
+    await options.validateScope?.();
+    const base = this.baseStore.read(this.botId);
+    let local = this.readLocalManifest();
+    if (local.length === 0) {
+      throw new Error('The active Bot Skill workspace is empty.');
+    }
+    const cloud = await pullCloudBotSkills(this.cloudOptions);
+    if (!cloud) {
+      throw new Error('Bot Skill cloud sync is unavailable.');
+    }
+    await options.validateScope?.();
+    this.recoverInterruptedFinalizes(cloud);
+    local = this.readLocalManifest();
+    if (local.length === 0) {
+      throw new Error('The active Bot Skill workspace became empty before sync.');
+    }
+    return this.pushLocal(local, cloud, base, {
+      validateScope: options.validateScope,
+      validateWorkspace: options.validateWorkspace,
+    });
   }
 
   /**
@@ -721,6 +761,7 @@ export class BotSkillSyncService {
       preserveBaseLocalSkillIds?: ReadonlySet<string>;
       requiredCloudReference?: BotSkillRef;
       validateScope?: () => Promise<void> | void;
+      validateWorkspace?: () => Promise<void> | void;
     } = {},
   ): Promise<BotSkillSyncResult> {
     if (
@@ -815,6 +856,7 @@ export class BotSkillSyncService {
       left.localSkillId < right.localSkillId ? -1 : left.localSkillId > right.localSkillId ? 1 : 0
     ));
     await options.validateScope?.();
+    await options.validateWorkspace?.();
     const refs = canonicalizeBotSkillRefs(nextEntries.map(entry => entry.reference));
     if (
       base
@@ -843,6 +885,7 @@ export class BotSkillSyncService {
       }
       // The current single-device contract explicitly protects local changes.
       await options.validateScope?.();
+      await options.validateWorkspace?.();
       cloud = await replaceCloudBotSkills(this.cloudOptions, latest, refs);
     }
     await options.validateScope?.();
