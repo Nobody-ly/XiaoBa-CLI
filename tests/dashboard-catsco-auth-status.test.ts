@@ -1294,6 +1294,15 @@ describe('dashboard CatsCo account status', () => {
           ],
         });
       }
+      if (req.path === '/api/bots/body-status') {
+        return res.json({
+          bot_uid: Number(req.query.uid),
+          state: 'offline',
+          active: false,
+          bound: true,
+          body_id: 'other-server-body',
+        });
+      }
       if (req.path === '/api/friends/request') return res.json({ ok: true });
       if (req.path === '/api/friends/accept') {
         assert.equal(req.header('authorization'), 'ApiKey new-agent-key');
@@ -1376,6 +1385,21 @@ describe('dashboard CatsCo account status', () => {
     assert.equal(weixinStopped, 1);
     assert.equal(localConfig.currentBot?.uid, '199');
     assert.equal(localConfig.currentBot?.bindingSource, 'explicit-switch');
+
+    const guardedResponse = await fetch(`${dashboardBaseUrl}/api/cats/switch-bot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        botUid: '188',
+        source: 'skillhub-thin-rpc',
+        expectedCurrentBotUid: '199',
+      }),
+    });
+    const guardedData = await guardedResponse.json() as any;
+    assert.equal(guardedResponse.status, 409);
+    assert.equal(guardedData.code, 'BOT_BOUND_TO_OTHER_RUNTIME');
+    assert.equal(createCatsCoLocalConfigService({ runtimeRoot: testRoot }).load().currentBot?.uid, '199');
+    assert.equal(connectorRestarted, 1);
   });
 
   test('POST /cats/bind-bot restores the active binding when target preflight is blocked', async () => {

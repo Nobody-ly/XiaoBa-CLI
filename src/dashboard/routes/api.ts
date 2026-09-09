@@ -56,6 +56,10 @@ import {
 } from '../../runtime/runtime-profile-editor';
 import { inferCatsUploadType, uploadCatsLocalFile } from '../../catscompany/upload';
 import { createCatsCoLocalConfigService } from '../../catscompany/local-config';
+import {
+  CatsCoBotSwitchGuardError,
+  verifyCatsCoBotSwitchBinding,
+} from '../../catscompany/bot-switch-guard';
 import { CATSCO_APP_HTTP_ORIGINS, isCatsRelayApiBase, isCatsCoWebSocketEndpoint } from '../../utils/catsco-domains';
 import { catalogRuntimeMatchesModelId, createBotDefinitionSyncService } from '../../bot-definition/service';
 import { prepareBoundBotDefinition } from '../../bot-definition/activation';
@@ -361,6 +365,12 @@ function p2pTopicId(uid1: string | number, uid2: string | number): string {
 function httpError(message: string, status: number): Error {
   const error = new Error(message);
   (error as any).status = status;
+  return error;
+}
+
+function codedHttpError(message: string, status: number, code: string): Error {
+  const error = httpError(message, status);
+  (error as any).code = code;
   return error;
 }
 
@@ -849,6 +859,43 @@ async function getCatsBotBodyStatus(
       checkedAt: new Date().toISOString(),
       error: String(error?.message || 'unable to query CatsCo body status'),
     };
+  }
+}
+
+async function assertSkillHubBotSwitchBinding(
+  state: CatsAuthState,
+  botUid: string,
+  expectedCurrentBotUid: string,
+): Promise<void> {
+  const localConfig = createCatsCoLocalConfigService({ runtimeRoot: runtimeDataRoot() }).load();
+  const currentBotUid = String(localConfig.currentBot?.uid || '').trim();
+  if (!expectedCurrentBotUid || currentBotUid !== expectedCurrentBotUid) {
+    throw codedHttpError(
+      '本地 Agent 已在验证期间发生变化，已停止执行过期的 SkillHub 切换请求。',
+      409,
+      'BOT_SWITCH_STALE',
+    );
+  }
+  try {
+    await verifyCatsCoBotSwitchBinding({
+      httpBaseUrl: state.httpBaseUrl,
+      token: state.token,
+      botUid,
+      localBodyId: localConfig.device?.bodyId,
+    });
+  } catch (error) {
+    if (error instanceof CatsCoBotSwitchGuardError) {
+      throw codedHttpError(
+        error.message,
+        error.code === 'BOT_BOUND_TO_OTHER_RUNTIME' ? 409 : 503,
+        error.code,
+      );
+    }
+    throw codedHttpError(
+      '暂时无法确认目标 Agent 的运行环境绑定，已停止切换。',
+      503,
+      'BOT_BINDING_UNVERIFIED',
+    );
   }
 }
 
@@ -2106,6 +2153,9 @@ function sanitizeCatsErrorMessage(value: unknown): string {
 
 function catsErrorResponse(error: any): { status: number; body: Record<string, unknown> } {
   const body: Record<string, unknown> = { error: sanitizeCatsErrorMessage(error.message) };
+  if (typeof error?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(error.code)) {
+    body.code = error.code;
+  }
   const data = sanitizeCatsErrorData(error.data);
   if (data) body.data = data;
   return { status: error.status || 500, body };
@@ -4092,6 +4142,13 @@ export function createApiRouter(
         env: process.env,
       });
       const apiKey = await getCatsBotApiKey(state, botUid, targetBot);
+      if (String(req.body?.source || '').trim() === 'skillhub-thin-rpc') {
+        await assertSkillHubBotSwitchBinding(
+          state,
+          botUid,
+          String(req.body?.expectedCurrentBotUid || '').trim(),
+        );
+      }
       const result = await commitCatsBotBindingAndStartConnector(serviceManager, state, {
         userUid,
         username: me.username || state.username || '',

@@ -24,6 +24,10 @@ import {
 } from '../src/skillhub/local-skill-metadata';
 import { SkillHubService } from '../src/skillhub/service';
 import { trashBotSkill } from '../src/bot-skills/deleted-skill-trash';
+import {
+  CatsCoBotSwitchGuardError,
+  verifyCatsCoBotSwitchBinding,
+} from '../src/catscompany/bot-switch-guard';
 
 describe('CatsCompany SkillHub thin RPC', () => {
   let runtimeRoot = '';
@@ -62,6 +66,12 @@ describe('CatsCompany SkillHub thin RPC', () => {
     handler = new SkillHubThinRpcHandler({
       runtimeRoot,
       scheduleBotSwitch: (botUid) => scheduledBotUIDs.push(botUid),
+      verifyBotSwitchBinding: async ({ botUid, localBodyId }) => ({
+        botUid: String(botUid),
+        localBodyId: String(localBodyId),
+        platformBodyId: String(localBodyId),
+        bound: true,
+      }),
       now: () => new Date('2026-08-24T00:00:00.000Z'),
     });
   });
@@ -850,6 +860,105 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.deepEqual(scheduledBotUIDs, ['44']);
   });
 
+  test('rejects a Bot switch when the target is bound to another Runtime body', async () => {
+    const guardedHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      scheduleBotSwitch: (botUid) => scheduledBotUIDs.push(botUid),
+      verifyBotSwitchBinding: async () => {
+        throw new CatsCoBotSwitchGuardError(
+          'BOT_BOUND_TO_OTHER_RUNTIME',
+          'target Bot is bound elsewhere',
+        );
+      },
+    });
+    await assert.rejects(
+      guardedHandler.execute(request({
+        request_id: 'switch-bound-elsewhere',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.switchBot,
+        payload: { bot_uid: '44' },
+      })),
+      (error: unknown) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'BOT_BOUND_TO_OTHER_RUNTIME'
+      ),
+    );
+    assert.deepEqual(scheduledBotUIDs, []);
+  });
+
+  test('rejects a verified Bot switch when the active local Bot changes before scheduling', async () => {
+    const guardedHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      scheduleBotSwitch: (botUid) => scheduledBotUIDs.push(botUid),
+      verifyBotSwitchBinding: async ({ botUid, localBodyId }) => {
+        const configService = createCatsCoLocalConfigService({ runtimeRoot });
+        const config = configService.load();
+        configService.save({
+          ...config,
+          currentBot: {
+            ...config.currentBot!,
+            uid: '55',
+          },
+        });
+        return {
+          botUid: String(botUid),
+          localBodyId: String(localBodyId),
+          platformBodyId: String(localBodyId),
+          bound: true,
+        };
+      },
+    });
+    await assert.rejects(
+      guardedHandler.execute(request({
+        request_id: 'switch-stale-current-bot',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.switchBot,
+        payload: { bot_uid: '44' },
+      })),
+      (error: unknown) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'BOT_SWITCH_STALE'
+      ),
+    );
+    assert.deepEqual(scheduledBotUIDs, []);
+  });
+
+  test('fails closed when CatsCo cannot verify the target Bot binding', async () => {
+    await assert.rejects(
+      verifyCatsCoBotSwitchBinding({
+        httpBaseUrl: 'https://catsco.example.test',
+        token: 'owner-token',
+        botUid: '44',
+        localBodyId: 'local-body',
+        fetchImpl: async () => new Response('', { status: 502 }),
+      }),
+      (error: unknown) => (
+        error instanceof CatsCoBotSwitchGuardError
+        && error.code === 'BOT_BINDING_UNVERIFIED'
+      ),
+    );
+  });
+
+  test('treats an offline durable binding on another body as a conflict', async () => {
+    await assert.rejects(
+      verifyCatsCoBotSwitchBinding({
+        httpBaseUrl: 'https://catsco.example.test',
+        token: 'owner-token',
+        botUid: '44',
+        localBodyId: 'local-body',
+        fetchImpl: async () => Response.json({
+          bot_uid: 44,
+          state: 'offline',
+          active: false,
+          bound: true,
+          body_id: 'fermi-server-body',
+        }),
+      }),
+      (error: unknown) => (
+        error instanceof CatsCoBotSwitchGuardError
+        && error.code === 'BOT_BOUND_TO_OTHER_RUNTIME'
+      ),
+    );
+  });
+
   test('reports an in-progress workspace handoff as a retryable RPC state', async () => {
     createCatsCoLocalConfigService({ runtimeRoot }).save({
       version: 1,
@@ -1044,7 +1153,11 @@ describe('CatsCompany SkillHub thin RPC', () => {
     );
     assert.equal(calls.length, 1);
     assert.match(calls[0].url, /^http:\/\/127\.0\.0\.1:\d+\/api\/cats\/switch-bot$/);
-    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { botUid: '44' });
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+      botUid: '44',
+      source: 'skillhub-thin-rpc',
+      expectedCurrentBotUid: '',
+    });
   });
 
   test('coalesces delayed Bot switch intents so the latest selection wins', async () => {
