@@ -42,6 +42,12 @@ export interface PrepareBoundBotDefinitionOptions extends BotDefinitionSyncServi
   cloudSelection?: CloudBotModelSelection;
   acknowledgeCloudSelection?: boolean;
   prepareSkills?: boolean;
+  /**
+   * The active Skill workspace is managed out of band by the server operator.
+   * Skip implicit Skill reconciliation while still allowing the model/prompt
+   * portion of a unified BotDefinition revision to become active.
+   */
+  preserveSkills?: boolean;
   /** Hot reload must not silently fall back to legacy/local startup after a failed cloud read. */
   requireCloud?: boolean;
 }
@@ -219,7 +225,7 @@ export async function prepareBoundBotDefinition(
           cloudSnapshot = await cloudDefinitionSync.pushPrompt(botId, auth, definition.prompt)
             ?? cloudSnapshot;
         }
-        const skillSync = options.prepareSkills === false
+        const skillSync = options.prepareSkills === false || options.preserveSkills
           ? undefined
           : await prepareBoundBotSkills({
               runtimeRoot: options.runtimeRoot,
@@ -236,7 +242,7 @@ export async function prepareBoundBotDefinition(
           options.prepareSkills === false
           && cloudSnapshot.definition?.skills === undefined
         );
-        const targetRevisionApplied = skippedSkillsAreAbsent || Boolean(
+        const targetRevisionApplied = options.preserveSkills || skippedSkillsAreAbsent || Boolean(
           skillSync
           && (skillApplyStatus === 'applied' || skillApplyStatus === 'already_applied')
           && skillSync.sync?.desiredRevision === desiredRevision

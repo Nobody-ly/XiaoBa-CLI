@@ -65,7 +65,7 @@ export async function catscompanyCommand(): Promise<void> {
   const preparedBot = await prepareBoundBotDefinition({
     runtimeRoot,
     acknowledgeCloudSelection: false,
-    prepareSkills: !preserveSkills,
+    preserveSkills,
   });
   if (preserveSkills && preparedBot?.botId) {
     assertOperatorManagedSkillWorkspaceBinding(runtimeRoot, preparedBot.botId);
@@ -312,6 +312,7 @@ export async function catscompanyCommand(): Promise<void> {
 
 interface ApplyCloudModelRuntimeSelectionOptions {
   runtimeRoot: string;
+  env?: NodeJS.ProcessEnv;
   connectorConfig: CatsCompanyConfig;
   currentBot(): CatsCompanyBot;
   replaceBot(bot: CatsCompanyBot): void;
@@ -452,6 +453,7 @@ async function applyCloudBotDefinitionSelection(
   options: ApplyCloudModelRuntimeSelectionOptions,
 ): Promise<'applied' | 'deferred'> {
   const incoming = options.selection.definition!;
+  const preserveSkills = preserveOperatorManagedSkills(options.env);
   const definitionService = createBotDefinitionSyncService({ runtimeRoot: options.runtimeRoot });
   const previousDefinition = definitionService.read(options.botId)
     ?? definitionService.pullOrBootstrap(options.botId)?.definition;
@@ -500,9 +502,11 @@ async function applyCloudBotDefinitionSelection(
     if (effectiveIncoming) definitionService.acceptCanonical(effectiveIncoming);
     prepared = await prepareBoundBotDefinition({
       runtimeRoot: options.runtimeRoot,
+      env: options.env,
       botId: options.botId,
       auth: options.auth,
       acknowledgeCloudSelection: false,
+      preserveSkills,
       requireCloud: true,
     });
   } catch (error) {
