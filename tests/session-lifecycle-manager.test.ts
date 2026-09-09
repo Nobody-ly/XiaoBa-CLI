@@ -695,7 +695,10 @@ describe('AgentSession lifecycle', () => {
           if (action === 'clear') session.clear();
         } finally { release(); }
         const result = await pending;
-        assert.equal(summaries, 1);
+        // A transient checkpoint timeout uses the candidate's bounded three-attempt
+        // recovery budget. The main model and the completed tool effect must still
+        // remain single-shot while only the idempotent summary generation retries.
+        assert.equal(summaries, action === 'timeout' && boundary === 'summary_pending' ? 3 : 1);
         assert.equal(toolExecutions, 1);
         assert.equal(result.taskOutcome, action === 'continue' ? 'completed' : action === 'timeout' ? 'failed' : 'cancelled');
         await session.cleanup();
