@@ -89,6 +89,8 @@ export interface ScanBotSkillWorkspaceOptions {
   maxTotalPackageBytes?: number;
   /** Keeps content hashes but clears `files`; never use this for upload/materialization. */
   retainPackageContents?: boolean;
+  /** Read-only callers must not materialize local marker files as a side effect. */
+  writeMarkers?: boolean;
 }
 
 interface BotSkillPackageByteBudget {
@@ -98,6 +100,8 @@ interface BotSkillPackageByteBudget {
 
 interface ScanLocalBotSkillOptions {
   packageByteBudget?: BotSkillPackageByteBudget;
+  /** Defaults to true for mutating and synchronization paths. */
+  writeMarker?: boolean;
 }
 
 export function scanBotSkillWorkspace(
@@ -141,20 +145,24 @@ export function scanBotSkillWorkspace(
         }
         let manifestEntry: LocalBotSkillManifestEntry;
         try {
-          manifestEntry = scanLocalBotSkill(skillDir, root, { packageByteBudget });
+          manifestEntry = scanLocalBotSkill(skillDir, root, {
+            packageByteBudget,
+            writeMarker: options.writeMarkers !== false,
+          });
         } catch (error) {
           if (!(error instanceof BotSkillPackageValidationError) || !options.onValidationFailure) {
             throw error;
           }
-          const marker = readBotSkillLocalMarker(skillDir);
-          if (!marker) throw error;
           const name = readLocalSkillNameForValidationFailure(skillDir);
-          if (localSkillIds.has(marker.localSkillId)) {
-            throw new Error(`Bot Skill workspace contains a duplicate localSkillId: ${marker.localSkillId}`);
+          const marker = readBotSkillLocalMarker(skillDir);
+          const localSkillId = marker?.localSkillId
+            || deterministicLocalSkillId(skillDir, root, 'invalid-skill');
+          if (localSkillIds.has(localSkillId)) {
+            throw new Error(`Bot Skill workspace contains a duplicate localSkillId: ${localSkillId}`);
           }
-          localSkillIds.add(marker.localSkillId);
+          localSkillIds.add(localSkillId);
           options.onValidationFailure({
-            localSkillId: marker.localSkillId,
+            localSkillId,
             name,
             installName: path.relative(root, skillDir).replace(/\\/g, '/'),
             path: skillDir,
@@ -198,9 +206,12 @@ export function scanLocalBotSkill(
     throw new Error(`Skill has an unsafe SKILL.md: ${root}`);
   }
   assertRealPathContained(fs.realpathSync(root), skillFile);
-  const marker = ensureBotSkillLocalMarker(root);
   const files = collectBotSkillPackageFiles(root, options.packageByteBudget);
   const contentHash = computeBotSkillPackageHash(files);
+  const marker = ensureBotSkillLocalMarker(root, {
+    write: options.writeMarker !== false,
+    localSkillId: deterministicLocalSkillId(root, workspaceRoot, contentHash),
+  });
   const reference = marker.reference?.contentHash === contentHash
     ? marker.reference
     : undefined;
@@ -282,7 +293,10 @@ export function computeBotSkillPackageHash(files: readonly BotSkillPackageFile[]
   return sha256(Buffer.from(JSON.stringify(entries), 'utf8'));
 }
 
-function ensureBotSkillLocalMarker(skillDir: string): BotSkillLocalMarker {
+function ensureBotSkillLocalMarker(
+  skillDir: string,
+  options: { write: boolean; localSkillId: string },
+): BotSkillLocalMarker {
   const existing = readBotSkillLocalMarker(skillDir);
   if (existing) return existing;
   if (fs.existsSync(path.join(skillDir, BOT_SKILL_LOCAL_MARKER_FILE))) {
@@ -294,11 +308,26 @@ function ensureBotSkillLocalMarker(skillDir: string): BotSkillLocalMarker {
     : undefined;
   const marker: BotSkillLocalMarker = {
     schema: BOT_SKILL_LOCAL_MARKER_SCHEMA,
-    localSkillId: crypto.randomUUID(),
+    // Read-only scans and the first later mutating scan must agree on identity;
+    // otherwise a user-selected unmarked Skill can no longer be found when it
+    // is shared. Existing persisted marker identities remain authoritative.
+    localSkillId: options.localSkillId,
     ...(origin ? { origin } : {}),
   };
-  writeBotSkillLocalMarker(skillDir, marker);
+  if (options.write) writeBotSkillLocalMarker(skillDir, marker);
   return marker;
+}
+
+function deterministicLocalSkillId(
+  skillDir: string,
+  workspaceRoot: string | undefined,
+  contentHash: string,
+): string {
+  const root = workspaceRoot ? path.resolve(workspaceRoot) : undefined;
+  const relative = root
+    ? path.relative(root, path.resolve(skillDir)).replace(/\\/g, '/')
+    : path.basename(path.resolve(skillDir));
+  return `local-${sha256(Buffer.from(`${relative}\0${contentHash}`, 'utf8')).slice(0, 48)}`;
 }
 
 export function collectBotSkillPackageFiles(

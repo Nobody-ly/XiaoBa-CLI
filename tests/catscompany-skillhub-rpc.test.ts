@@ -16,7 +16,10 @@ import {
   shareLocalSkillForCatsCo,
   validateSkillHubShareMetadata,
 } from '../src/skillhub/local-share';
-import { scanBotSkillWorkspace } from '../src/bot-skills/local-manifest';
+import {
+  BOT_SKILL_LOCAL_MARKER_FILE,
+  scanBotSkillWorkspace,
+} from '../src/bot-skills/local-manifest';
 import { writeBotSkillLocalMarker } from '../src/bot-skills/local-manifest';
 import {
   applySkillHubLocalMetadata,
@@ -109,6 +112,8 @@ describe('CatsCompany SkillHub thin RPC', () => {
   });
 
   test('returns only bounded metadata for the active Bot workspace', async () => {
+    const markerPath = path.join(runtimeRoot, 'skills', 'local-demo', BOT_SKILL_LOCAL_MARKER_FILE);
+    assert.equal(fs.existsSync(markerPath), false);
     const result = await handler.execute(request({
       request_id: 'workspace-1',
       tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace,
@@ -128,6 +133,17 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(result.page_limit, 200);
     assert.equal(result.next_offset, null);
     assert.equal(result.truncated, false);
+    assert.equal(fs.existsSync(markerPath), false);
+
+    const repeated = await handler.execute(request({
+      request_id: 'workspace-1-repeat',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace,
+    }));
+    assert.equal(
+      (repeated.skills as Array<Record<string, unknown>>)[0].local_skill_id,
+      skills[0].local_skill_id,
+    );
+    assert.equal(fs.existsSync(markerPath), false);
   });
 
   test('owner can explicitly sync the reviewed Runtime workspace to the current Agent', async () => {

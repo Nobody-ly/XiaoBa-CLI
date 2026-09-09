@@ -7,6 +7,7 @@ import { ServiceManager } from './service-manager';
 import { bootstrapDefaultSkillHubSkillsOnce } from '../skillhub/default-skill-bootstrap';
 import { createDashboardAuth } from './auth';
 import { CatsConnectorAutoStart } from './cats-connector-autostart';
+import { preserveOperatorManagedSkills } from '../bot-skills/preservation';
 
 const DEFAULT_PORT = 3800;
 const activeServers: Server[] = [];
@@ -38,9 +39,13 @@ export async function startDashboard(
 
   app.use(express.json({ limit: '25mb' }));
 
-  bootstrapDefaultSkillHubSkillsOnce().catch(error => {
-    Logger.warning(`Default SkillHub bootstrap failed: ${error?.message || String(error)}`);
-  });
+  if (preserveOperatorManagedSkills()) {
+    Logger.info('Operator-managed Skill workspace preservation enabled; skipping default SkillHub bootstrap');
+  } else {
+    bootstrapDefaultSkillHubSkillsOnce().catch(error => {
+      Logger.warning(`Default SkillHub bootstrap failed: ${error?.message || String(error)}`);
+    });
+  }
 
   // Configure and apply dashboard authentication.
   // Trim the env var so whitespace-only values are treated as "not set"

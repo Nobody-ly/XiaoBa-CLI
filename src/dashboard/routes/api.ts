@@ -67,6 +67,10 @@ import { createBotDefinitionCloudSyncService } from '../../bot-definition/cloud-
 import { getPromptReconcileCoordinator } from '../../bot-definition/prompt-sync';
 import { rollbackPreparedBotSkills } from '../../bot-skills/runtime';
 import {
+  assertOperatorManagedSkillWorkspaceBinding,
+  preserveOperatorManagedSkills,
+} from '../../bot-skills/preservation';
+import {
   customModelDefinitionToConfig,
   modelRuntimeToConfig,
   resolveActiveBotLLMConfig,
@@ -942,6 +946,13 @@ async function commitCatsBotBindingAndStartConnector(
   connectorRestarted: boolean;
   botDefinitionSync?: Record<string, unknown>;
 }> {
+  const preserveSkills = preserveOperatorManagedSkills();
+  if (preserveSkills) {
+    // Fail before friendship checks, local binding writes, or connector
+    // lifecycle changes. Preservation mode must never adopt a workspace for a
+    // different Bot as a side effect of an otherwise valid bind request.
+    assertOperatorManagedSkillWorkspaceBinding(runtimeDataRoot(), input.botUid);
+  }
   ensureCatsDeviceId();
   const rollback = createCatsCoLocalConfigRollback();
   const promptCoordinator = getPromptReconcileCoordinator({ runtimeRoot: runtimeDataRoot() });
@@ -956,6 +967,7 @@ async function commitCatsBotBindingAndStartConnector(
       botId: input.botUid,
       selectedCatalogRuntime: input.selectedCatalogRuntime,
       acknowledgeCloudSelection: false,
+      prepareSkills: !preserveSkills,
     });
     const botDefinitionSync = toBotDefinitionSyncPayload(preparedBot?.sync);
     const {
@@ -3770,10 +3782,15 @@ export function createApiRouter(
       if (!botId) {
         return res.status(409).json({ error: 'No CatsCo bot is bound on this device' });
       }
+      const preserveSkills = preserveOperatorManagedSkills();
+      if (preserveSkills) {
+        assertOperatorManagedSkillWorkspaceBinding(runtimeDataRoot(), botId);
+      }
       const preparedBot = await prepareBoundBotDefinition({
         runtimeRoot: runtimeDataRoot(),
         botId,
         acknowledgeCloudSelection: false,
+        prepareSkills: !preserveSkills,
       });
       const result = await startCatsCompanyConnectorIfReady(serviceManager);
       if (!result.service) {
