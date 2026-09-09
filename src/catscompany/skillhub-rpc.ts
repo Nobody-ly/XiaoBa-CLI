@@ -315,6 +315,7 @@ export class SkillHubThinRpcHandler {
       maxSkillEntries: MAX_WORKSPACE_SKILLS,
       maxTotalPackageBytes: MAX_WORKSPACE_PACKAGE_BYTES,
       retainPackageContents: false,
+      writeMarkers: false,
     }).filter((entry) => {
       const error = validateSkillHubShareMetadata(entry.path);
       if (!error) return true;

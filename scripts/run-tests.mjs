@@ -25,6 +25,7 @@ const skillHubPhase1Tests = [
   'tests/catscompany-skillhub-rpc.test.ts',
   'tests/bot-definition-skills.test.ts',
   'tests/bot-skill-workspace.test.ts',
+  'tests/bot-skill-preservation.test.ts',
   'tests/bot-skill-candidate-workspace.test.ts',
   'tests/turn-skill-snapshot.test.ts',
   'tests/bot-skills-activation-state.test.ts',

@@ -32,6 +32,10 @@ import {
   isBotSkillActivationAckWorkerEnabled,
   type BotSkillActivationAckWarningCode,
 } from '../bot-skills/activation-ack-worker';
+import {
+  assertOperatorManagedSkillWorkspaceBinding,
+  preserveOperatorManagedSkills,
+} from '../bot-skills/preservation';
 
 const CONNECTOR_OWNER_POLL_MS = 2000;
 const CLOUD_MODEL_POLL_MS = 5000;
@@ -57,10 +61,15 @@ export function resolveCatsCoCommandConfig(
  */
 export async function catscompanyCommand(): Promise<void> {
   const runtimeRoot = PathResolver.getRuntimeDataRoot();
+  const preserveSkills = preserveOperatorManagedSkills();
   const preparedBot = await prepareBoundBotDefinition({
     runtimeRoot,
     acknowledgeCloudSelection: false,
+    preserveSkills,
   });
+  if (preserveSkills && preparedBot?.botId) {
+    assertOperatorManagedSkillWorkspaceBinding(runtimeRoot, preparedBot.botId);
+  }
   if (preparedBot?.cloudRevision !== undefined) {
     Logger.info(`CatsCo bot ${preparedBot.botId} 已准备云端模型配置 revision=${preparedBot.cloudRevision}。`);
   } else if (preparedBot?.initializedDefault) {
@@ -303,6 +312,7 @@ export async function catscompanyCommand(): Promise<void> {
 
 interface ApplyCloudModelRuntimeSelectionOptions {
   runtimeRoot: string;
+  env?: NodeJS.ProcessEnv;
   connectorConfig: CatsCompanyConfig;
   currentBot(): CatsCompanyBot;
   replaceBot(bot: CatsCompanyBot): void;
@@ -443,6 +453,7 @@ async function applyCloudBotDefinitionSelection(
   options: ApplyCloudModelRuntimeSelectionOptions,
 ): Promise<'applied' | 'deferred'> {
   const incoming = options.selection.definition!;
+  const preserveSkills = preserveOperatorManagedSkills(options.env);
   const definitionService = createBotDefinitionSyncService({ runtimeRoot: options.runtimeRoot });
   const previousDefinition = definitionService.read(options.botId)
     ?? definitionService.pullOrBootstrap(options.botId)?.definition;
@@ -491,9 +502,11 @@ async function applyCloudBotDefinitionSelection(
     if (effectiveIncoming) definitionService.acceptCanonical(effectiveIncoming);
     prepared = await prepareBoundBotDefinition({
       runtimeRoot: options.runtimeRoot,
+      env: options.env,
       botId: options.botId,
       auth: options.auth,
       acknowledgeCloudSelection: false,
+      preserveSkills,
       requireCloud: true,
     });
   } catch (error) {

@@ -12,6 +12,112 @@ import { createBotDefinitionSyncService } from '../src/bot-definition/service';
 import { BOT_DEFINITION_SCHEMA, type BotDefinition } from '../src/bot-definition/types';
 import { BotSkillBaseStore } from '../src/bot-skills/base-store';
 
+test('post-start BotDefinition updates preserve an operator-managed Skill workspace', async t => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'model-apply-preserved-skills-'));
+  t.after(() => fs.rmSync(runtimeRoot, { recursive: true, force: true }));
+  const configService = createCatsCoLocalConfigService({ runtimeRoot });
+  configService.save({
+    version: 1,
+    endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+    account: { token: 'test-owner-token', uid: '7' },
+    currentBot: { uid: '43', apiKey: 'test-bot-key', boundByUserUid: '7', bindingSource: 'test' },
+  });
+  const auth = configService.getAuthState();
+  const definitions = createBotDefinitionSyncService({ runtimeRoot });
+  const previous: BotDefinition = {
+    schema: BOT_DEFINITION_SCHEMA,
+    botId: '43',
+    model: {
+      kind: 'custom',
+      protocol: 'openai-responses',
+      apiBase: 'https://models.example.test/v1',
+      model: 'unchanged-model',
+      apiKey: 'test-model-key',
+      contextWindowTokens: 128000,
+    },
+    prompt: { selected: 'custom', customSystemPrompt: 'Previous prompt.' },
+    skills: [],
+  };
+  definitions.acceptCanonical(previous);
+  const desired: BotDefinition = {
+    ...previous,
+    prompt: { selected: 'custom', customSystemPrompt: 'Updated prompt.' },
+    skills: [{
+      source: 'skillhub',
+      skillId: 'private/cloud-only',
+      version: 'sha256-cloud-only',
+      contentHash: 'a'.repeat(64),
+    }],
+  };
+  const localSkillRoot = path.join(runtimeRoot, 'skills', 'operator-local');
+  const localSkillFile = path.join(localSkillRoot, 'SKILL.md');
+  const localSkillText = [
+    '---',
+    'name: operator-local',
+    'description: Operator-managed local Skill used for preservation testing.',
+    '---',
+    '',
+    'Keep this local content unchanged.',
+    '',
+  ].join('\n');
+  fs.mkdirSync(localSkillRoot, { recursive: true });
+  fs.writeFileSync(localSkillFile, localSkillText);
+  new BotSkillBaseStore(runtimeRoot).write({
+    schema: 'xiaoba.bot-skill-sync-base.v2',
+    botId: '43',
+    definitionRevision: 6,
+    skills: [],
+    updatedAt: new Date().toISOString(),
+  });
+
+  const acks: unknown[] = [];
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method || 'GET';
+    if (url.pathname === '/api/bot/definition' && method === 'GET') {
+      return Response.json({ configured: true, revision: 7, definition: desired });
+    }
+    if (url.pathname === '/api/bot/definition/ack' && method === 'POST') {
+      acks.push(JSON.parse(String(init?.body)));
+      return Response.json({ status: 'applied' });
+    }
+    if (url.pathname === '/api/bot/definition/default-prompt') {
+      return Response.json({ status: 'stored' });
+    }
+    throw new Error(`Unexpected test request: ${method} ${url.pathname}`);
+  });
+  const oldBot = { isIdleForRuntimeReload: () => true } as CatsCompanyBot;
+  const result = await applyCloudModelRuntimeSelection({
+    runtimeRoot,
+    env: { XIAOBA_PRESERVE_SKILLS: '1' },
+    botId: '43',
+    auth,
+    selection: {
+      kind: 'custom',
+      modelId: 'unchanged-model',
+      customModel: desired.model,
+      revision: 7,
+      definition: desired,
+    },
+    canApply: () => true,
+    connectorConfig: {
+      serverUrl: 'wss://cats.example.test/v0/channels',
+      apiKey: 'test-bot-key',
+      botUid: '43',
+    },
+    currentBot: () => oldBot,
+    replaceBot: () => assert.fail('prompt-only update must not replace the connector'),
+    scheduleAckRetry: () => assert.fail('ACK should succeed'),
+    clearAckRetry: () => {},
+  });
+
+  assert.equal(result, 'applied');
+  assert.deepEqual(acks, [{ revision: 7 }]);
+  assert.equal(fs.readFileSync(localSkillFile, 'utf8'), localSkillText);
+  assert.deepEqual(fs.readdirSync(localSkillRoot), ['SKILL.md']);
+  assert.deepEqual(definitions.read('43')?.prompt, desired.prompt);
+});
+
 for (const failure of [502, 503, 504, 429, 'timeout', 'reset', 'shutdown'] as const) {
 for (const failureRead of [3, 4]) {
 test(`cloud recheck ${failure} at read ${failureRead} preserves the old connector`, async t => {
