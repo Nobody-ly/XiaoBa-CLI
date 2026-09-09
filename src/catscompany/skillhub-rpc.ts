@@ -23,6 +23,10 @@ import {
 } from '../skillhub/local-share';
 import { PathResolver } from '../utils/path-resolver';
 import { Logger } from '../utils/logger';
+import {
+  CatsCoBotSwitchGuardError,
+  verifyCatsCoBotSwitchBinding,
+} from './bot-switch-guard';
 
 export const SKILLHUB_THIN_RPC_TOOLS = {
   workspace: 'skillhub.localWorkspace.get',
@@ -93,7 +97,8 @@ export class SkillHubThinRpcError extends Error {
 
 export interface SkillHubThinRpcHandlerOptions {
   runtimeRoot?: string;
-  scheduleBotSwitch?: (botUid: string) => void;
+  scheduleBotSwitch?: (botUid: string, expectedCurrentBotUid: string) => void;
+  verifyBotSwitchBinding?: typeof verifyCatsCoBotSwitchBinding;
   finalizeCurrentBotSkill?: typeof finalizeCurrentBotPublicSkillNow;
   pushCurrentBotSkillWorkspace?: typeof pushCurrentBotSkillWorkspaceToCloudNow;
   isShuttingDown?: () => boolean;
@@ -104,7 +109,8 @@ export interface SkillHubThinRpcHandlerOptions {
 
 export class SkillHubThinRpcHandler {
   private readonly runtimeRoot: string;
-  private readonly scheduleBotSwitch: (botUid: string) => void;
+  private readonly scheduleBotSwitch: (botUid: string, expectedCurrentBotUid: string) => void;
+  private readonly verifyBotSwitchBinding: typeof verifyCatsCoBotSwitchBinding;
   private readonly finalizeCurrentBotSkill: typeof finalizeCurrentBotPublicSkillNow;
   private readonly pushCurrentBotSkillWorkspace: typeof pushCurrentBotSkillWorkspaceToCloudNow;
   private readonly isShuttingDown: () => boolean;
@@ -121,7 +127,12 @@ export class SkillHubThinRpcHandler {
     this.runtimeRoot = path.resolve(options.runtimeRoot ?? PathResolver.getRuntimeDataRoot());
     this.isShuttingDown = options.isShuttingDown ?? (() => false);
     this.scheduleBotSwitch = options.scheduleBotSwitch
-      ?? ((botUid) => scheduleDashboardBotSwitch(botUid, this.isShuttingDown));
+      ?? ((botUid, expectedCurrentBotUid) => scheduleDashboardBotSwitch(
+        botUid,
+        expectedCurrentBotUid,
+        this.isShuttingDown,
+      ));
+    this.verifyBotSwitchBinding = options.verifyBotSwitchBinding ?? verifyCatsCoBotSwitchBinding;
     this.finalizeCurrentBotSkill = options.finalizeCurrentBotSkill
       ?? finalizeCurrentBotPublicSkillNow;
     this.pushCurrentBotSkillWorkspace = options.pushCurrentBotSkillWorkspace
@@ -188,7 +199,19 @@ export class SkillHubThinRpcHandler {
     const scope = this.assertRequestScope(request, botUid, request.tool_name !== SKILLHUB_THIN_RPC_TOOLS.switchBot);
 
     if (request.tool_name === SKILLHUB_THIN_RPC_TOOLS.switchBot) {
-      this.scheduleBotSwitch(botUid);
+      const expectedCurrentBotUid = await this.preflightBotSwitch(botUid);
+      this.assertOperational(request);
+      this.assertRequestScope(request, botUid, false);
+      const currentBotUid = String(
+        createCatsCoLocalConfigService({ runtimeRoot: this.runtimeRoot }).load().currentBot?.uid || '',
+      ).trim();
+      if (currentBotUid !== expectedCurrentBotUid) {
+        throw new SkillHubThinRpcError(
+          'BOT_SWITCH_STALE',
+          'The active local Bot changed while the SkillHub switch was being verified.',
+        );
+      }
+      this.scheduleBotSwitch(botUid, expectedCurrentBotUid);
       return {
         schema: 'xiaoba.skillhub.bot_switch.v1',
         bot_uid: botUid,
@@ -210,6 +233,28 @@ export class SkillHubThinRpcHandler {
       default:
         throw new SkillHubThinRpcError('TOOL_NOT_FOUND', 'Unsupported SkillHub device operation.');
     }
+  }
+
+  private async preflightBotSwitch(botUid: string): Promise<string> {
+    const config = createCatsCoLocalConfigService({ runtimeRoot: this.runtimeRoot }).load();
+    const expectedCurrentBotUid = String(config.currentBot?.uid || '').trim();
+    try {
+      await this.verifyBotSwitchBinding({
+        httpBaseUrl: config.endpoints?.httpBaseUrl,
+        token: config.account?.token,
+        botUid,
+        localBodyId: config.device?.bodyId,
+      });
+    } catch (error) {
+      if (error instanceof CatsCoBotSwitchGuardError) {
+        throw new SkillHubThinRpcError(error.code, error.message);
+      }
+      throw new SkillHubThinRpcError(
+        'BOT_BINDING_UNVERIFIED',
+        'CatsCo could not verify the target Bot Runtime binding.',
+      );
+    }
+    return expectedCurrentBotUid;
   }
 
   private async readWorkspace(
@@ -752,13 +797,19 @@ function buildWorkspacePageResponse(
 
 export function scheduleDashboardBotSwitch(
   botUid: string,
-  isShuttingDown: () => boolean = () => false,
+  expectedCurrentBotUidOrShutdown: string | (() => boolean) = '',
+  maybeIsShuttingDown: () => boolean = () => false,
 ): void {
-  dashboardBotSwitchScheduler.schedule(botUid, isShuttingDown);
+  dashboardBotSwitchScheduler.schedule(
+    botUid,
+    expectedCurrentBotUidOrShutdown,
+    maybeIsShuttingDown,
+  );
 }
 
 interface PendingDashboardBotSwitch {
   botUid: string;
+  expectedCurrentBotUid: string;
   isShuttingDown: () => boolean;
 }
 
@@ -769,12 +820,25 @@ export class DashboardBotSwitchScheduler {
   private runningBotUid = '';
 
   constructor(
-    private readonly requestSwitch: (botUid: string) => Promise<void> = requestDashboardBotSwitch,
+    private readonly requestSwitch: (botUid: string, expectedCurrentBotUid: string) => Promise<void> = (
+      botUid,
+      expectedCurrentBotUid,
+    ) => requestDashboardBotSwitch(botUid, fetch, expectedCurrentBotUid),
     private readonly delayMs = 1_000,
   ) {}
 
-  schedule(botUid: string, isShuttingDown: () => boolean = () => false): void {
+  schedule(
+    botUid: string,
+    expectedCurrentBotUidOrShutdown: string | (() => boolean) = '',
+    maybeIsShuttingDown: () => boolean = () => false,
+  ): void {
     const target = String(botUid || '').trim();
+    const expectedCurrentBotUid = typeof expectedCurrentBotUidOrShutdown === 'string'
+      ? expectedCurrentBotUidOrShutdown
+      : '';
+    const isShuttingDown = typeof expectedCurrentBotUidOrShutdown === 'function'
+      ? expectedCurrentBotUidOrShutdown
+      : maybeIsShuttingDown;
     if (!target || isShuttingDown()) return;
     if (this.running && this.runningBotUid === target) {
       this.pending = undefined;
@@ -782,12 +846,13 @@ export class DashboardBotSwitchScheduler {
     }
     if (this.pending?.botUid === target) {
       // Refresh the connector lifecycle fence without extending the debounce.
-      this.pending = { botUid: target, isShuttingDown };
+      this.pending = { botUid: target, expectedCurrentBotUid, isShuttingDown };
       return;
     }
 
     this.pending = {
       botUid: target,
+      expectedCurrentBotUid,
       isShuttingDown,
     };
     if (!this.running) this.arm();
@@ -815,7 +880,7 @@ export class DashboardBotSwitchScheduler {
     this.running = true;
     this.runningBotUid = next.botUid;
     try {
-      await this.requestSwitch(next.botUid);
+      await this.requestSwitch(next.botUid, next.expectedCurrentBotUid);
     } catch (error: any) {
       Logger.warning(`SkillHub remote Bot switch failed: ${error?.message || String(error)}`);
     } finally {
@@ -831,6 +896,7 @@ const dashboardBotSwitchScheduler = new DashboardBotSwitchScheduler();
 export async function requestDashboardBotSwitch(
   botUid: string,
   fetchImpl: typeof fetch = fetch,
+  expectedCurrentBotUid = '',
 ): Promise<void> {
   const numericPort = Number(process.env.XIAOBA_DASHBOARD_PORT || 3800);
   const port = Number.isSafeInteger(numericPort) && numericPort > 0 && numericPort <= 65535
@@ -843,7 +909,11 @@ export async function requestDashboardBotSwitch(
       'Content-Type': 'application/json',
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
-    body: JSON.stringify({ botUid }),
+    body: JSON.stringify({
+      botUid,
+      source: 'skillhub-thin-rpc',
+      expectedCurrentBotUid,
+    }),
   });
   if (!response.ok) {
     throw new Error(`Dashboard rejected the Bot switch (HTTP ${response.status}).`);
