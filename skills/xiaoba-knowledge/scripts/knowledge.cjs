@@ -74,7 +74,8 @@ class KnowledgeStore {
     let metadata;
     try { metadata = JSON.parse(match[1]); }
     catch { fail('INVALID_DOCUMENT', `Invalid JSON frontmatter: ${file}`); }
-    if (!ID_PATTERN.test(metadata.id) || typeof metadata.title !== 'string' || typeof metadata.summary !== 'string'
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)
+        || !ID_PATTERN.test(metadata.id) || typeof metadata.title !== 'string' || typeof metadata.summary !== 'string'
         || typeof metadata.category !== 'string' || typeof metadata.updatedAt !== 'string'
         || typeof metadata.change !== 'string' || !Array.isArray(metadata.sources)) {
       fail('INVALID_DOCUMENT', `Invalid metadata: ${file}`);
@@ -83,38 +84,91 @@ class KnowledgeStore {
   }
 
   read(id, offset = 0) {
+    if (typeof id === 'string' && id.startsWith('file:')) {
+      const relative = id.slice(5);
+      const file = this.sourcePath(relative);
+      return this.page(this.sourceDocument(relative, this.readRaw(file)), offset);
+    }
     id = this.resolveReadId(id);
     const file = this.documentPath(id);
     const doc = this.parse(this.readRaw(file), file);
     if (doc.id !== id) fail('INVALID_DOCUMENT', 'Document ID differs from filename.');
+    return this.page({ ...doc, managed: true, file: `documents/${id}.md` }, offset);
+  }
+
+  page(doc, offset) {
     const body = doc.body.slice(offset, offset + READ_SIZE);
     return { ...doc, body, offset, nextOffset: offset + body.length < doc.body.length ? offset + body.length : null };
   }
 
-  documents() {
+  sourcePath(relative) {
+    if (!relative.startsWith('documents/') || !/\.md$/i.test(relative)
+        || /[\\:\0]/.test(relative) || relative.split('/').some(part => !part || part === '.' || part === '..')) {
+      fail('INVALID_PATH', 'Use the exact file:documents/... Markdown reference returned by index or search.');
+    }
+    return this.safePath(relative);
+  }
+
+  sourceDocument(relative, raw) {
+    const heading = /^#\s+(.+)$/m.exec(raw);
+    return {
+      id: `file:${relative}`, file: relative, managed: false,
+      title: (heading?.[1]?.trim() || path.posix.basename(relative, path.posix.extname(relative))).slice(0, 200),
+      summary: raw.replace(/\s+/g, ' ').slice(0, 200), category: 'sources',
+      sources: [`file:${relative}`], body: raw, revision: hash(raw),
+    };
+  }
+
+  documents(warnings = []) {
     const directory = this.safePath('documents');
     if (!fileStat(directory)) return [];
-    return fs.readdirSync(directory).filter(name => name.endsWith('.md')).sort().map(name => {
-      const id = name.slice(0, -3);
-      const file = this.documentPath(id);
-      const doc = this.parse(this.readRaw(file), file);
-      if (doc.id !== id) fail('INVALID_DOCUMENT', 'Document ID differs from filename.');
-      return doc;
-    });
+    const docs = [];
+    const visit = relativeDirectory => {
+      for (const name of fs.readdirSync(this.safePath(relativeDirectory)).sort()) {
+        const relative = `${relativeDirectory}/${name}`;
+        try {
+          const file = this.safePath(relative);
+          if (fileStat(file)?.isDirectory()) { visit(relative); continue; }
+          if (!/\.md$/i.test(name)) continue;
+          this.sourcePath(relative);
+          const raw = this.readRaw(file);
+          const id = name.slice(0, -3);
+          if (relativeDirectory === 'documents' && name.endsWith('.md') && ID_PATTERN.test(id)) {
+            try {
+              const doc = this.parse(raw, file);
+              if (doc.id !== id) fail('INVALID_DOCUMENT', 'Document ID differs from filename.');
+              docs.push({ ...doc, managed: true, file: relative });
+              continue;
+            } catch (error) {
+              warnings.push({ ...this.fileWarning(relative, error), readableAs: `file:${relative}` });
+            }
+          }
+          docs.push(this.sourceDocument(relative, raw));
+        } catch (error) { warnings.push(this.fileWarning(relative, error)); }
+      }
+    };
+    visit('documents');
+    return docs;
+  }
+
+  fileWarning(file, error) {
+    return { file: file.split(path.sep).join('/'), code: error.code || 'INVALID_DOCUMENT', message: error.message };
   }
 
   index(query = '', offset = 0) {
     const terms = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
-    const docs = this.documents().filter(doc => {
+    const warnings = [];
+    const docs = this.documents(warnings).filter(doc => {
       const text = `${doc.id}\n${doc.title}\n${doc.summary}\n${doc.category}\n${doc.body}`.toLocaleLowerCase();
       return terms.every(term => text.includes(term));
     });
     return {
       total: docs.length,
-      items: docs.slice(offset, offset + PAGE_SIZE).map(({ id, title, summary, category, updatedAt, revision }) => ({
-        id, title, summary, category, updatedAt, revision,
+      items: docs.slice(offset, offset + PAGE_SIZE).map(({ id, title, summary, category, updatedAt, revision, managed, file }) => ({
+        id, title, summary, category, updatedAt, revision, managed, file,
       })),
       nextOffset: offset + PAGE_SIZE < docs.length ? offset + PAGE_SIZE : null,
+      warnings,
     };
   }
 
@@ -189,27 +243,42 @@ class KnowledgeStore {
       }
       this.atomicWrite(file, raw);
       const result = { id, revision: hash(raw), changed: true, saved: true };
-      try { this.reindexLocked(); }
+      try {
+        const { warnings } = this.reindexLocked();
+        if (warnings.length) result.warnings = warnings;
+      }
       catch (error) { result.warning = `Document saved, derived index needs repair: ${error.message}. Run reindex.`; }
       return result;
     });
   }
 
   reindexLocked() {
-    const docs = this.documents();
+    const warnings = [];
+    const docs = this.documents(warnings);
     const index = ['# 本地共享知识库', '', '由 xiaoba-knowledge 生成；正文位于 documents，修改后可运行 reindex。', '', '| ID / 标题 | 分类 | 摘要 |', '| --- | --- | --- |'];
     const events = [];
     for (const doc of docs) {
-      index.push(`| [${escapeCell(doc.id)} ${escapeCell(doc.title)}](documents/${doc.id}.md) | ${escapeCell(doc.category)} | ${escapeCell(doc.summary)} |`);
+      const link = doc.file.split('/').map(encodeURIComponent).join('/').replace(/[()]/g, char => `%${char.charCodeAt(0).toString(16)}`);
+      index.push(`| [${escapeCell(doc.id)} ${escapeCell(doc.title)}](${link}) | ${escapeCell(doc.category)} | ${escapeCell(doc.summary)} |`);
+      if (!doc.managed) continue;
       events.push(doc);
-      const history = this.safePath('.history', doc.id);
-      if (fileStat(history)) {
-        for (const name of fs.readdirSync(history).sort()) {
+      const historyRelative = path.join('.history', doc.id);
+      try {
+        const history = this.safePath(historyRelative);
+        for (const name of (fileStat(history) ? fs.readdirSync(history) : []).sort()) {
           if (!/^[a-f0-9]{64}\.md$/.test(name)) continue;
-          const file = this.safePath('.history', doc.id, name);
-          events.push(this.parse(this.readRaw(file), file));
+          const relative = path.join(historyRelative, name);
+          try {
+            const file = this.safePath(relative);
+            const raw = this.readRaw(file);
+            const archived = this.parse(raw, file);
+            if (archived.id !== doc.id || hash(raw) !== name.slice(0, -3)) {
+              fail('INVALID_DOCUMENT', 'History ID or revision differs from its path.');
+            }
+            events.push(archived);
+          } catch (error) { warnings.push(this.fileWarning(relative, error)); }
         }
-      }
+      } catch (error) { warnings.push(this.fileWarning(historyRelative, error)); }
     }
     const changes = ['# 知识更新记录', '', '由当前文档与 .history 历史版本生成；用户直接编辑正文不会自动产生历史版本。', ''];
     for (const doc of events.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))) {
@@ -217,7 +286,7 @@ class KnowledgeStore {
     }
     this.atomicWrite(this.safePath('index.md'), `${index.join('\n')}\n`);
     this.atomicWrite(this.safePath('changes.md'), `${changes.join('\n')}\n`);
-    return { documents: docs.length, revisions: events.length };
+    return { documents: docs.length, revisions: events.length, warnings };
   }
 
   async reindex() { return this.withLock(() => this.reindexLocked()); }

@@ -186,6 +186,147 @@ describe('instance shared knowledge', () => {
     fs.symlinkSync(outside, path.join(root, 'documents'), process.platform === 'win32' ? 'junction' : 'dir');
     await assert.rejects(store.put(request()), { code: 'UNSAFE_PATH' });
     assert.deepEqual(fs.readdirSync(outside), []);
+    assert.throws(() => store.index(), { code: 'UNSAFE_PATH' });
+    await assert.rejects(store.reindex(), { code: 'UNSAFE_PATH' });
+  });
+
+  for (const corruption of ['plain-name', 'incomplete', 'bad-json', 'null', 'missing-fields', 'wrong-id', 'oversized']) {
+    test(`isolates ${corruption} Markdown while retaining valid search, read and reindex`, async () => {
+      const store = new KnowledgeStore(root);
+      const good = await store.put(request());
+      const bad = await store.put(request({ title: 'Damaged document' }));
+      const originalPath = path.join(root, 'documents', `${bad.id}.md`);
+      const original = fs.readFileSync(originalPath, 'utf8');
+      let file = originalPath;
+      let damaged: string;
+      switch (corruption) {
+        case 'plain-name':
+          file = path.join(root, 'documents', 'notes.md');
+          fs.renameSync(originalPath, file);
+          damaged = 'a manually added note'; break;
+        case 'incomplete': damaged = '---\n{"id":'; break;
+        case 'bad-json': damaged = '---\n{broken}\n---\n\nbody'; break;
+        case 'null': damaged = '---\nnull\n---\n\nbody'; break;
+        case 'missing-fields': damaged = `---\n${JSON.stringify({ id: bad.id })}\n---\n\nbody`; break;
+        case 'wrong-id': damaged = original.replace(bad.id, good.id); break;
+        default: damaged = 'x'.repeat(256 * 1024 + 1);
+      }
+      fs.writeFileSync(file, damaged);
+      const relative = path.relative(root, file).split(path.sep).join('/');
+      for (const result of [store.index(), await store.reindex()]) {
+        assert.equal(result.total ?? result.documents, corruption === 'oversized' ? 1 : 2);
+        assert.equal(result.warnings.length, corruption === 'plain-name' ? 0 : 1);
+        if (result.warnings.length) {
+          assert.equal(result.warnings[0].file, relative);
+          assert.equal(result.warnings[0].code, 'INVALID_DOCUMENT');
+          assert.ok(result.warnings[0].message);
+        }
+      }
+      assert.ok(store.index('部署').items.some((item: any) => item.id === good.id));
+      if (corruption !== 'oversized') {
+        const source = store.index().items.find((item: any) => !item.managed);
+        assert.equal(source.id, `file:${relative}`);
+        assert.equal(store.read(source.id).body, damaged);
+        assert.equal(store.read(source.id).managed, false);
+        await assert.rejects(store.put(request({ id: source.id, expectedRevision: source.revision })), { code: 'INVALID_ID' });
+      }
+      assert.equal(store.read(good.id).body, request().body);
+      assert.match(fs.readFileSync(path.join(root, 'index.md'), 'utf8'), new RegExp(good.id));
+      assert.equal(fs.readFileSync(file, 'utf8'), damaged);
+      if (file !== originalPath) fs.renameSync(file, originalPath);
+      fs.writeFileSync(originalPath, original);
+      assert.equal((await store.reindex()).warnings.length, 0);
+      assert.equal(store.index().total, 2);
+    });
+  }
+
+  test('skips damaged history and reports partial indexing on a successful put', async () => {
+    const store = new KnowledgeStore(root);
+    const initial = await store.put(request());
+    const updated = await store.put(request({ id: initial.id, expectedRevision: initial.revision, body: 'Updated evidence' }));
+    const archive = path.join(root, '.history', initial.id, `${initial.revision}.md`);
+    fs.writeFileSync(archive, 'damaged archive');
+    const created = await store.put(request({ title: 'Other valid document' }));
+    assert.equal(created.saved, true);
+    assert.equal(created.warnings[0].file, path.relative(root, archive).split(path.sep).join('/'));
+    const rebuilt = await store.reindex();
+    assert.equal(rebuilt.documents, 2);
+    assert.equal(rebuilt.revisions, 2);
+    assert.equal(rebuilt.warnings.length, 1);
+    assert.equal(store.read(updated.id).body, 'Updated evidence');
+    assert.equal(fs.readFileSync(archive, 'utf8'), 'damaged archive');
+  });
+
+  test('skips an unsafe individual document without following its hard link', async () => {
+    const store = new KnowledgeStore(root);
+    const good = await store.put(request());
+    const outside = path.join(temp, 'outside.md');
+    fs.writeFileSync(outside, 'outside data');
+    const unsafeId = 'KB-00000000-0000-0000-0000-000000000000';
+    fs.linkSync(outside, path.join(root, 'documents', `${unsafeId}.md`));
+    assert.equal(store.index().items[0].id, good.id);
+    assert.equal(store.index().warnings[0].code, 'UNSAFE_PATH');
+    assert.throws(() => store.read(unsafeId), { code: 'UNSAFE_PATH' });
+    assert.equal((await store.reindex()).documents, 1);
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'outside data');
+  });
+
+  test('copied Markdown is searchable and pageable without metadata or automatic edits', async () => {
+    const store = new KnowledgeStore(root);
+    const relative = 'documents/客户学校/试卷 #1 (解析).MD';
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const body = '# 三角函数例题\n\n' + '题目解析'.repeat(4000) + '\n终点特殊答案';
+    fs.writeFileSync(file, body);
+    const found = store.index('终点特殊答案');
+    assert.equal(found.total, 1);
+    assert.deepEqual(found.warnings, []);
+    assert.equal(found.items[0].title, '三角函数例题');
+    assert.equal(found.items[0].managed, false);
+    assert.equal(found.items[0].file, relative);
+    const first = store.read(found.items[0].id);
+    const rest = store.read(found.items[0].id, first.nextOffset);
+    assert.equal(first.body + rest.body, body);
+    assert.equal(first.revision, rest.revision);
+    const cli = await run(process.execPath, [helper, '--root', root, 'read', found.items[0].id]);
+    assert.equal(JSON.parse(cli.stdout).body, first.body);
+    const rebuilt = await store.reindex();
+    assert.equal(rebuilt.documents, 1);
+    assert.equal(rebuilt.revisions, 0);
+    assert.match(fs.readFileSync(path.join(root, 'index.md'), 'utf8'), /%231%20%28/);
+    assert.equal(fs.readFileSync(file, 'utf8'), body);
+    assert.equal(fs.existsSync(path.join(root, '.history')), false);
+    fs.appendFileSync(file, '\n客户补充条件');
+    assert.equal(store.index('客户补充条件').total, 1);
+    assert.notEqual(store.read(found.items[0].id).revision, first.revision);
+  });
+
+  test('file references reject escapes and linked folders while retaining other sources', async () => {
+    const store = new KnowledgeStore(root);
+    await store.put(request());
+    const outside = path.join(temp, 'external');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'secret.md'), 'outside secret');
+    fs.symlinkSync(outside, path.join(root, 'documents', 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(store.index('outside secret').total, 0);
+    assert.equal(store.index().warnings[0].code, 'UNSAFE_PATH');
+    assert.throws(() => store.read('file:documents/linked/secret.md'), { code: 'UNSAFE_PATH' });
+    for (const reference of ['file:documents/../secret.md', 'file:documents/../../external/secret.md', 'file:documents\\secret.md', 'file:/documents/secret.md', 'file:documents//secret.md', 'file:documents/secret.md:stream.md', 'file:.history/secret.md']) {
+      assert.throws(() => store.read(reference), { code: 'INVALID_PATH' });
+    }
+    assert.equal((await store.reindex()).documents, 1);
+  });
+
+  test('noncanonical KB extension stays a file reference on case-sensitive platforms', async () => {
+    const store = new KnowledgeStore(root);
+    const created = await store.put(request());
+    const relative = `documents/${created.id}.MD`;
+    fs.renameSync(path.join(root, 'documents', `${created.id}.md`), path.join(root, relative));
+    const found = store.index().items[0];
+    assert.equal(found.managed, false);
+    assert.equal(found.id, `file:${relative}`);
+    assert.match(store.read(found.id).body, /运行测试再发布/);
+    assert.equal((await store.reindex()).documents, 1);
   });
 
   test('reports a committed document when index repair fails, without duplicating the document', async () => {
