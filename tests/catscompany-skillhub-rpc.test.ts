@@ -120,6 +120,103 @@ describe('CatsCompany SkillHub thin RPC', () => {
     assert.equal(result.truncated, false);
   });
 
+  test('owner can explicitly sync the reviewed Runtime workspace to the current Agent', async () => {
+    const workspace = await handler.execute(request({
+      request_id: 'workspace-before-sync',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace,
+    }));
+    let validatedScope = 0;
+    const syncHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      now: () => new Date('2026-08-24T00:00:00.000Z'),
+      pushCurrentBotSkillWorkspace: async (botUid, options) => {
+        assert.equal(botUid, '42');
+        await options.validateScope?.();
+        validatedScope += 1;
+        await options.validateWorkspace?.({
+          runtimeRoot,
+          skillsRoot: path.join(runtimeRoot, 'skills'),
+          botId: '42',
+          activeBotId: '42',
+        });
+        return {
+          botId: '42',
+          direction: 'local_to_cloud',
+          cloudRevision: 9,
+          observedRevision: 9,
+          desiredRevision: 9,
+          appliedRevision: 9,
+          applyStatus: 'applied',
+          skills: [{
+            source: 'skillhub',
+            skillId: 'private/local-demo',
+            version: '1',
+            contentHash: 'a'.repeat(64),
+          }],
+        };
+      },
+    });
+
+    const result = await syncHandler.execute(request({
+      request_id: 'sync-workspace',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.syncWorkspace,
+      payload: {
+        bot_uid: '42',
+        workspace_revision: workspace.workspace_revision,
+      },
+    }));
+
+    assert.equal(validatedScope, 1);
+    assert.deepEqual(result, {
+      schema: 'xiaoba.skillhub.workspace_sync.v1',
+      bot_uid: '42',
+      workspace_revision: workspace.workspace_revision,
+      workspace_skills: 1,
+      synced_skills: 1,
+      private_skills: 1,
+      public_skills: 0,
+      cloud_revision: 9,
+      direction: 'local_to_cloud',
+      apply_status: 'applied',
+    });
+  });
+
+  test('refuses to sync a Runtime workspace that changed after owner review', async () => {
+    const workspace = await handler.execute(request({
+      request_id: 'workspace-stale-before-sync',
+      tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace,
+    }));
+    fs.appendFileSync(path.join(runtimeRoot, 'skills', 'local-demo', 'SKILL.md'), '\nchanged\n');
+    const syncHandler = new SkillHubThinRpcHandler({
+      runtimeRoot,
+      now: () => new Date('2026-08-24T00:00:00.000Z'),
+      pushCurrentBotSkillWorkspace: async (_botUid, options) => {
+        await options.validateWorkspace?.({
+          runtimeRoot,
+          skillsRoot: path.join(runtimeRoot, 'skills'),
+          botId: '42',
+          activeBotId: '42',
+        });
+        throw new Error('sync must not start');
+      },
+    });
+
+    await assert.rejects(
+      syncHandler.execute(request({
+        request_id: 'sync-stale-workspace',
+        tool_name: SKILLHUB_THIN_RPC_TOOLS.syncWorkspace,
+        payload: {
+          bot_uid: '42',
+          workspace_revision: workspace.workspace_revision,
+        },
+      })),
+      (error: unknown) => (
+        error instanceof SkillHubThinRpcError
+        && error.code === 'WORKSPACE_CHANGED'
+      ),
+    );
+  });
+
   test('paginates more than 200 workspace Skills without hiding the remainder', async () => {
     const skillsRoot = path.join(runtimeRoot, 'skills');
     for (let index = 0; index < 205; index += 1) {

@@ -48,6 +48,14 @@ export interface CurrentBotSkillWorkspaceWriteOptions {
   lockWaitMs?: number;
 }
 
+export interface PushCurrentBotSkillWorkspaceOptions
+  extends CurrentBotSkillWorkspaceWriteOptions {
+  validateScope?: () => Promise<void> | void;
+  validateWorkspace?: (
+    context: CurrentBotSkillWorkspaceWriteContext,
+  ) => Promise<void> | void;
+}
+
 export class BotSkillWorkspaceChangingError extends Error {
   readonly code = 'WORKSPACE_SWITCHING';
 
@@ -200,6 +208,38 @@ export async function syncCurrentBotSkillsNow(): Promise<BotSkillSyncResult | un
       definitionService,
     }).sync();
   });
+}
+
+/**
+ * Owner-initiated Runtime workspace publication. The currently active local
+ * workspace is authoritative for this call and is uploaded as Bot-private
+ * packages where no existing public/private reference can be reused.
+ */
+export async function pushCurrentBotSkillWorkspaceToCloudNow(
+  botId: string,
+  options: PushCurrentBotSkillWorkspaceOptions = {},
+): Promise<BotSkillSyncResult> {
+  const runtimeRoot = path.resolve(options.runtimeRoot ?? PathResolver.getRuntimeDataRoot());
+  return withCurrentBotSkillWorkspaceWrite(async (context) => {
+    if (context.botId !== botId || context.activeBotId !== botId) {
+      throw new Error('The selected Bot workspace is not active on this device.');
+    }
+    await options.validateScope?.();
+    await options.validateWorkspace?.(context);
+    const configService = createCatsCoLocalConfigService({ runtimeRoot });
+    const definitionService = createBotDefinitionSyncService({ runtimeRoot });
+    return new BotSkillSyncService({
+      runtimeRoot,
+      botId,
+      auth: configService.getAuthState(),
+      skillsRoot: context.skillsRoot,
+      workspaceExisted: true,
+      definitionService,
+    }).pushWorkspaceToCloud({
+      validateScope: options.validateScope,
+      validateWorkspace: () => options.validateWorkspace?.(context),
+    });
+  }, options);
 }
 
 export interface FinalizeCurrentBotPublicSkillOptions
