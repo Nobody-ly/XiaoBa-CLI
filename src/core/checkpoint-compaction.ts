@@ -45,7 +45,7 @@ export interface CheckpointCompactionRequest {
 }
 
 export interface CheckpointCompactionStatusEvent {
-  status: 'start' | 'complete' | 'error';
+  status: 'start' | 'complete' | 'skipped' | 'error';
   sessionKey: string;
   phase: CheckpointCompactionPhase;
   usedTokens: number;
@@ -100,6 +100,7 @@ export class CheckpointCompactionCoordinator {
   private readonly maxContextTokens: number;
   private readonly compactionThreshold: number;
   private readonly retainedUserTokenBudget: number;
+  private lastUnproductiveSource?: string;
 
   constructor(
     private readonly aiService: AIService,
@@ -148,28 +149,35 @@ export class CheckpointCompactionCoordinator {
     messages: Message[],
     request: CheckpointCompactionRequest,
   ): Promise<CheckpointCompactionResult> {
+    request.signal?.throwIfAborted();
     const usage = this.getUsageInfo(messages, request.toolTokens);
     if (!this.needsCompaction(messages, request.toolTokens)) {
       return { messages, compacted: false, ...usage };
     }
 
-    await this.emitStatus(request, {
-      status: 'start',
-      sessionKey: request.sessionKey,
-      phase: request.phase,
-      ...usage,
-    });
-    Logger.info(
-      `[${request.sessionKey}] checkpoint compaction start `
-      + `phase=${request.phase}, prompt=${usage.usedTokens}+${usage.toolTokens}`
-      + `/${usage.maxTokens} (${usage.usagePercent}%)`,
-    );
+    // Do not pay for another summary of an unchanged transcript that could not
+    // be reduced. Tool definitions and transient context are not summarized.
+    const sourceKey = createHash('sha256').update(JSON.stringify([
+      request.sessionKey, request.episodeId,
+      splitDurableAndTransient(messages).durable,
+    ])).digest('hex');
+    if (sourceKey === this.lastUnproductiveSource) {
+      return { messages, compacted: false, ...usage };
+    }
 
     try {
       const result = await this.compact(messages, request, usage);
       if (result === messages) {
         return { messages, compacted: false, ...usage };
       }
+      request.signal?.throwIfAborted();
+      if (estimateMessagesTokens(splitDurableAndTransient(result).durable) >= usage.usedTokens) {
+        this.lastUnproductiveSource = sourceKey;
+        await this.emitStatus(request, { status: 'skipped', sessionKey: request.sessionKey, phase: request.phase, ...usage });
+        Logger.info(`[${request.sessionKey}] checkpoint did not reduce context; keeping the original transcript`);
+        return { messages, compacted: false, ...usage };
+      }
+      this.lastUnproductiveSource = undefined;
       await this.emitStatus(request, {
         status: 'complete',
         sessionKey: request.sessionKey,
@@ -254,6 +262,15 @@ export class CheckpointCompactionCoordinator {
     if (exactTail.summarySource.length === 0) {
       return messages;
     }
+
+    await this.emitStatus(request, {
+      status: 'start', sessionKey: request.sessionKey, phase: request.phase, ...usage,
+    });
+    Logger.info(
+      `[${request.sessionKey}] checkpoint compaction start `
+      + `phase=${request.phase}, prompt=${usage.usedTokens}+${usage.toolTokens}`
+      + `/${usage.maxTokens} (${usage.usagePercent}%)`,
+    );
 
     const summary = await this.generateContinuationSummary(
       exactTail.summarySource,
@@ -567,9 +584,7 @@ function selectExactTail(
   }
   return {
     retained,
-    summarySource: selectedIndexes.size === messages.length
-      ? messages
-      : messages.filter((_, index) => !selectedIndexes.has(index)),
+    summarySource: messages.filter((_, index) => !selectedIndexes.has(index)),
   };
 }
 

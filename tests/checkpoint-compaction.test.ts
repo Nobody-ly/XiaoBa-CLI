@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Message } from '../src/types';
+import { estimateMessagesTokens } from '../src/core/token-estimator';
 import {
   CHECKPOINT_SUMMARY_PREFIX,
   CheckpointCompactionCoordinator,
@@ -41,6 +42,50 @@ test('checkpoint compaction switch defaults on and supports explicit rollback', 
   assert.equal(isCheckpointCompactionEnabled({
     XIAOBA_CHECKPOINT_COMPACTION_ENABLED: 'false',
   } as NodeJS.ProcessEnv), false);
+});
+
+test('tool-heavy context with only active inputs never calls the summary model repeatedly', async () => {
+  const { service, requests } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, { maxContextTokens: 2000 });
+  const messages: Message[] = [
+    { role: 'system', content: 'Stable system prompt' },
+    { role: 'user', content: 'Inspect the repository', __episodeId: 'active', __episodeInputKind: 'root' },
+    { role: 'user', content: 'Preserve configuration', __episodeId: 'active', __episodeInputKind: 'pending' },
+  ];
+  const request = { sessionKey: 'active-only', episodeId: 'active', phase: 'mid_turn' as const, toolTokens: 1700 };
+  const first = await coordinator.compactIfNeeded(messages, request);
+  const second = await coordinator.compactIfNeeded(first.messages, request);
+  assert.equal(first.compacted, false);
+  assert.equal(second.compacted, false);
+  assert.equal(first.messages, messages);
+  assert.equal(requests.length, 0);
+});
+
+test('rejects expanding summaries and retries only when durable source changes', async () => {
+  const { service, requests } = createService(() => 'Summary text. '.repeat(400));
+  const coordinator = new CheckpointCompactionCoordinator(service, { maxContextTokens: 2000 });
+  const messages: Message[] = [
+    { role: 'system', content: 'Stable system prompt' },
+    { role: 'user', content: 'Earlier task', __episodeId: 'old' },
+    { role: 'assistant', content: 'Earlier result', __episodeId: 'old' },
+    { role: 'user', content: 'Current task', __episodeId: 'active', __episodeInputKind: 'root' },
+  ];
+  const request = { sessionKey: 'no-reduction', episodeId: 'active', phase: 'mid_turn' as const, toolTokens: 1700 };
+  const statuses: string[] = [];
+  const first = await coordinator.compactIfNeeded(messages, { ...request, onStatus: event => { statuses.push(event.status); } });
+  assert.equal(first.compacted, false);
+  assert.equal(first.messages, messages);
+  assert.deepEqual(statuses, ['start', 'skipped']);
+  const repeated = await coordinator.compactIfNeeded(structuredClone(first.messages), { ...request, phase: 'pre_turn', toolTokens: 1800 });
+  assert.equal(repeated.compacted, false);
+  assert.equal(requests.length, 1);
+  const aborted = AbortSignal.abort();
+  await assert.rejects(coordinator.compactIfNeeded(messages, { ...request, signal: aborted }), { name: 'AbortError' });
+  const changed = [...messages, { role: 'assistant' as const, content: 'New tool evidence '.repeat(2000), __episodeId: 'active' }];
+  const next = await coordinator.compactIfNeeded(changed, request);
+  assert.equal(requests.length, 2);
+  assert.equal(next.compacted, true);
+  assert.ok(estimateMessagesTokens(next.messages) < estimateMessagesTokens(changed));
 });
 test('checkpoint compaction preserves stable system and transient runtime messages', async () => {
   const { service } = createService(() => [

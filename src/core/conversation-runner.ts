@@ -841,6 +841,8 @@ export class ConversationRunner {
             await callbacks.onThinking?.('Context is full. Creating a continuation checkpoint.');
           } else if (event.status === 'complete') {
             await callbacks.onThinking?.('Continuation summary generated. Saving the checkpoint.');
+          } else if (event.status === 'skipped') {
+            await callbacks.onThinking?.('Checkpoint did not reduce context. Keeping the original transcript.');
           } else {
             await callbacks.onThinking?.('Checkpoint creation failed. Stopping this turn with the original context preserved.');
           }

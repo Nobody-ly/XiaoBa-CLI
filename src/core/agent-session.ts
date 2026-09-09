@@ -1170,7 +1170,7 @@ export class AgentSession {
     callbacks: SessionCallbacks | undefined,
     stopsOnError: boolean,
   ): ((event: {
-    status: 'start' | 'complete' | 'error';
+    status: 'start' | 'complete' | 'skipped' | 'error';
   }) => Promise<void>) | undefined {
     if (!callbacks?.onThinking) return undefined;
     return async (event) => {
@@ -1181,9 +1181,11 @@ export class AgentSession {
   }
 
   private formatContextCompactionStatus(event: {
-    status: 'start' | 'complete' | 'error';
+    status: 'start' | 'complete' | 'skipped' | 'error';
   }, stopsOnError: boolean): string {
     switch (event.status) {
+      case 'skipped':
+        return '摘要未缩减上下文，继续保留原始记录。';
       case 'start':
         return CONTEXT_COMPACTION_START_MESSAGE;
       case 'complete':
