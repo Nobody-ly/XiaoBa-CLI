@@ -25,6 +25,96 @@ const unchanged = (messages: Message[]) => ({
   maxTokens: 100, usagePercent: 20,
 });
 
+test('runner reports provider prompt usage to checkpoint accounting', async () => {
+  const observations: Array<{
+    promptTokens: number;
+    messageCount: number;
+    providerMessageCount: number;
+    toolTokens: number;
+  }> = [];
+  const coordinator = {
+    compactIfNeeded: async (messages: Message[]) => unchanged(messages),
+    observeProviderPromptUsage: (
+      promptTokens: number,
+      messages: Message[],
+      providerMessages: Message[],
+      toolTokens: number,
+    ) => {
+      observations.push({
+        promptTokens,
+        messageCount: messages.length,
+        providerMessageCount: providerMessages.length,
+        toolTokens,
+      });
+    },
+  } as any;
+  const tool: ToolDefinition = {
+    name: 'inspect',
+    description: 'inspect',
+    parameters: { type: 'object', properties: {} },
+  };
+  const runner = new ConversationRunner({
+    chat: async () => ({ content: 'done', toolCalls: [], usage: {
+      promptTokens: 777,
+      completionTokens: 5,
+      totalTokens: 782,
+    } }),
+  } as any, {
+    getToolDefinitions: () => [tool],
+    executeTool: async () => { throw new Error('Unexpected tool'); },
+  }, {
+    stream: false,
+    checkpointCompactionCoordinator: coordinator,
+  });
+
+  await runner.run([{ role: 'user', content: 'inspect once' }]);
+
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].promptTokens, 777);
+  assert.equal(observations[0].messageCount, 1);
+  assert.ok(observations[0].providerMessageCount >= 1);
+  assert.ok(observations[0].toolTokens > 0);
+});
+
+test('runner checkpoints durable history before a large one-shot transient prompt is sent', async () => {
+  const events: string[] = [];
+  const coordinator = new CheckpointCompactionCoordinator({
+    chatStream: async () => {
+      events.push('summary');
+      return { content: 'Earlier work is complete; continue the active request.', usage };
+    },
+  } as any, { maxContextTokens: 1_000 });
+  const runner = new ConversationRunner({
+    chat: async (messages: Message[]) => {
+      events.push('agent');
+      assert.ok(messages.some(message => message.__checkpointSummary));
+      assert.ok(messages.some(message => message.__injected));
+      return { content: 'continued', toolCalls: [], usage };
+    },
+  } as any, {
+    getToolDefinitions: () => [],
+    executeTool: async () => { throw new Error('Unexpected tool'); },
+  }, {
+    stream: false,
+    episodeId: 'active',
+    checkpointCompactionCoordinator: coordinator,
+    onCompactionCheckpoint: async () => { events.push('persist'); },
+  });
+
+  await runner.run([
+    { role: 'user', content: 'x'.repeat(400), __episodeId: 'old' },
+    { role: 'assistant', content: 'x'.repeat(400), __episodeId: 'old' },
+    { role: 'user', content: 'continue', __episodeId: 'active', __episodeInputKind: 'root' },
+    {
+      role: 'system',
+      content: `[transient_runtime]\n${'x'.repeat(2_700)}`,
+      __injected: true,
+    },
+  ]);
+
+  assert.deepEqual(events, ['summary', 'persist', 'agent']);
+});
+
 test('cancellation during a tool rate-limit backoff prevents another execution', { timeout: 5000 }, async () => {
   const controller = new AbortController();
   let executions = 0;

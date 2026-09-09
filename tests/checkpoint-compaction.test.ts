@@ -6,8 +6,11 @@ import {
   CHECKPOINT_SUMMARY_PREFIX,
   CheckpointCompactionCoordinator,
   buildCheckpointCompactionPrompt,
+  calculateCheckpointInputLimitTokens,
   isCheckpointCompactionEnabled,
+  resolveCheckpointInputLimitTokens,
 } from '../src/core/checkpoint-compaction';
+import { resolveModelContextWindow } from '../src/utils/model-context-window';
 
 const usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 };
 
@@ -42,6 +45,156 @@ test('checkpoint compaction switch defaults on and supports explicit rollback', 
   assert.equal(isCheckpointCompactionEnabled({
     XIAOBA_CHECKPOINT_COMPACTION_ENABLED: 'false',
   } as NodeJS.ProcessEnv), false);
+});
+
+test('default checkpoint threshold is 85 percent of the physical context window', () => {
+  const { service } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 1_000,
+  });
+  const below: Message[] = [{ role: 'user', content: 'x'.repeat(3_300) }];
+  const above: Message[] = [{ role: 'user', content: 'x'.repeat(3_500) }];
+
+  assert.equal(coordinator.needsCompaction(below), false);
+  assert.equal(coordinator.needsCompaction(above), true);
+});
+
+test('checkpoint input limit is 85 percent for supported 256K+ windows', () => {
+  assert.equal(calculateCheckpointInputLimitTokens(256_000), 217_600);
+  assert.equal(calculateCheckpointInputLimitTokens(1_000_000), 850_000);
+});
+
+test('checkpoint input limit preserves the legacy prompt budget below 256K', () => {
+  const minimaxM27 = resolveModelContextWindow(
+    { model: 'MiniMax-M2.7', provider: 'anthropic' },
+    { CATSCO_MODEL_SOURCE: 'relay' } as NodeJS.ProcessEnv,
+  );
+  const custom128K = resolveModelContextWindow({
+    model: 'custom-128k',
+    provider: 'openai',
+    contextWindowTokens: 128_000,
+    maxTokens: 32_000,
+  });
+
+  for (const resolution of [minimaxM27, custom128K]) {
+    const inputLimit = resolveCheckpointInputLimitTokens(
+      resolution.contextWindowTokens,
+      resolution.promptBudgetTokens,
+      resolution.maxOutputTokens,
+    );
+    assert.equal(inputLimit, resolution.promptBudgetTokens);
+    assert.ok(
+      inputLimit + resolution.maxOutputTokens <= resolution.contextWindowTokens,
+      `${resolution.label} request budget must fit the physical context window`,
+    );
+  }
+
+  assert.equal(minimaxM27.contextWindowTokens, 204_800);
+  assert.equal(minimaxM27.promptBudgetTokens, 155_648);
+  assert.equal(custom128K.promptBudgetTokens, 84_224);
+});
+
+test('checkpoint input limit preserves output headroom for a 256K high-output model', () => {
+  const highOutput256K = resolveModelContextWindow({
+    model: 'custom-256k',
+    provider: 'openai',
+    contextWindowTokens: 256_000,
+    maxTokens: 64_000,
+  });
+  const inputLimit = resolveCheckpointInputLimitTokens(
+    highOutput256K.contextWindowTokens,
+    highOutput256K.promptBudgetTokens,
+    highOutput256K.maxOutputTokens,
+  );
+
+  assert.equal(inputLimit, highOutput256K.promptBudgetTokens);
+  assert.equal(inputLimit, 172_544);
+  assert.ok(inputLimit + highOutput256K.maxOutputTokens <= 256_000);
+});
+
+test('provider prompt usage anchors locally estimated appended messages and tools', () => {
+  const { service } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 1_000,
+  });
+  const atRequest: Message[] = [{ role: 'user', content: 'small request' }];
+  coordinator.observeProviderPromptUsage(800, atRequest, atRequest, 20);
+
+  const current: Message[] = [
+    ...atRequest,
+    { role: 'assistant', content: 'x'.repeat(240) },
+  ];
+  const usageInfo = coordinator.getUsageInfo(current, 20);
+
+  assert.equal(usageInfo.usedTokens + usageInfo.toolTokens, 864);
+  assert.equal(coordinator.needsCompaction(current, 20), true);
+});
+
+test('provider usage cannot lower the local safety estimate and is ignored after prefix mutation', () => {
+  const { service } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 1_000,
+  });
+  const large: Message[] = [{ role: 'user', content: 'x'.repeat(3_500) }];
+  coordinator.observeProviderPromptUsage(10, large, large);
+  assert.equal(coordinator.needsCompaction(large), true);
+
+  const small: Message[] = [{ role: 'user', content: 'small request' }];
+  coordinator.observeProviderPromptUsage(900, small, small);
+  const replaced: Message[] = [{ role: 'user', content: 'different request' }];
+  assert.equal(coordinator.needsCompaction(replaced), false);
+});
+
+test('provider calibration does not retain a one-shot transient prompt as durable usage', () => {
+  const { service } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 1_000,
+  });
+  const durable: Message[] = [{ role: 'user', content: 'small request' }];
+  const providerMessages: Message[] = [
+    ...durable,
+    { role: 'system', content: `[transient_runtime]\n${'x'.repeat(2_800)}` },
+  ];
+  const providerPromptTokens = estimateMessagesTokens(providerMessages) + 20;
+
+  coordinator.observeProviderPromptUsage(
+    providerPromptTokens,
+    durable,
+    providerMessages,
+    20,
+  );
+
+  assert.equal(coordinator.needsCompaction(durable, 20), false);
+  assert.equal(coordinator.needsCompaction(durable, 20, 830), true);
+});
+
+test('impossible provider usage clears the previous calibration', () => {
+  const { service } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 1_000,
+  });
+  const messages: Message[] = [{ role: 'user', content: 'small request' }];
+  coordinator.observeProviderPromptUsage(800, messages, messages);
+  assert.equal(coordinator.getUsageInfo(messages).usedTokens, 800);
+
+  coordinator.observeProviderPromptUsage(1_001, messages, messages);
+  assert.equal(
+    coordinator.getUsageInfo(messages).usedTokens,
+    estimateMessagesTokens(messages),
+  );
+});
+
+test('valid provider usage remains authoritative when local estimation is much lower', () => {
+  const { service } = createService(() => 'unused summary');
+  const coordinator = new CheckpointCompactionCoordinator(service, {
+    maxContextTokens: 100_000,
+  });
+  const messages: Message[] = [{ role: 'user', content: 'x'.repeat(80_000) }];
+  assert.ok(estimateMessagesTokens(messages) < 25_000);
+
+  coordinator.observeProviderPromptUsage(60_000, messages, messages);
+
+  assert.equal(coordinator.getUsageInfo(messages).usedTokens, 60_000);
 });
 
 test('tool-heavy context with only active inputs never calls the summary model repeatedly', async () => {

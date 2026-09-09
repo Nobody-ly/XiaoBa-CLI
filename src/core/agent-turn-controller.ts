@@ -117,6 +117,7 @@ export interface AgentTurnControllerOptions {
   workspaceRoot: string;
   getCurrentDirectory: () => string;
   updateCurrentDirectory: (directory: string) => void;
+  maxPromptTokens?: number;
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   persistCheckpoint?: (messages: Message[]) => void | Promise<void>;
 }
@@ -360,6 +361,7 @@ export class AgentTurnController {
         pendingUserInputProvider: options.pendingUserInputProvider,
         syntheticObservationProvider: options.syntheticObservationProvider,
         episodeId: options.episodeId,
+        maxContextTokens: this.options.maxPromptTokens,
         checkpointCompactionCoordinator: this.options.checkpointCompactionCoordinator,
         onCompactionCheckpoint: this.options.persistCheckpoint,
         // AgentSession/ContextWindowManager compacts durable history before the turn.

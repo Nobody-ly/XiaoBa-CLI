@@ -11,6 +11,7 @@ import { Metrics } from '../utils/metrics';
 import { ContextCompressor } from './context-compressor';
 import {
   CheckpointPersistenceError,
+  splitDurableAndTransient,
   type CheckpointCompactionCoordinator,
 } from './checkpoint-compaction';
 import { estimateMessagesTokens, estimateToolsTokens } from './token-estimator';
@@ -412,16 +413,46 @@ export class ConversationRunner {
       const perTurnRunnerHint = transientPolicy.injectRunnerHint
         ? buildPerTurnRunnerHint(requestTools)
         : null;
-      let requestMessages = this.buildProviderInputMessages(messages, [
+      const providerTransientHints = [
         ...runtimeTransientHints,
         ...(perTurnRunnerHint ? [perTurnRunnerHint] : []),
         ...nextTurnTransientHints,
         ...orchestrationHints,
-      ], {
+      ];
+      let requestMessages = this.buildProviderInputMessages(messages, providerTransientHints, {
         includeCurrentDirectoryHint: transientPolicy.injectEnvironment,
         currentDirectory,
       });
       nextTurnTransientHints = [];
+      const promptOverheadTokens = estimateMessagesTokens(
+        splitDurableAndTransient(requestMessages).transient,
+      );
+      const needsPromptOverheadCompaction = this.checkpointCompactionCoordinator
+        ?.needsCompaction;
+      if (
+        promptOverheadTokens > 0
+        && typeof needsPromptOverheadCompaction === 'function'
+        && needsPromptOverheadCompaction.call(
+          this.checkpointCompactionCoordinator,
+          messages,
+          estimateToolsTokens(requestTools),
+          promptOverheadTokens,
+        )
+      ) {
+        const compactedForPromptOverhead = await this.compactMidTurnIfNeeded(
+          messages,
+          requestTools,
+          turns,
+          callbacks,
+          promptOverheadTokens,
+        );
+        if (compactedForPromptOverhead) {
+          requestMessages = this.buildProviderInputMessages(messages, providerTransientHints, {
+            includeCurrentDirectoryHint: transientPolicy.injectEnvironment,
+            currentDirectory,
+          });
+        }
+      }
       const promptTrimmed = this.ensurePromptBudget(requestMessages, requestTools);
       if (promptTrimmed && callbacks?.onThinking) {
         await callbacks.onThinking(PROMPT_BUDGET_TRIM_MESSAGE);
@@ -484,6 +515,17 @@ export class ConversationRunner {
       if (response.usage) {
         Metrics.recordAICall(this.stream ? 'stream' : 'chat', response.usage);
         Logger.info(`[${this.sessionLabel}Turn ${turns}] AI返回 tokens: ${response.usage.promptTokens}+${response.usage.completionTokens}=${response.usage.totalTokens}`);
+        const observeProviderPromptUsage = this.checkpointCompactionCoordinator
+          ?.observeProviderPromptUsage;
+        if (typeof observeProviderPromptUsage === 'function') {
+          observeProviderPromptUsage.call(
+            this.checkpointCompactionCoordinator,
+            response.usage.promptTokens,
+            messages,
+            requestMessages,
+            estimateToolsTokens(requestTools),
+          );
+        }
       }
 
       if ((!response.toolCalls || response.toolCalls.length === 0) && response.content) {
@@ -827,13 +869,15 @@ export class ConversationRunner {
     tools: ToolDefinition[],
     turns: number,
     callbacks?: RunnerCallbacks,
-  ): Promise<void> {
-    if (!this.checkpointCompactionCoordinator) return;
+    promptOverheadTokens = 0,
+  ): Promise<boolean> {
+    if (!this.checkpointCompactionCoordinator) return false;
     const result = await this.checkpointCompactionCoordinator.compactIfNeeded(messages, {
       sessionKey: this.toolExecutionContext?.sessionId || this.sessionLabel.trim() || 'runner',
       phase: 'mid_turn',
       episodeId: this.episodeId,
       toolTokens: estimateToolsTokens(tools),
+      promptOverheadTokens,
       signal: this.toolExecutionContext?.abortSignal,
       onStatus: callbacks?.onThinking
         ? async event => {
@@ -849,7 +893,7 @@ export class ConversationRunner {
         }
         : undefined,
     });
-    if (!result.compacted) return;
+    if (!result.compacted) return false;
     this.toolExecutionContext?.abortSignal?.throwIfAborted();
 
     try {
@@ -877,6 +921,7 @@ export class ConversationRunner {
     Logger.info(
       `[${this.sessionLabel}Turn ${turns}] durable mid-turn checkpoint persisted; continuing same episode`,
     );
+    return true;
   }
 
   private refreshRuntimeContextForPendingInput(messages: Message[]): void {
