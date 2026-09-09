@@ -571,6 +571,7 @@ export async function prepareBoundBotDefinition(
   });
   const skillSync = (
     options.prepareSkills === false
+    || options.preserveSkills
     || (cloudSelection && !cloudSelection.definition)
   )
     ? undefined
