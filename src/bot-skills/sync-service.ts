@@ -29,6 +29,7 @@ import {
 } from './local-manifest';
 import { BotPrivateSkillClient } from './private-package-client';
 import { renameBotSkillWorkspaceSync } from './workspace-fs';
+import { BotSkillWorkspaceService } from './workspace';
 import type {
   BotSkillPackage,
   BotSkillPackageFile,
@@ -470,6 +471,64 @@ export class BotSkillSyncService {
         { cause: error },
       );
     }
+  }
+
+  /**
+   * Reuses an unchanged Skill dimension without reading packages from Cloud.
+   * Equality in BotDefinition alone is insufficient: this also proves that the
+   * selected Bot owns the active workspace and that every local package still
+   * matches its verified Base entry. Returning undefined deliberately falls
+   * through to the strict Cloud-only activation path.
+   */
+  reuseVerifiedActivation(
+    expectedSkills: readonly BotSkillRef[],
+    definitionRevision: number,
+  ): BotSkillSyncResult | undefined {
+    if (!Number.isInteger(definitionRevision) || definitionRevision < 0) {
+      throw new Error('Bot Skill reuse requires a valid Definition revision.');
+    }
+    BotSkillSyncService.recoverInterruptedRestore(
+      this.runtimeRoot,
+      this.botId,
+      this.skillsRoot,
+    );
+    const workspace = new BotSkillWorkspaceService(this.runtimeRoot, this.skillsRoot);
+    workspace.recoverInterruptedSwitch();
+    if (workspace.getActiveBotId() !== this.botId) return undefined;
+    const base = this.baseStore.read(this.botId);
+    if (!this.workspaceExisted || !base || !fs.existsSync(this.skillsRoot)) return undefined;
+
+    let local: LocalBotSkillManifestEntry[];
+    try {
+      local = this.readLocalManifest({ writeMarkers: false });
+    } catch {
+      return undefined;
+    }
+    const canonicalSkills = canonicalizeBotSkillRefs(expectedSkills);
+    if (
+      !localMatchesBase(local, base)
+      || !botSkillRefsEqual(canonicalSkills, base.skills.map(entry => entry.reference))
+    ) {
+      return undefined;
+    }
+
+    if (base.definitionRevision !== definitionRevision) {
+      this.baseStore.write({
+        ...base,
+        definitionRevision,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    return {
+      botId: this.botId,
+      direction: 'none',
+      cloudRevision: definitionRevision,
+      observedRevision: definitionRevision,
+      desiredRevision: definitionRevision,
+      appliedRevision: definitionRevision,
+      applyStatus: 'already_applied',
+      skills: canonicalSkills,
+    };
   }
 
   /**

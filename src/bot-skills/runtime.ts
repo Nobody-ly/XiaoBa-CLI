@@ -21,6 +21,7 @@ import {
   BotSkillWorkspaceService,
   type BotSkillWorkspaceActivation,
 } from './workspace';
+import type { BotSkillRef } from '../bot-definition/types';
 
 export interface PrepareBoundBotSkillsOptions {
   runtimeRoot: string;
@@ -28,6 +29,14 @@ export interface PrepareBoundBotSkillsOptions {
   auth: CatsCoAuthSnapshot;
   fetchImpl?: typeof fetch;
   definitionService: BotDefinitionSyncService;
+  /**
+   * Reuse is allowed only after workspace ownership, Base metadata, and local
+   * package hashes are verified under the normal cross-process Skill lock.
+   */
+  reuseVerifiedLocal?: {
+    skills: readonly BotSkillRef[];
+    definitionRevision: number;
+  };
 }
 
 export interface PreparedBoundBotSkills {
@@ -108,7 +117,7 @@ export async function prepareBoundBotSkills(
         BotSkillSyncService.recoverInterruptedRestore(runtimeRoot, activeBotId, activeRoot);
       }
       activation = workspace.activate(options.botId);
-      const sync = await new BotSkillSyncService({
+      const syncService = new BotSkillSyncService({
         runtimeRoot,
         botId: options.botId,
         auth: options.auth,
@@ -116,7 +125,14 @@ export async function prepareBoundBotSkills(
         workspaceExisted: activation.existed,
         fetchImpl: options.fetchImpl,
         definitionService: options.definitionService,
-      }).reconcileActivationFromCloudOnly();
+      });
+      const reused = options.reuseVerifiedLocal
+        ? syncService.reuseVerifiedActivation(
+            options.reuseVerifiedLocal.skills,
+            options.reuseVerifiedLocal.definitionRevision,
+          )
+        : undefined;
+      const sync = reused ?? await syncService.reconcileActivationFromCloudOnly();
       return { sync, workspaceExisted: activation.existed, activation };
     } catch (error) {
       const failure = error instanceof BotSkillCloudRestoreError
