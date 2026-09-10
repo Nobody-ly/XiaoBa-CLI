@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { isEphemeralSkillDirectory } from './local-manifest';
 
 export interface BotSkillPendingSnapshotOptions {
   runtimeRoot: string;
@@ -42,9 +43,9 @@ interface PendingSnapshotManifest {
 }
 
 /**
- * Preserves a complete local Skill workspace before Cloud-authoritative
- * activation replaces it. The snapshot is evidence only and is never loaded
- * as an active Skill workspace.
+ * Preserves durable local Skill workspace content before Cloud-authoritative
+ * activation replaces it. Regenerable runtime directories are excluded. The
+ * snapshot is evidence only and is never loaded as an active Skill workspace.
  */
 export function snapshotPendingBotSkillWorkspace(
   options: BotSkillPendingSnapshotOptions,
@@ -120,6 +121,9 @@ function listWorkspaceFiles(root: string): PendingSnapshotFile[] {
   const files: PendingSnapshotFile[] = [];
   const visit = (directory: string): void => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      // Only skip real runtime directories. A symlink with an ephemeral name
+      // still reaches lstat below and is rejected fail-closed.
+      if (entry.isDirectory() && isEphemeralSkillDirectory(entry.name)) continue;
       const absolute = path.join(directory, entry.name);
       const relative = path.relative(root, absolute).split(path.sep).join('/');
       const stats = fs.lstatSync(absolute);

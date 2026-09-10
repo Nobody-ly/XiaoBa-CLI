@@ -105,6 +105,7 @@ describe('SkillHub local metadata', () => {
         '.mypy_cache',
         '.pytest_cache',
         '.ruff_cache',
+        '.venv',
         '__pycache__',
       ]) {
         const cacheFile = path.join(skillDir, directory, 'runtime.bin');

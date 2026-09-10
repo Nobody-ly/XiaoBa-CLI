@@ -88,6 +88,7 @@ describe('Bot Skill sync security boundaries', () => {
       path.join(skillRoot, '.cache', 'quant_cache.db'),
       path.join(skillRoot, '.mypy_cache', 'state.bin'),
       path.join(skillRoot, '.ruff_cache', 'state.bin'),
+      path.join(skillRoot, '.venv', 'lib', 'python', 'site-packages', 'runtime.bin'),
       path.join(skillRoot, '__pycache__', 'module.pyc'),
       path.join(skillRoot, '.pytest_cache', 'state.bin'),
     ];

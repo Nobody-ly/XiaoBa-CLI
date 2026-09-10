@@ -35,6 +35,7 @@ const EPHEMERAL_DIRECTORIES = new Set([
   '.mypy_cache',
   '.pytest_cache',
   '.ruff_cache',
+  '.venv',
   '__pycache__',
 ]);
 const SKIP_FILES = new Set([
