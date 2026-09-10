@@ -28,7 +28,7 @@ import {
 import { PromptManager } from '../utils/prompt-manager';
 import { Logger } from '../utils/logger';
 import { SessionTurnLogger } from '../utils/session-turn-logger';
-import { Metrics } from '../utils/metrics';
+import { MetricsCollector } from '../utils/metrics';
 import { ContextWindowManager } from './context-window-manager';
 import {
   RuntimeFeedbackInbox,
@@ -68,8 +68,17 @@ import {
   resolveCheckpointInputLimitTokens,
   type CheckpointCompactionPhase,
   isCheckpointCompactionEnabled,
+  splitDurableAndTransient,
 } from './checkpoint-compaction';
 import { estimateToolsTokens } from './token-estimator';
+import {
+  CHECKPOINT_CANDIDATE_DEADLINE_MS,
+  CheckpointCandidate,
+  createCheckpointSnapshot,
+  hashMessages,
+  hasCompleteToolExchanges,
+  resolveCheckpointSummaryThresholds,
+} from './checkpoint-candidate';
 import type { SessionRuntimeLogEvent, TurnErrorPayload } from '../utils/session-log-schema';
 
 export type { RuntimeFeedbackInput, RuntimeFeedbackOptions } from './runtime-feedback-inbox';
@@ -93,6 +102,19 @@ export const CONTEXT_COMPACTION_GENERATED_MESSAGE = '上下文摘要已生成，
 export const CONTEXT_COMPACTION_COMPLETE_MESSAGE = '检查点已保存，继续处理当前请求。';
 export const CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文并安全停止本轮。';
 export const LEGACY_CONTEXT_COMPACTION_ERROR_MESSAGE = '上下文压缩失败，已保留原上下文继续处理。';
+export const CONTEXT_CHECKPOINT_BLOCKED_MESSAGE = '上下文检查点创建失败，会话已冻结以保护完整历史。请清空会话或恢复模型配置后重试。';
+const CONTEXT_CHECKPOINT_BLOCKED_ERROR = 'CONTEXT_CHECKPOINT_BLOCKED';
+const CHECKPOINT_CANDIDATE_TTL_MS = CHECKPOINT_CANDIDATE_DEADLINE_MS;
+const CHECKPOINT_PROVIDER_REQUEST_LIMIT = 18;
+
+interface CheckpointContextUsage {
+  usedTokens: number;
+  toolTokens?: number;
+  maxTokens: number;
+  usagePercent: number;
+}
+
+type CheckpointUsageResolver = (messages: Message[]) => CheckpointContextUsage;
 
 // ─── 接口定义 ───────────────────────────────────────────
 
@@ -218,12 +240,28 @@ export class AgentSession {
   private turnController: AgentTurnController;
   private contextWindowManager: ContextWindowManager;
   private checkpointCompactionCoordinator: CheckpointCompactionCoordinator;
+  private checkpointCandidateCoordinator: CheckpointCompactionCoordinator;
   private readonly useCheckpointCompaction: boolean;
+  private readonly useCheckpointCandidates: boolean;
+  private readonly checkpointSummaryStartRatio: number;
+  private readonly checkpointSummaryStopRatio: number;
+  private checkpointCandidate: CheckpointCandidate | null = null;
+  private checkpointCandidatePromise: Promise<boolean> | null = null;
+  private checkpointCandidateAbortController: AbortController | null = null;
+  private checkpointCandidateSuppressed = false;
+  /** A failed candidate still requires serial fallback once the stop point is reached. */
+  private checkpointCandidateFallbackRequired = false;
+  private checkpointBlockedReason: string | null = null;
+  private checkpointCandidateSequence = 0;
+  /** Epoch for destructive transcript replacement; tail appends keep the same epoch. */
+  private checkpointRevision = 0;
   private skillRuntime: SessionSkillRuntime;
   private runtimeFeedbackInbox = new RuntimeFeedbackInbox();
   private planRuntime = new PlanRuntime();
   private lifecycleManager: SessionLifecycleManager;
   private readonly defaultDirectory: string;
+  private readonly metrics = new MetricsCollector();
+  private resumeInFlight = false;
   private currentDirectory: string;
 
   constructor(
@@ -244,15 +282,26 @@ export class AgentSession {
       contextWindow.promptBudgetTokens,
       contextWindow.maxOutputTokens,
     );
+    const checkpointSummaryThresholds = resolveCheckpointSummaryThresholds(
+      contextWindow.contextWindowTokens,
+      checkpointInputLimit,
+    );
+    this.checkpointSummaryStartRatio = checkpointSummaryThresholds.startTokens
+      / contextWindow.contextWindowTokens;
+    this.checkpointSummaryStopRatio = checkpointSummaryThresholds.stopTokens
+      / contextWindow.contextWindowTokens;
     Logger.info(
       `[${key}] 模型上下文: ${contextWindow.label} window=${contextWindow.contextWindowTokens}, `
-      + `checkpointLimit=${checkpointInputLimit}, promptBudget=${contextWindow.promptBudgetTokens}, `
+      + `summaryStart=${checkpointSummaryThresholds.startTokens}, `
+      + `checkpointLimit=${checkpointSummaryThresholds.stopTokens}, `
+      + `promptBudget=${contextWindow.promptBudgetTokens}, `
       + `reserve=${contextWindow.safetyReserveTokens}`,
     );
     this.contextWindowManager = new ContextWindowManager(services.aiService, {
       maxContextTokens: contextWindow.promptBudgetTokens,
       summaryContentBudget: contextWindow.summaryBudgetTokens,
     });
+    const checkpointCandidatesEnabled = process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED !== 'false';
     this.checkpointCompactionCoordinator = new CheckpointCompactionCoordinator(
       services.aiService,
       {
@@ -260,7 +309,18 @@ export class AgentSession {
         compactionTriggerTokens: checkpointInputLimit,
       },
     );
+    this.checkpointCandidateCoordinator = new CheckpointCompactionCoordinator(
+      services.aiService,
+      {
+        maxContextTokens: contextWindow.contextWindowTokens,
+        // Eligibility is decided by AgentSession using provider-calibrated
+        // usage. Once a snapshot is accepted, this coordinator must summarize
+        // it even when its local tokenizer underestimates the provider prompt.
+        compactionTriggerTokens: 1,
+      },
+    );
     this.useCheckpointCompaction = isCheckpointCompactionEnabled();
+    this.useCheckpointCandidates = checkpointCandidatesEnabled;
     this.skillRuntime = new SessionSkillRuntime(services.skillManager, key);
     this.lifecycleManager = new SessionLifecycleManager({
       sessionKey: key,
@@ -290,11 +350,35 @@ export class AgentSession {
       checkpointCompactionCoordinator: this.useCheckpointCompaction
         ? this.checkpointCompactionCoordinator
         : undefined,
+      metrics: this.metrics,
       persistCheckpoint: messages => {
         if (!this.persistCheckpoint(messages)) {
           throw new Error('Failed to persist continuation checkpoint');
         }
       },
+      checkpointCandidateBoundary: this.useCheckpointCompaction
+        ? (messages, tools, promptOverheadTokens, finalizeOnly) => this.handleCheckpointCandidateBoundary(
+          messages,
+          this.lifecycleGeneration,
+          'mid_turn',
+          tools ? estimateToolsTokens(tools) : undefined,
+          promptOverheadTokens,
+          finalizeOnly,
+        )
+        : undefined,
+      beforeModelRequest: this.useCheckpointCompaction
+        ? (messages, tools, promptOverheadTokens = 0) => {
+          if (this.checkpointBlockedReason) {
+            throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+          }
+          const toolTokens = estimateToolsTokens(tools);
+          const usage = this.getContextUsageInfo(messages, toolTokens, promptOverheadTokens);
+          if (usage.usedTokens + (usage.toolTokens || 0)
+            > usage.maxTokens * this.checkpointSummaryStopRatio) {
+            throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+          }
+        }
+        : undefined,
     });
 
     const runtimeFeedbackInbox = this.runtimeFeedbackInbox;
@@ -438,6 +522,7 @@ export class AgentSession {
         '恢复后',
         compactionSignal,
         options.callbacks,
+        0,
       );
       if (compactionSignal?.aborted || this.interruptRequested || lifecycleGeneration !== this.lifecycleGeneration) {
         Logger.info(`[会话 ${this.key}] 当前请求已取消或会话已重置，忽略恢复压缩的旧结果`);
@@ -526,6 +611,9 @@ export class AgentSession {
       messagesBeforeCompaction,
       'restore',
       '群聊历史补入',
+      undefined,
+      undefined,
+      0,
     );
     if (lifecycleGeneration !== this.lifecycleGeneration) return false;
     this.messages = compactionResult.messages;
@@ -663,12 +751,19 @@ export class AgentSession {
       if (this.busy) {
         return { text: BUSY_MESSAGE, visibleToUser: true };
       }
+      if (this.checkpointBlockedReason) {
+        return {
+          text: CONTEXT_CHECKPOINT_BLOCKED_MESSAGE,
+          visibleToUser: true,
+          taskOutcome: 'failed',
+        };
+      }
       const lifecycleGeneration = this.lifecycleGeneration;
 
       const runtimeFeedback = this.consumeRuntimeFeedback(runtimeFeedbackInputs);
 
       // 按"单次消息"统计 metrics，避免跨轮次累积导致定位困难
-      Metrics.reset();
+      this.metrics.reset();
 
       this.busy = true;
       this.interruptRequested = false;
@@ -686,13 +781,21 @@ export class AgentSession {
 
       try {
         const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(this.messages);
-        const compactionResult = await this.compactContextIfNeeded(
+        const messagesForCompaction = await this.handleCheckpointCandidateBoundary(
           messagesBeforeCompaction,
+          lifecycleGeneration,
           'pre_turn',
-          '处理前',
-          this.activeAbortController.signal,
-          callbacks,
+          0,
         );
+        const compactionResult = this.useCheckpointCompaction && this.useCheckpointCandidates
+          ? { messages: messagesForCompaction, compacted: false }
+          : await this.compactContextIfNeeded(
+            messagesForCompaction,
+            'pre_turn',
+            '处理前',
+            this.activeAbortController.signal,
+            callbacks,
+          );
         if (this.interruptRequested || this.activeAbortController.signal.aborted) {
           Logger.info(`[会话 ${this.key}] 当前请求已取消，忽略压缩在中断后的返回`);
           this.saveInterruptedContextIfCurrent(lifecycleGeneration);
@@ -700,6 +803,7 @@ export class AgentSession {
         }
         if (compactionResult.compacted) {
           if (this.persistCheckpoint(compactionResult.messages)) {
+            this.checkpointRevision++;
             this.messages = compactionResult.messages;
             await this.notifyContextCompaction(callbacks, CONTEXT_COMPACTION_COMPLETE_MESSAGE);
           } else {
@@ -710,6 +814,15 @@ export class AgentSession {
           }
         } else {
           this.messages = compactionResult.messages;
+        }
+        if (this.useCheckpointCompaction
+          && this.isCheckpointCandidateSerialThresholdReached(
+            this.getContextUsageInfo(
+              this.messages,
+              this.useCheckpointCandidates ? 0 : this.getToolDefinitionTokens(),
+            ),
+          )) {
+          throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
         }
 
         failurePhase = 'session_init';
@@ -766,6 +879,22 @@ export class AgentSession {
           this.messages = this.turnContextBuilder.removeTransientMessages(this.messages);
           this.saveInterruptedContextIfCurrent(lifecycleGeneration);
           return { text: '已停止当前请求。', visibleToUser: true, taskOutcome: 'cancelled' };
+        }
+
+        if (String(err?.message || err) === CONTEXT_CHECKPOINT_BLOCKED_ERROR
+          || String(err?.cause?.message || '') === CONTEXT_CHECKPOINT_BLOCKED_ERROR) {
+          this.checkpointBlockedReason ??= CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+          const blockedMessages = this.getPartialMessagesFromError(err) || this.messages;
+          this.messages = stripAssistantArtifactsFromMessages(
+            this.turnContextBuilder.removeTransientMessages(blockedMessages),
+          );
+          this.lifecycleManager.saveContext(this.messages);
+          Logger.error(`[会话 ${this.key}] 上下文检查点失败，会话已冻结并保留完整历史`);
+          return {
+            text: CONTEXT_CHECKPOINT_BLOCKED_MESSAGE,
+            visibleToUser: true,
+            taskOutcome: 'failed',
+          };
         }
 
         const recoveredMessages = this.getPartialMessagesFromError(err);
@@ -864,6 +993,9 @@ export class AgentSession {
 
         return { text: errorReply, visibleToUser: true, taskOutcome: 'failed' };
       } finally {
+        if (this.interruptRequested || lifecycleGeneration !== this.lifecycleGeneration) {
+          this.cancelCheckpointCandidate();
+        }
         this.planRuntime.clear();
         scheduleCurrentBotPromptReconcile();
         this.busy = false;
@@ -887,6 +1019,18 @@ export class AgentSession {
       if (commandName === 'stop') {
         this.requestInterrupt();
         return { handled: true, reply: '正在停止当前请求...' };
+      }
+
+      // /resume - retry a recoverable checkpoint without deleting history
+      if (commandName === 'resume') {
+        if (this.busy) return { handled: true, reply: BUSY_MESSAGE };
+        const resumed = await this.resumeCheckpoint();
+        return {
+          handled: true,
+          reply: resumed
+            ? '会话已恢复，完整历史已保留，可以继续对话。'
+            : CONTEXT_CHECKPOINT_BLOCKED_MESSAGE,
+        };
       }
 
       // /clear
@@ -931,10 +1075,65 @@ export class AgentSession {
 
   // ─── 生命周期 ──────────────────────────────────────
 
+  /** Retry a blocked checkpoint using the latest transcript without clearing it. */
+  async resumeCheckpoint(): Promise<boolean> {
+    if (this.busy || this.resumeInFlight) return false;
+    this.resumeInFlight = true;
+    try {
+      const generation = this.lifecycleGeneration;
+      if (!this.checkpointBlockedReason) return true;
+      const source = stripAssistantArtifactsFromMessages(
+        this.turnContextBuilder.removeTransientMessages(this.messages),
+      );
+      // Recovery is deliberately synchronous; it must not launch another candidate.
+      const coordinator = this.checkpointCompactionCoordinator;
+      let result;
+      try {
+        result = await coordinator.compactIfNeeded(source, {
+          sessionKey: this.key,
+          phase: 'restore',
+          toolTokens: this.getToolDefinitionTokens(),
+          providerRequestBudget: { maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT, usedRequests: 0 },
+          recordMetrics: false,
+          metrics: this.metrics,
+        });
+      } catch (error) {
+        if (generation === this.lifecycleGeneration) {
+          this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+        }
+        Logger.warning(`[会话 ${this.key}] resume checkpoint failed closed: ${String((error as any)?.message || error)}`);
+        return false;
+      }
+      if (generation !== this.lifecycleGeneration) return false;
+      if (result.compacted) {
+        if (this.isCheckpointCandidateSerialThresholdReached(this.getContextUsageInfo(result.messages))
+          || !this.persistCheckpoint(result.messages)) {
+          this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+          return false;
+        }
+        this.checkpointRevision++;
+        this.messages = result.messages;
+      } else if (this.isCheckpointCandidateSerialThresholdReached(this.getContextUsageInfo(source))) {
+        this.checkpointBlockedReason = CONTEXT_CHECKPOINT_BLOCKED_ERROR;
+        return false;
+      }
+      this.checkpointBlockedReason = null;
+      this.checkpointCandidateFallbackRequired = false;
+      this.checkpointCandidateSuppressed = false;
+      return true;
+    } finally {
+      this.resumeInFlight = false;
+    }
+  }
+
   /** 重置会话状态（仅清内存，保留历史文件） */
   reset(): void {
     this.lifecycleGeneration++;
     this.activeAbortController?.abort();
+    this.checkpointRevision++;
+    this.cancelCheckpointCandidate();
+    this.checkpointCandidateFallbackRequired = false;
+    this.checkpointBlockedReason = null;
     this.planRuntime.clear();
     this.stopSubAgents('父会话 reset');
     this.messages = [];
@@ -950,6 +1149,10 @@ export class AgentSession {
   clear(): boolean {
     this.lifecycleGeneration++;
     this.activeAbortController?.abort();
+    this.checkpointRevision++;
+    this.cancelCheckpointCandidate();
+    this.checkpointCandidateFallbackRequired = false;
+    this.checkpointBlockedReason = null;
     this.planRuntime.clear();
     this.stopSubAgents('父会话 clear');
     this.messages = [];
@@ -963,8 +1166,11 @@ export class AgentSession {
   }
 
   async summarizeAndDestroy(): Promise<boolean> {
+    this.lifecycleGeneration++;
+    this.checkpointRevision++;
     return this.withLogContext(async () => {
       this.planRuntime.clear();
+      this.cancelCheckpointCandidate();
       this.stopSubAgents('父会话退出');
       if (this.messages.length === 0) return false;
       this.messages = [];
@@ -974,7 +1180,10 @@ export class AgentSession {
 
   /** 过期或退出时清理内存（保存完整 context） */
   async cleanup(options: SessionCleanupOptions = {}): Promise<void> {
+    this.lifecycleGeneration++;
+    this.checkpointRevision++;
     return this.withLogContext(async () => {
+      this.cancelCheckpointCandidate();
       if (options.stopSubAgents) {
         this.stopSubAgents(options.subAgentStopReason || '父会话清理');
       }
@@ -1005,7 +1214,12 @@ export class AgentSession {
 
   /** 请求中断当前运行中的对话回合 */
   requestInterrupt(): void {
+    if (this.resumeInFlight) {
+      this.lifecycleGeneration++;
+      this.checkpointRevision++;
+    }
     this.stopSubAgents('用户请求中止');
+    this.cancelCheckpointCandidate();
     if (!this.busy) return;
     this.interruptRequested = true;
     this.activeAbortController?.abort();
@@ -1024,6 +1238,478 @@ export class AgentSession {
   }
 
   // ─── 私有方法 ──────────────────────────────────────
+
+  private commitReadyCheckpointCandidate(
+    messages: Message[],
+    resolveUsage: CheckpointUsageResolver = candidateMessages => this.getContextUsageInfo(candidateMessages),
+  ): Message[] | null {
+    const candidate = this.checkpointCandidate;
+    if (!candidate || candidate.status !== 'ready') return null;
+    const { durable, transient } = splitDurableAndTransient(messages);
+    const boundaryMessages = durable.slice(0, candidate.snapshot.boundaryMessageCount);
+    const boundaryEpisodeId = [...boundaryMessages].reverse()
+      .find(message => message.__episodeId)?.__episodeId;
+    const prepared = candidate.prepareCommit(
+      durable,
+      this.checkpointRevision,
+      boundaryEpisodeId,
+    );
+    if (!prepared.messages) {
+      if (prepared.status === 'stale') {
+        this.checkpointCandidateFallbackRequired = true;
+        this.logCheckpointCandidateEvent(candidate, 'stale', 'async_candidate');
+        this.clearCheckpointCandidateSlot(candidate);
+      }
+      return null;
+    }
+    const committedMessages = [...prepared.messages, ...transient];
+    if (this.isCheckpointCandidateSerialThresholdReached(
+      resolveUsage(committedMessages),
+    )) {
+      this.checkpointCandidateFallbackRequired = true;
+      this.cancelCheckpointCandidate();
+      return null;
+    }
+    if (!hasCompleteToolExchanges(committedMessages)) {
+      this.checkpointCandidateFallbackRequired = true;
+      this.cancelCheckpointCandidate();
+      return null;
+    }
+    if (!this.persistCheckpoint(committedMessages)) {
+      this.checkpointCandidateFallbackRequired = true;
+      this.cancelCheckpointCandidate();
+      Logger.warning(`[会话 ${this.key}] 异步检查点持久化失败，保留原始上下文`);
+      return null;
+    }
+    if (!candidate.confirmCommit()) {
+      // Persistence succeeded, so keep memory aligned with the durable projection.
+      candidate.cancel();
+      this.checkpointRevision++;
+      this.checkpointCandidateFallbackRequired = false;
+      this.checkpointCandidate = null;
+      this.checkpointCandidateAbortController = null;
+      this.checkpointCandidatePromise = null;
+      return committedMessages;
+    }
+    this.checkpointRevision++;
+    this.checkpointCandidateFallbackRequired = false;
+    this.checkpointCandidate = null;
+    this.checkpointCandidateAbortController = null;
+    this.checkpointCandidatePromise = null;
+    this.logCheckpointCandidateEvent(candidate, 'committed', 'async_candidate');
+    return committedMessages;
+  }
+
+  private async handleCheckpointCandidateBoundary(
+    messages: Message[],
+    lifecycleGeneration: number,
+    phase: CheckpointCompactionPhase = 'mid_turn',
+    toolTokens = this.getToolDefinitionTokens(),
+    promptOverheadTokens = 0,
+    finalizeOnly = false,
+  ): Promise<Message[]> {
+    const messagesBeforeCompaction = stripAssistantArtifactsFromMessages(messages);
+    const getBoundaryUsage = (candidateMessages: Message[]) => this.getContextUsageInfo(
+      candidateMessages,
+      toolTokens,
+      promptOverheadTokens,
+    );
+    // A completed Episode must never be turned into a failure by background
+    // summary state. Finalization may publish an already-ready candidate only;
+    // any block is enforced before the next parent-model request.
+    if (finalizeOnly) {
+      if (!this.useCheckpointCompaction || !this.useCheckpointCandidates) {
+        return messagesBeforeCompaction;
+      }
+      this.coordinateCheckpointCandidate(messagesBeforeCompaction, getBoundaryUsage);
+      return this.commitReadyCheckpointCandidate(messagesBeforeCompaction, getBoundaryUsage)
+        ?? messagesBeforeCompaction;
+    }
+    if (this.checkpointBlockedReason) {
+      throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+    }
+    if (!this.useCheckpointCompaction || !this.useCheckpointCandidates) {
+      return messagesBeforeCompaction;
+    }
+    const stopPointReached = this.isCheckpointCandidateSerialThresholdReached(
+      getBoundaryUsage(messagesBeforeCompaction),
+    );
+    this.coordinateCheckpointCandidate(messagesBeforeCompaction, getBoundaryUsage);
+    await this.waitForCheckpointCandidateAtStopPoint(messagesBeforeCompaction, getBoundaryUsage);
+    this.coordinateCheckpointCandidate(messagesBeforeCompaction, getBoundaryUsage);
+    const committed = this.commitReadyCheckpointCandidate(messagesBeforeCompaction, getBoundaryUsage);
+    if (committed) return committed;
+    if (this.checkpointBlockedReason === 'checkpoint_authentication') {
+      throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+    }
+
+    if (stopPointReached) {
+      const fallback = await this.runSerialCheckpointFallback(
+        messagesBeforeCompaction,
+        phase,
+        getBoundaryUsage,
+        toolTokens,
+      );
+      if (fallback) return fallback;
+      if (this.activeAbortController?.signal.aborted) return messagesBeforeCompaction;
+      this.checkpointCandidateFallbackRequired = true;
+      throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
+    }
+
+    this.startCheckpointCandidateIfEligible(
+      lifecycleGeneration,
+      messagesBeforeCompaction,
+      phase,
+      getBoundaryUsage,
+      toolTokens,
+    );
+    return messagesBeforeCompaction;
+  }
+
+  /**
+   * The stop point is a safety barrier, not a second summary design. Reuse the
+   * same candidate/retry/CAS path against the latest durable transcript while
+   * the parent Agent is paused.
+   */
+  private async runSerialCheckpointFallback(
+    messages: Message[],
+    phase: CheckpointCompactionPhase,
+    resolveUsage: CheckpointUsageResolver = candidateMessages => this.getContextUsageInfo(candidateMessages),
+    toolTokens = this.getToolDefinitionTokens(),
+  ): Promise<Message[] | null> {
+    const { durable, transient } = splitDurableAndTransient(messages);
+    const episodeId = [...durable].reverse().find(message => message.__episodeId)?.__episodeId;
+    const candidate = new CheckpointCandidate(
+      `checkpoint:${this.key}:serial:${++this.checkpointCandidateSequence}`,
+      createCheckpointSnapshot(durable, {
+        revision: this.checkpointRevision,
+        episodeId,
+      }),
+    );
+    candidate.markStopReached();
+    this.logCheckpointCandidateEvent(candidate, 'started', 'serial_fallback');
+
+    const abortController = new AbortController();
+    const parentSignal = this.activeAbortController?.signal;
+    const abortFromParent = () => abortController.abort();
+    if (parentSignal?.aborted) abortController.abort();
+    else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    const deadlineTimer = setTimeout(
+      () => abortController.abort(),
+      CHECKPOINT_CANDIDATE_TTL_MS,
+    );
+    deadlineTimer.unref?.();
+
+    try {
+      const generated = await candidate.generate(this.checkpointCandidateCoordinator, {
+        sessionKey: this.key,
+        phase,
+        episodeId,
+        toolTokens,
+        signal: abortController.signal,
+        providerRequestBudget: {
+          maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT,
+          usedRequests: 0,
+        },
+        recordMetrics: true,
+        metricsScope: 'turn',
+        metrics: this.metrics,
+        metricsContext: {
+          sessionKey: this.key,
+          candidateId: candidate.id,
+          episodeId,
+          phase,
+        },
+      });
+      if (!generated) {
+        this.logCheckpointCandidateEvent(candidate, 'failed', 'serial_fallback');
+        if (candidate.failureReason === 'authentication') {
+          this.checkpointBlockedReason = 'checkpoint_authentication';
+          this.lifecycleManager.saveContext(this.messages);
+        }
+        return null;
+      }
+
+      const prepared = candidate.prepareCommit(
+        durable,
+        this.checkpointRevision,
+        episodeId,
+      );
+      if (!prepared.messages) {
+        this.logCheckpointCandidateEvent(candidate, candidate.status, 'serial_fallback');
+        return null;
+      }
+      const committedMessages = [...prepared.messages, ...transient];
+      if (this.isCheckpointCandidateSerialThresholdReached(
+        resolveUsage(committedMessages),
+      ) || !hasCompleteToolExchanges(committedMessages)) {
+        candidate.cancel();
+        this.logCheckpointCandidateEvent(candidate, 'failed', 'serial_fallback');
+        return null;
+      }
+      if (!this.persistCheckpoint(committedMessages)) {
+        candidate.cancel();
+        this.logCheckpointCandidateEvent(candidate, 'failed', 'serial_fallback');
+        Logger.warning(`[会话 ${this.key}] 串行检查点持久化失败，保留原始上下文`);
+        return null;
+      }
+      candidate.confirmCommit();
+      this.checkpointRevision++;
+      this.checkpointCandidateFallbackRequired = false;
+      this.checkpointCandidateSuppressed = false;
+      this.logCheckpointCandidateEvent(candidate, 'committed', 'serial_fallback');
+      return committedMessages;
+    } finally {
+      clearTimeout(deadlineTimer);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    }
+  }
+
+  private async waitForCheckpointCandidateAtStopPoint(
+    messages: Message[],
+    resolveUsage: CheckpointUsageResolver = candidateMessages => this.getContextUsageInfo(candidateMessages),
+  ): Promise<void> {
+    if (!this.checkpointCandidate || !this.checkpointCandidatePromise) return;
+    const usage = resolveUsage(messages);
+    if (!this.isCheckpointCandidateSerialThresholdReached(usage)) return;
+    const candidate = this.checkpointCandidate;
+    const generation = this.checkpointCandidatePromise;
+    candidate.markStopReached();
+    const remainingMs = Math.max(
+      0,
+      CHECKPOINT_CANDIDATE_TTL_MS - (Date.now() - candidate.snapshot.startedAt),
+    );
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'deadline'>(resolve => {
+      deadlineTimer = setTimeout(() => resolve('deadline'), remainingMs);
+      deadlineTimer.unref?.();
+    });
+    const outcome = await Promise.race([
+      generation.then(() => 'settled' as const),
+      deadline,
+    ]);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (outcome === 'deadline' && candidate.status === 'running') {
+      this.checkpointCandidateAbortController?.abort();
+      candidate.fail('deadline');
+      this.logCheckpointCandidateEvent(candidate, 'failed', 'async_candidate');
+      if (this.checkpointCandidate === candidate) {
+        this.checkpointCandidateFallbackRequired = true;
+        this.checkpointCandidate = null;
+        this.checkpointCandidateAbortController = null;
+        this.checkpointCandidatePromise = null;
+        this.checkpointCandidateSuppressed = true;
+      }
+    }
+  }
+
+  private coordinateCheckpointCandidate(
+    messages: Message[],
+    resolveUsage: CheckpointUsageResolver = candidateMessages => this.getContextUsageInfo(candidateMessages),
+  ): void {
+    if (!this.checkpointCandidate) return;
+    if (this.checkpointCandidate.status === 'running'
+      && Date.now() - this.checkpointCandidate.snapshot.startedAt >= CHECKPOINT_CANDIDATE_TTL_MS) {
+      this.checkpointCandidateFallbackRequired = true;
+      this.cancelCheckpointCandidate();
+      return;
+    }
+    const usage = resolveUsage(messages);
+    if (this.isCheckpointCandidateSerialThresholdReached(usage)) {
+      return;
+    }
+    if (this.checkpointCandidate.status === 'ready') {
+      const durable = splitDurableAndTransient(messages).durable;
+      const boundary = this.checkpointCandidate.snapshot.boundaryMessageCount;
+      const currentBoundary = durable.slice(0, boundary);
+      if (currentBoundary.length !== boundary
+        || this.checkpointCandidate.snapshot.durableHash !== hashMessages(currentBoundary)) {
+        this.checkpointCandidateFallbackRequired = true;
+        this.cancelCheckpointCandidate();
+      }
+    }
+  }
+
+  private startCheckpointCandidateIfEligible(
+    lifecycleGeneration: number,
+    messages: Message[] = this.messages,
+    phase: CheckpointCompactionPhase = 'pre_turn',
+    resolveUsage: CheckpointUsageResolver = candidateMessages => this.getContextUsageInfo(candidateMessages),
+    toolTokens = this.getToolDefinitionTokens(),
+  ): void {
+    if (
+      !this.useCheckpointCompaction
+      || !this.useCheckpointCandidates
+      || this.checkpointCandidate
+      || this.checkpointCandidateFallbackRequired
+    ) return;
+    const usage = resolveUsage(messages);
+    if (this.checkpointCandidateSuppressed && !this.isCheckpointCandidateTriggerReached(usage)) {
+      this.checkpointCandidateSuppressed = false;
+    }
+    if (this.checkpointCandidateSuppressed) return;
+    if (!this.isCheckpointCandidateTriggerReached(usage)
+      || this.isCheckpointCandidateSerialThresholdReached(usage)) return;
+
+    const durableMessages = splitDurableAndTransient(
+      this.turnContextBuilder.removeTransientMessages(stripAssistantArtifactsFromMessages(messages)),
+    ).durable;
+    const episodeId = [...durableMessages].reverse().find(message => message.__episodeId)?.__episodeId;
+    const candidate = new CheckpointCandidate(
+      `checkpoint:${this.key}:${++this.checkpointCandidateSequence}`,
+      createCheckpointSnapshot(
+        durableMessages,
+        {
+          revision: this.checkpointRevision,
+          episodeId,
+        },
+      ),
+    );
+    const abortController = new AbortController();
+    this.checkpointCandidate = candidate;
+    this.checkpointCandidateAbortController = abortController;
+    this.logCheckpointCandidateEvent(candidate, 'started', 'async_candidate');
+
+    const deadlineTimer = setTimeout(() => abortController.abort(), CHECKPOINT_CANDIDATE_TTL_MS);
+    deadlineTimer.unref?.();
+    const generation = candidate.generate(this.checkpointCandidateCoordinator, {
+      sessionKey: this.key,
+      phase,
+      episodeId,
+      toolTokens,
+      signal: abortController.signal,
+      providerRequestBudget: {
+        maxRequests: CHECKPOINT_PROVIDER_REQUEST_LIMIT,
+        usedRequests: 0,
+      },
+      recordMetrics: true,
+      metricsScope: 'background',
+      metrics: this.metrics,
+      metricsContext: {
+        sessionKey: this.key,
+        candidateId: candidate.id,
+        episodeId,
+        phase,
+      },
+    });
+    this.checkpointCandidatePromise = generation;
+    void generation.finally(() => {
+      clearTimeout(deadlineTimer);
+      if (lifecycleGeneration !== this.lifecycleGeneration
+        || this.checkpointCandidate !== candidate) {
+        return;
+      }
+      this.checkpointCandidateAbortController = null;
+      this.checkpointCandidatePromise = null;
+      this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
+      if (candidate.status === 'failed') {
+        this.checkpointCandidateSuppressed = true;
+        if (candidate.failureReason !== 'authentication') {
+          this.checkpointCandidateFallbackRequired = true;
+        }
+        if (candidate.failureReason === 'authentication') {
+          this.checkpointBlockedReason = 'checkpoint_authentication';
+          this.lifecycleManager.saveContext(this.messages);
+        }
+        this.checkpointCandidate = null;
+      }
+    });
+  }
+
+  private isCheckpointCandidateSerialThresholdReached(usage: {
+    usedTokens: number;
+    toolTokens?: number;
+    maxTokens: number;
+  }): boolean {
+    return usage.usedTokens + (usage.toolTokens || 0)
+      > usage.maxTokens * this.checkpointSummaryStopRatio;
+  }
+
+  private isCheckpointCandidateTriggerReached(usage: {
+    usedTokens: number;
+    toolTokens?: number;
+    maxTokens: number;
+  }): boolean {
+    return usage.usedTokens + (usage.toolTokens || 0)
+      > usage.maxTokens * this.checkpointSummaryStartRatio;
+  }
+
+  private logCheckpointCandidateEvent(
+    candidate: CheckpointCandidate,
+    outcome: string,
+    mode: 'async_candidate' | 'serial_fallback',
+  ): void {
+    const config = typeof (this.services.aiService as any).getConfig === 'function'
+      ? (this.services.aiService as any).getConfig()
+      : {};
+    const endedAt = candidate.settledAt || candidate.readyAt || Date.now();
+    const terminalTimestamp = candidate.settledAt || endedAt;
+    Logger.runtimeEvent(
+      outcome === 'failed' ? 'WARN' : 'INFO',
+      `[${this.key}] checkpoint_summary mode=${mode} outcome=${outcome} candidate=${candidate.id}`,
+      {
+        type: 'checkpoint_summary',
+        payload: {
+          category: 'checkpoint_summary',
+          mode,
+          outcome,
+          failure_reason: candidate.failureReason,
+          candidate_id: candidate.id,
+          model: config.model,
+          provider: config.provider,
+          snapshot_tokens: candidate.snapshot.usedTokens,
+          started_at: candidate.snapshot.startedAt,
+          ready_at: candidate.readyAt,
+          settled_at: candidate.settledAt,
+          committed_at: outcome === 'committed' ? terminalTimestamp : undefined,
+          stale_at: outcome === 'stale' ? terminalTimestamp : undefined,
+          cancelled_at: outcome === 'cancelled' ? terminalTimestamp : undefined,
+          failed_at: outcome === 'failed' ? terminalTimestamp : undefined,
+          duration_ms: Math.max(0, endedAt - candidate.snapshot.startedAt),
+          summary_duration_ms: candidate.readyAt === undefined
+            ? undefined
+            : Math.max(0, candidate.readyAt - candidate.snapshot.startedAt),
+          trigger_to_stop_duration_ms: candidate.stopReachedAt === undefined
+            ? undefined
+            : Math.max(0, candidate.stopReachedAt - candidate.snapshot.startedAt),
+          stop_wait_duration_ms: candidate.stopReachedAt === undefined
+            ? undefined
+            : Math.max(0, endedAt - candidate.stopReachedAt),
+          attempts: candidate.attempts,
+          provider_requests: candidate.providerRequestBudget?.usedRequests || 0,
+          provider_request_limit: candidate.providerRequestBudget?.maxRequests
+            || CHECKPOINT_PROVIDER_REQUEST_LIMIT,
+          summary_attempts: candidate.summaryAttempts,
+          summary_input_tokens: candidate.summaryUsage.promptTokens,
+          summary_output_tokens: candidate.summaryUsage.completionTokens,
+          cache_read_tokens: candidate.summaryUsage.cachedReadTokens || 0,
+          cache_write_tokens: candidate.summaryUsage.cachedWriteTokens || 0,
+        },
+      },
+    );
+  }
+
+  private clearCheckpointCandidateSlot(candidate: CheckpointCandidate): void {
+    if (this.checkpointCandidate !== candidate) return;
+    this.checkpointCandidateAbortController?.abort();
+    this.checkpointCandidate = null;
+    this.checkpointCandidatePromise = null;
+    this.checkpointCandidateAbortController = null;
+  }
+
+  private cancelCheckpointCandidate(): void {
+    const candidate = this.checkpointCandidate;
+    candidate?.cancel();
+    if (candidate) {
+      this.logCheckpointCandidateEvent(candidate, candidate.status, 'async_candidate');
+      if (candidate.status === 'failed') this.checkpointCandidateSuppressed = true;
+      this.clearCheckpointCandidateSlot(candidate);
+      return;
+    }
+    this.checkpointCandidateAbortController?.abort();
+    this.checkpointCandidatePromise = null;
+    this.checkpointCandidateAbortController = null;
+  }
 
   private consumeRuntimeFeedback(inputs: RuntimeFeedbackInput[] = []): string[] {
     return this.runtimeFeedbackInbox.consume(inputs);
@@ -1123,8 +1809,13 @@ export class AgentSession {
     );
   }
 
-  private getContextUsageInfo(messages: Message[]): {
+  private getContextUsageInfo(
+    messages: Message[],
+    toolTokens = this.getToolDefinitionTokens(),
+    promptOverheadTokens = 0,
+  ): {
     usedTokens: number;
+    toolTokens?: number;
     maxTokens: number;
     usagePercent: number;
   } {
@@ -1133,7 +1824,8 @@ export class AgentSession {
     }
     return this.checkpointCompactionCoordinator.getUsageInfo(
       messages,
-      this.getToolDefinitionTokens(),
+      toolTokens,
+      promptOverheadTokens,
     );
   }
 
@@ -1143,25 +1835,23 @@ export class AgentSession {
     reason: string,
     signal?: AbortSignal,
     callbacks?: SessionCallbacks,
+    toolTokens = this.getToolDefinitionTokens(),
   ): Promise<{ messages: Message[]; compacted: boolean }> {
     if (!this.useCheckpointCompaction) {
-      const compactedMessages = await this.contextWindowManager.compactIfNeeded(messages, {
+      return this.contextWindowManager.compactIfNeeded(messages, {
         sessionKey: this.key,
         reason,
         signal,
         onStatus: this.createContextCompactionNotifier(callbacks, false),
       });
-      return {
-        messages: compactedMessages,
-        compacted: false,
-      };
     }
     return this.checkpointCompactionCoordinator.compactIfNeeded(messages, {
       sessionKey: this.key,
       phase,
-      toolTokens: this.getToolDefinitionTokens(),
+      toolTokens,
       signal,
       onStatus: this.createContextCompactionNotifier(callbacks, true),
+      metrics: this.metrics,
     });
   }
 
