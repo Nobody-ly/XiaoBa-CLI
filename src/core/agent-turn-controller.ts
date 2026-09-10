@@ -135,8 +135,17 @@ export interface AgentTurnControllerOptions {
   persistCheckpoint?: (messages: Message[]) => void | Promise<void>;
   /** Test/deployment override for repeated memory searches within one episode. */
   memoryBranchRefreshIntervalMs?: number;
-  checkpointCandidateBoundary?: (messages: Message[]) => Message[] | Promise<Message[]>;
-  beforeModelRequest?: (messages: Message[], tools: ToolDefinition[]) => void | Promise<void>;
+  checkpointCandidateBoundary?: (
+    messages: Message[],
+    tools?: ToolDefinition[],
+    promptOverheadTokens?: number,
+    finalizeOnly?: boolean,
+  ) => Message[] | Promise<Message[]>;
+  beforeModelRequest?: (
+    messages: Message[],
+    tools: ToolDefinition[],
+    promptOverheadTokens?: number,
+  ) => void | Promise<void>;
 }
 
 interface MemoryBranchSlot {
@@ -266,7 +275,12 @@ export class AgentTurnController {
       }
 
       if (this.options.checkpointCandidateBoundary) {
-        result.messages = await this.options.checkpointCandidateBoundary(result.messages);
+        result.messages = await this.options.checkpointCandidateBoundary(
+          result.messages,
+          [],
+          0,
+          true,
+        );
       }
       const nextMessages = this.options.turnContextBuilder.removeTransientMessages(result.messages);
 
