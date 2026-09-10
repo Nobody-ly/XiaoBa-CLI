@@ -14,7 +14,8 @@ export const CHECKPOINT_SUMMARY_PREFIX = [
   'Use this summary to continue the same task without repeating completed work:',
 ].join(' ');
 
-const DEFAULT_COMPACTION_THRESHOLD = 0.8;
+export const DEFAULT_CHECKPOINT_COMPACTION_THRESHOLD = 0.85;
+export const MIN_PHYSICAL_WINDOW_CHECKPOINT_TOKENS = 256_000;
 const MIN_RETAINED_USER_TOKEN_BUDGET = 8_000;
 const MAX_RETAINED_USER_TOKEN_BUDGET = 32_000;
 const RETAINED_USER_CONTEXT_RATIO = 0.15;
@@ -32,6 +33,7 @@ export type CheckpointCompactionPhase = 'pre_turn' | 'mid_turn' | 'restore';
 export interface CheckpointCompactionCoordinatorOptions {
   maxContextTokens: number;
   compactionThreshold?: number;
+  compactionTriggerTokens?: number;
   retainedUserTokenBudget?: number;
 }
 
@@ -40,6 +42,7 @@ export interface CheckpointCompactionRequest {
   phase: CheckpointCompactionPhase;
   episodeId?: string;
   toolTokens?: number;
+  promptOverheadTokens?: number;
   signal?: AbortSignal;
   onStatus?: (event: CheckpointCompactionStatusEvent) => void | Promise<void>;
 }
@@ -65,6 +68,12 @@ export interface CheckpointCompactionResult {
   usagePercent: number;
 }
 
+interface ProviderPromptUsageAnchor {
+  positiveCorrectionTokens: number;
+  durableMessageCount: number;
+  durablePrefixHash: string;
+}
+
 export class CheckpointPersistenceError extends Error {
   constructor(cause?: unknown) {
     super('Continuation checkpoint could not be persisted; the current turn was stopped before another model request.');
@@ -88,6 +97,42 @@ export function isCheckpointCompactionEnabled(
   return env.XIAOBA_CHECKPOINT_COMPACTION_ENABLED !== 'false';
 }
 
+export function calculateCheckpointInputLimitTokens(
+  contextWindowTokens: number,
+  threshold = DEFAULT_CHECKPOINT_COMPACTION_THRESHOLD,
+): number {
+  const safeWindow = Math.max(1, Math.floor(contextWindowTokens));
+  const ratio = readRatio(threshold, DEFAULT_CHECKPOINT_COMPACTION_THRESHOLD);
+  return Math.max(1, Math.floor(safeWindow * ratio));
+}
+
+/**
+ * The physical-window 85% policy is intentionally scoped to 256K+ models
+ * whose configured output fits in the remaining 15%. Smaller windows and
+ * unusually high-output configurations keep the legacy prompt budget so
+ * checkpoint compaction cannot remove their output headroom.
+ */
+export function resolveCheckpointInputLimitTokens(
+  contextWindowTokens: number,
+  legacyPromptBudgetTokens: number,
+  maxOutputTokens = 0,
+  threshold = DEFAULT_CHECKPOINT_COMPACTION_THRESHOLD,
+): number {
+  const safeWindow = Math.max(1, Math.floor(contextWindowTokens));
+  const physicalWindowLimit = calculateCheckpointInputLimitTokens(safeWindow, threshold);
+  const safeMaxOutput = Math.max(0, Math.floor(maxOutputTokens));
+  if (
+    safeWindow < MIN_PHYSICAL_WINDOW_CHECKPOINT_TOKENS
+    || physicalWindowLimit + safeMaxOutput > safeWindow
+  ) {
+    return Math.min(
+      safeWindow,
+      Math.max(1, Math.floor(legacyPromptBudgetTokens)),
+    );
+  }
+  return physicalWindowLimit;
+}
+
 /**
  * Codex-style continuation compaction for the main Agent.
  *
@@ -99,8 +144,10 @@ export function isCheckpointCompactionEnabled(
 export class CheckpointCompactionCoordinator {
   private readonly maxContextTokens: number;
   private readonly compactionThreshold: number;
+  private readonly compactionTriggerTokens: number;
   private readonly retainedUserTokenBudget: number;
   private lastUnproductiveSource?: string;
+  private providerUsageAnchor?: ProviderPromptUsageAnchor;
 
   constructor(
     private readonly aiService: AIService,
@@ -109,7 +156,17 @@ export class CheckpointCompactionCoordinator {
     this.maxContextTokens = Math.max(1, Math.floor(options.maxContextTokens));
     this.compactionThreshold = readRatio(
       options.compactionThreshold,
-      DEFAULT_COMPACTION_THRESHOLD,
+      DEFAULT_CHECKPOINT_COMPACTION_THRESHOLD,
+    );
+    this.compactionTriggerTokens = Math.min(
+      this.maxContextTokens,
+      Math.max(
+        1,
+        Math.floor(
+          options.compactionTriggerTokens
+          ?? this.maxContextTokens * this.compactionThreshold,
+        ),
+      ),
     );
     this.retainedUserTokenBudget = Math.max(
       256,
@@ -123,14 +180,66 @@ export class CheckpointCompactionCoordinator {
     );
   }
 
-  getUsageInfo(messages: Message[], toolTokens = 0): {
+  /**
+   * Calibrates local durable-context estimates from the provider's accounting
+   * for the exact request. One-shot transient hints are subtracted through the
+   * local request estimate instead of becoming permanent transcript weight.
+   *
+   * The durable prefix hash prevents a calibration from surviving compaction,
+   * restore, trimming, or any other non-append transcript mutation.
+   */
+  observeProviderPromptUsage(
+    promptTokens: number | undefined,
+    messagesAtRequest: Message[],
+    providerMessagesAtRequest: Message[],
+    toolTokens = 0,
+  ): void {
+    if (!Number.isFinite(promptTokens) || Number(promptTokens) <= 0) return;
+    if (Number(promptTokens) > this.maxContextTokens) {
+      this.providerUsageAnchor = undefined;
+      Logger.warning(
+        `[checkpoint] ignored impossible provider prompt usage: ${Math.floor(Number(promptTokens))}`
+        + ` > context window ${this.maxContextTokens}`,
+      );
+      return;
+    }
+    const durable = splitDurableAndTransient(messagesAtRequest).durable;
+    const localProviderTokens = estimateMessagesTokens(providerMessagesAtRequest)
+      + Math.max(0, Math.floor(toolTokens));
+    const positiveCorrectionTokens = Math.max(
+      0,
+      Math.floor(Number(promptTokens)) - localProviderTokens,
+    );
+    this.providerUsageAnchor = {
+      positiveCorrectionTokens,
+      durableMessageCount: durable.length,
+      durablePrefixHash: hashMessages(durable),
+    };
+  }
+
+  getUsageInfo(messages: Message[], toolTokens = 0, promptOverheadTokens = 0): {
     usedTokens: number;
     toolTokens: number;
     maxTokens: number;
     usagePercent: number;
   } {
-    const usedTokens = estimateMessagesTokens(splitDurableAndTransient(messages).durable);
+    const durable = splitDurableAndTransient(messages).durable;
+    const safePromptOverheadTokens = Math.max(0, Math.floor(promptOverheadTokens));
+    const localUsedTokens = estimateMessagesTokens(durable) + safePromptOverheadTokens;
     const safeToolTokens = Math.max(0, Math.floor(toolTokens));
+    const localTotalTokens = localUsedTokens + safeToolTokens;
+    const anchoredTotalTokens = this.getAnchoredTotalTokens(
+      durable,
+      safeToolTokens,
+      safePromptOverheadTokens,
+    );
+    // A malformed or incomplete upstream usage value must never reduce the
+    // local safety estimate. A valid higher value corrects tokenizer drift and
+    // also carries forward provider-visible prompt overhead.
+    const totalTokens = anchoredTotalTokens === undefined
+      ? localTotalTokens
+      : Math.max(localTotalTokens, anchoredTotalTokens);
+    const usedTokens = Math.max(0, totalTokens - safeToolTokens);
     return {
       usedTokens,
       toolTokens: safeToolTokens,
@@ -139,10 +248,28 @@ export class CheckpointCompactionCoordinator {
     };
   }
 
-  needsCompaction(messages: Message[], toolTokens = 0): boolean {
-    const usage = this.getUsageInfo(messages, toolTokens);
+  private getAnchoredTotalTokens(
+    durable: Message[],
+    toolTokens: number,
+    promptOverheadTokens: number,
+  ): number | undefined {
+    const anchor = this.providerUsageAnchor;
+    if (!anchor || durable.length < anchor.durableMessageCount) return undefined;
+    const currentPrefix = durable.slice(0, anchor.durableMessageCount);
+    if (hashMessages(currentPrefix) !== anchor.durablePrefixHash) return undefined;
+    return Math.max(
+      0,
+      estimateMessagesTokens(durable)
+        + promptOverheadTokens
+        + toolTokens
+        + anchor.positiveCorrectionTokens,
+    );
+  }
+
+  needsCompaction(messages: Message[], toolTokens = 0, promptOverheadTokens = 0): boolean {
+    const usage = this.getUsageInfo(messages, toolTokens, promptOverheadTokens);
     return usage.usedTokens + usage.toolTokens
-      > this.maxContextTokens * this.compactionThreshold;
+      > this.compactionTriggerTokens;
   }
 
   async compactIfNeeded(
@@ -150,8 +277,16 @@ export class CheckpointCompactionCoordinator {
     request: CheckpointCompactionRequest,
   ): Promise<CheckpointCompactionResult> {
     request.signal?.throwIfAborted();
-    const usage = this.getUsageInfo(messages, request.toolTokens);
-    if (!this.needsCompaction(messages, request.toolTokens)) {
+    const usage = this.getUsageInfo(
+      messages,
+      request.toolTokens,
+      request.promptOverheadTokens,
+    );
+    if (!this.needsCompaction(
+      messages,
+      request.toolTokens,
+      request.promptOverheadTokens,
+    )) {
       return { messages, compacted: false, ...usage };
     }
 
@@ -171,13 +306,17 @@ export class CheckpointCompactionCoordinator {
         return { messages, compacted: false, ...usage };
       }
       request.signal?.throwIfAborted();
-      if (estimateMessagesTokens(splitDurableAndTransient(result).durable) >= usage.usedTokens) {
+      const sourceDurableTokens = estimateMessagesTokens(
+        splitDurableAndTransient(messages).durable,
+      );
+      if (estimateMessagesTokens(splitDurableAndTransient(result).durable) >= sourceDurableTokens) {
         this.lastUnproductiveSource = sourceKey;
         await this.emitStatus(request, { status: 'skipped', sessionKey: request.sessionKey, phase: request.phase, ...usage });
         Logger.info(`[${request.sessionKey}] checkpoint did not reduce context; keeping the original transcript`);
         return { messages, compacted: false, ...usage };
       }
       this.lastUnproductiveSource = undefined;
+      this.providerUsageAnchor = undefined;
       await this.emitStatus(request, {
         status: 'complete',
         sessionKey: request.sessionKey,
@@ -857,4 +996,8 @@ function readRatio(value: number | undefined, fallback: number): number {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function hashMessages(messages: Message[]): string {
+  return createHash('sha256').update(JSON.stringify(messages)).digest('hex');
 }

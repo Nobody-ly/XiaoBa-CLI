@@ -6,10 +6,8 @@ import {
   CheckpointCompactionCoordinator,
 } from '../src/core/checkpoint-compaction';
 import { estimateMessagesTokens } from '../src/core/token-estimator';
-import { calculatePromptBudgetTokens } from '../src/utils/model-context-window';
 
 const CONTEXT_WINDOW_TOKENS = 256_000;
-const MAX_OUTPUT_TOKENS = 32_768;
 const TOOL_SCHEMA_TOKENS = 8_000;
 const SUMMARY_TOKENS = 4_000;
 
@@ -46,36 +44,32 @@ function createSummaryService(requests: Message[][]): any {
 
 function createCoordinator(requests: Message[][]): {
   coordinator: CheckpointCompactionCoordinator;
-  promptBudgetTokens: number;
+  contextWindowTokens: number;
   triggerTokens: number;
 } {
-  const budget = calculatePromptBudgetTokens(
-    CONTEXT_WINDOW_TOKENS,
-    MAX_OUTPUT_TOKENS,
-  );
   return {
     coordinator: new CheckpointCompactionCoordinator(
       createSummaryService(requests),
-      { maxContextTokens: budget.promptBudgetTokens },
+      { maxContextTokens: CONTEXT_WINDOW_TOKENS },
     ),
-    promptBudgetTokens: budget.promptBudgetTokens,
-    triggerTokens: Math.floor(budget.promptBudgetTokens * 0.8) + 1,
+    contextWindowTokens: CONTEXT_WINDOW_TOKENS,
+    triggerTokens: Math.floor(CONTEXT_WINDOW_TOKENS * 0.85) + 1,
   };
 }
 
 test('256K pre-turn scenario compacts old completed history and restores large headroom', async () => {
   const requests: Message[][] = [];
-  const { coordinator, promptBudgetTokens, triggerTokens } = createCoordinator(requests);
+  const { coordinator, contextWindowTokens, triggerTokens } = createCoordinator(requests);
   const messages: Message[] = [
     { role: 'system', content: englishText(8_000, 'Stable system prompt.\n') },
-    { role: 'user', content: englishText(78_000, 'Old objective.\n'), __episodeId: 'old-1' },
-    { role: 'assistant', content: englishText(66_000, 'Old completed work.\n'), __episodeId: 'old-1' },
+    { role: 'user', content: englishText(110_000, 'Old objective.\n'), __episodeId: 'old-1' },
+    { role: 'assistant', content: englishText(95_000, 'Old completed work.\n'), __episodeId: 'old-1' },
     { role: 'user', content: englishText(4_000, 'Most recent user correction.\n'), __episodeId: 'old-2' },
   ];
   const beforeTokens = estimateMessagesTokens(messages) + TOOL_SCHEMA_TOKENS;
 
-  assert.equal(promptBudgetTokens, 203_776);
-  assert.equal(triggerTokens, 163_021);
+  assert.equal(contextWindowTokens, 256_000);
+  assert.equal(triggerTokens, 217_601);
   assert.ok(beforeTokens >= triggerTokens);
 
   const result = await coordinator.compactIfNeeded(messages, {
@@ -86,7 +80,7 @@ test('256K pre-turn scenario compacts old completed history and restores large h
   const afterTokens = estimateMessagesTokens(result.messages) + TOOL_SCHEMA_TOKENS;
 
   assert.equal(result.compacted, true);
-  assert.ok(afterTokens < promptBudgetTokens * 0.25);
+  assert.ok(afterTokens < contextWindowTokens * 0.25);
   assert.ok(result.messages.some(message =>
     String(message.content).includes('Most recent user correction.')));
   assert.equal(result.messages.some(message =>
@@ -97,11 +91,11 @@ test('256K pre-turn scenario compacts old completed history and restores large h
 
 test('256K mid-turn scenario waits for tool completion and keeps the active request', async () => {
   const requests: Message[][] = [];
-  const { coordinator, promptBudgetTokens, triggerTokens } = createCoordinator(requests);
+  const { coordinator, contextWindowTokens, triggerTokens } = createCoordinator(requests);
   const messages: Message[] = [
     { role: 'system', content: englishText(8_000, 'Stable system prompt.\n') },
-    { role: 'user', content: englishText(66_000, 'Earlier history.\n'), __episodeId: 'old-1' },
-    { role: 'assistant', content: englishText(58_000, 'Earlier answer.\n'), __episodeId: 'old-1' },
+    { role: 'user', content: englishText(95_000, 'Earlier history.\n'), __episodeId: 'old-1' },
+    { role: 'assistant', content: englishText(85_000, 'Earlier answer.\n'), __episodeId: 'old-1' },
     {
       role: 'user',
       content: englishText(3_000, 'Active long-task objective.\n'),
@@ -138,7 +132,7 @@ test('256K mid-turn scenario waits for tool completion and keeps the active requ
   const afterTokens = estimateMessagesTokens(result.messages) + TOOL_SCHEMA_TOKENS;
 
   assert.equal(result.compacted, true);
-  assert.ok(afterTokens < promptBudgetTokens * 0.25);
+  assert.ok(afterTokens < contextWindowTokens * 0.25);
   assert.ok(result.messages.some(message =>
     String(message.content).includes('Active long-task objective.')));
   assert.equal(result.messages.some(message => message.role === 'tool'), true);
@@ -148,11 +142,11 @@ test('256K mid-turn scenario waits for tool completion and keeps the active requ
 
 test('256K restore scenario creates a checkpoint that requires runtime re-verification', async () => {
   const requests: Message[][] = [];
-  const { coordinator, promptBudgetTokens, triggerTokens } = createCoordinator(requests);
+  const { coordinator, contextWindowTokens, triggerTokens } = createCoordinator(requests);
   const messages: Message[] = [
     { role: 'system', content: englishText(8_000, 'Stable system prompt.\n') },
-    { role: 'user', content: englishText(80_000, 'Restored historical request.\n') },
-    { role: 'assistant', content: englishText(72_000, 'Restored visible answer.\n') },
+    { role: 'user', content: englishText(110_000, 'Restored historical request.\n') },
+    { role: 'assistant', content: englishText(100_000, 'Restored visible answer.\n') },
   ];
   const beforeTokens = estimateMessagesTokens(messages) + TOOL_SCHEMA_TOKENS;
 
@@ -167,7 +161,7 @@ test('256K restore scenario creates a checkpoint that requires runtime re-verifi
   const checkpointPrompt = String(requests[0][0]?.content || '');
 
   assert.equal(result.compacted, true);
-  assert.ok(afterTokens < promptBudgetTokens * 0.2);
+  assert.ok(afterTokens < contextWindowTokens * 0.2);
   assert.match(checkpointPrompt, /unknown until reverified/i);
   assert.match(checkpointPrompt, /processes, ports, files, devices/i);
 });

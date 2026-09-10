@@ -58,6 +58,56 @@ describe('AgentSession lifecycle', () => {
     assert.equal(messages[3].__injected, true);
   });
 
+  test('AgentSession keeps a safe request budget outside the 256K+ 85% policy', () => {
+    const { AgentSession } = loadSessionModules();
+    const cases = [
+      {
+        key: 'user:budget-minimax-m27',
+        config: {
+          model: 'MiniMax-M2.7',
+          provider: 'anthropic',
+          contextWindowTokens: 204_800,
+        },
+        expectedLimit: 155_648,
+      },
+      {
+        key: 'user:budget-custom-128k',
+        config: {
+          model: 'custom-128k',
+          provider: 'openai',
+          contextWindowTokens: 128_000,
+          maxTokens: 32_000,
+        },
+        expectedLimit: 84_224,
+      },
+      {
+        key: 'user:budget-custom-256k-high-output',
+        config: {
+          model: 'custom-256k',
+          provider: 'openai',
+          contextWindowTokens: 256_000,
+          maxTokens: 64_000,
+        },
+        expectedLimit: 172_544,
+      },
+    ];
+
+    for (const item of cases) {
+      const session = new AgentSession(item.key, buildMockServices({
+        aiService: {
+          getConfig() { return item.config; },
+        },
+      }), 'feishu');
+      assert.equal((session as any).turnController.options.maxPromptTokens, item.expectedLimit);
+      assert.equal(
+        (session as any).checkpointCompactionCoordinator.compactionTriggerTokens,
+        item.expectedLimit,
+      );
+      assert.ok(item.expectedLimit + (item.config.maxTokens ?? 32_768)
+        <= item.config.contextWindowTokens);
+    }
+  });
+
   test('reset and clear discard pending restored history before initialization', async () => {
     const { AgentSession, SessionStore } = loadSessionModules();
     SessionStore.getInstance().saveContext('user:lifecycle-reset', [

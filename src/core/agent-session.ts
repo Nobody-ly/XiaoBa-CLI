@@ -65,6 +65,7 @@ import { collectRemoteContextWatermarks } from './remote-context-watermarks';
 import {
   CheckpointCompactionCoordinator,
   CheckpointPersistenceError,
+  resolveCheckpointInputLimitTokens,
   type CheckpointCompactionPhase,
   isCheckpointCompactionEnabled,
 } from './checkpoint-compaction';
@@ -238,8 +239,15 @@ export class AgentSession {
       ? (services.aiService as any).getConfig()
       : {};
     const contextWindow = resolveModelContextWindow(modelConfig);
+    const checkpointInputLimit = resolveCheckpointInputLimitTokens(
+      contextWindow.contextWindowTokens,
+      contextWindow.promptBudgetTokens,
+      contextWindow.maxOutputTokens,
+    );
     Logger.info(
-      `[${key}] 模型上下文: ${contextWindow.label} window=${contextWindow.contextWindowTokens}, promptBudget=${contextWindow.promptBudgetTokens}, reserve=${contextWindow.safetyReserveTokens}`,
+      `[${key}] 模型上下文: ${contextWindow.label} window=${contextWindow.contextWindowTokens}, `
+      + `checkpointLimit=${checkpointInputLimit}, promptBudget=${contextWindow.promptBudgetTokens}, `
+      + `reserve=${contextWindow.safetyReserveTokens}`,
     );
     this.contextWindowManager = new ContextWindowManager(services.aiService, {
       maxContextTokens: contextWindow.promptBudgetTokens,
@@ -247,7 +255,10 @@ export class AgentSession {
     });
     this.checkpointCompactionCoordinator = new CheckpointCompactionCoordinator(
       services.aiService,
-      { maxContextTokens: contextWindow.promptBudgetTokens },
+      {
+        maxContextTokens: contextWindow.contextWindowTokens,
+        compactionTriggerTokens: checkpointInputLimit,
+      },
     );
     this.useCheckpointCompaction = isCheckpointCompactionEnabled();
     this.skillRuntime = new SessionSkillRuntime(services.skillManager, key);
@@ -273,6 +284,9 @@ export class AgentSession {
       workspaceRoot: this.defaultDirectory,
       getCurrentDirectory: () => this.currentDirectory,
       updateCurrentDirectory: directory => this.updateCurrentDirectory(directory),
+      maxPromptTokens: this.useCheckpointCompaction
+        ? checkpointInputLimit
+        : contextWindow.promptBudgetTokens,
       checkpointCompactionCoordinator: this.useCheckpointCompaction
         ? this.checkpointCompactionCoordinator
         : undefined,
