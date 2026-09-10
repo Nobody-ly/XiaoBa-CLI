@@ -169,7 +169,7 @@ function isPendingUserInput(value: string | ContentBlock[] | PendingUserInput): 
     && 'content' in value;
 }
 
-export type SyntheticObservationProvider = () => SyntheticObservation[];
+export type SyntheticObservationProvider = (progressMessages: readonly Message[]) => SyntheticObservation[];
 export type RuntimeTransientProvider = () => Message[];
 
 interface ToolExecutionRecord {
@@ -203,7 +203,7 @@ export interface RunnerOptions {
   runtimeTransientProvider?: RuntimeTransientProvider;
   /** Internal id that ties all messages created by one externally visible user turn together. */
   episodeId?: string;
-  /** Main-Agent-only continuation compaction. Branch and subagent runners omit it. */
+  /** Optional continuation compaction for callers that opt in. */
   checkpointCompactionCoordinator?: CheckpointCompactionCoordinator;
   /** Persists a successful continuation checkpoint before execution resumes. */
   onCompactionCheckpoint?: (messages: Message[]) => void | Promise<void>;
@@ -346,7 +346,7 @@ export class ConversationRunner {
           newMessages,
         };
       }
-      this.injectSyntheticObservations(messages, turns);
+      this.injectSyntheticObservations(messages, newMessages, turns);
       const runtimeTransientHints = this.drainRuntimeTransientMessages(turns);
       const requestTools = this.fitToolsToPromptBudget(activeTools);
       // Includes the incoming root/pending input, which was not yet present in
@@ -964,11 +964,15 @@ export class ConversationRunner {
     }
   }
 
-  private injectSyntheticObservations(messages: Message[], turn: number): void {
+  private injectSyntheticObservations(
+    messages: Message[],
+    progressMessages: readonly Message[],
+    turn: number,
+  ): void {
     if (!this.syntheticObservationProvider) return;
     let observations: SyntheticObservation[] = [];
     try {
-      observations = this.syntheticObservationProvider();
+      observations = this.syntheticObservationProvider(progressMessages);
     } catch (error: any) {
       Logger.warning(`[${this.sessionLabel}Turn ${turn}] synthetic observation drain failed: ${error.message}`);
       return;
