@@ -25,7 +25,7 @@ export class MemorySearchTool implements Tool {
       '搜索历史 session turn 日志，召回与当前任务相关的记忆。',
       'keywords 是独立关键词数组，多个关键词按 OR 召回；底层是子串匹配，不会自动分词，也不是语义搜索。',
       '不要把多个词用空格拼成一个 keyword；请把它们拆成多个数组元素。',
-      '返回紧凑 JSON，只包含 canonical refs 和命中的关键词。',
+      '返回紧凑 JSON，包含 canonical refs、命中的关键词和历史时间戳。',
     ].join(' '),
     parameters: {
       type: 'object',
@@ -70,6 +70,7 @@ export class MemorySearchTool implements Tool {
           matches: matches.map(match => ({
             ref: match.ref,
             hits: match.hits,
+            timestamp: match.timestamp,
           })),
         }),
       };

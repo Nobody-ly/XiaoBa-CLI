@@ -3,7 +3,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { MemoryLogStore } from '../src/core/memory-log-store';
+import { dateDirectoryOverlapsRange, MemoryLogStore } from '../src/core/memory-log-store';
 import {
   FinishMemorySearchTool,
   MemoryNeighborsTool,
@@ -53,11 +53,57 @@ describe('memory branch tools', () => {
     const parsed = JSON.parse(String(result.content));
     assert.equal(parsed.count, 2);
     assert.deepEqual(parsed.matches, [
-      { ref: 'chat/2026-06-16/demo.jsonl#2', hits: ['alpha_unique', 'beta_unique'] },
-      { ref: 'chat/2026-06-16/demo.jsonl#1', hits: ['alpha_unique'] },
+      {
+        ref: 'chat/2026-06-16/demo.jsonl#2',
+        hits: ['alpha_unique', 'beta_unique'],
+        timestamp: '2026-06-16T11:00:00.000Z',
+      },
+      {
+        ref: 'chat/2026-06-16/demo.jsonl#1',
+        hits: ['alpha_unique'],
+        timestamp: '2026-06-16T10:00:00.000Z',
+      },
     ]);
     assert.equal('preview' in parsed.matches[0], false);
     assert.equal('score' in parsed.matches[0], false);
+  });
+
+  test('date directory filtering happens before JSONL files are opened', async () => {
+    writeSessionLogForDate(testRoot, '2026-06-16', [
+      turn(1, '2026-06-16T10:00:00.000Z', 'bounded_unique recent', 'recent answer'),
+    ]);
+    writeSessionLogForDate(testRoot, '2025-01-01', [
+      turn(1, '2025-01-01T10:00:00.000Z', 'bounded_unique old', 'old answer'),
+    ]);
+
+    const originalReadFile = fs.promises.readFile;
+    const opened: string[] = [];
+    fs.promises.readFile = (async (...args: Parameters<typeof fs.promises.readFile>) => {
+      opened.push(String(args[0]).replace(/\\/g, '/'));
+      return originalReadFile.apply(fs.promises, args as any);
+    }) as typeof fs.promises.readFile;
+    try {
+      const store = new MemoryLogStore(testRoot);
+      const matches = await store.search({
+        keywords: ['bounded_unique'],
+        startTime: '2026-06-16T00:00:00.000Z',
+        endTime: '2026-06-16T23:59:59.999Z',
+      });
+      assert.equal(matches.length, 1);
+      assert.equal(opened.some(file => file.includes('/2025-01-01/')), false);
+      assert.equal(opened.some(file => file.includes('/2026-06-16/')), true);
+    } finally {
+      fs.promises.readFile = originalReadFile;
+    }
+  });
+
+  test('date directory range uses the same local calendar boundary as the logger', () => {
+    const start = new Date(2026, 5, 16, 12, 0, 0).getTime();
+    const end = new Date(2026, 5, 16, 13, 0, 0).getTime();
+    assert.equal(dateDirectoryOverlapsRange('2026-06-15', start, end), false);
+    assert.equal(dateDirectoryOverlapsRange('2026-06-16', start, end), true);
+    assert.equal(dateDirectoryOverlapsRange('2026-06-17', start, end), false);
+    assert.equal(dateDirectoryOverlapsRange('not-a-date', start, end), false);
   });
 
   test('read and neighbors accept manually edited adjacent refs', async () => {
@@ -283,7 +329,11 @@ describe('memory branch tools', () => {
 });
 
 function writeSessionLog(root: string, entries: unknown[]): void {
-  const dir = path.join(root, 'logs', 'sessions', 'chat', '2026-06-16');
+  writeSessionLogForDate(root, '2026-06-16', entries);
+}
+
+function writeSessionLogForDate(root: string, date: string, entries: unknown[]): void {
+  const dir = path.join(root, 'logs', 'sessions', 'chat', date);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, 'demo.jsonl'),
