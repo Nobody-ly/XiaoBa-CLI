@@ -755,9 +755,11 @@ export class SkillHubThinRpcHandler {
     if (!ownerUid || normalizeUid(request.target_owner_user_id) !== normalizeUid(ownerUid)) {
       throw new SkillHubThinRpcError('OWNER_MISMATCH', 'The local CatsCo account does not match this request.');
     }
-    // Device registration uses installationId first (see CatsCompanyAdapter), so
-    // validate thin RPC requests against the same canonical route identity.
-    const deviceId = String(config.device?.installationId || config.device?.deviceId || '').trim();
+    // Device registration uses installationId first and falls back to bodyId
+    // (see CatsCompanyAdapter). Keep deviceId last for legacy local configs.
+    const deviceId = String(
+      config.device?.installationId || config.device?.bodyId || config.device?.deviceId || '',
+    ).trim();
     const requestDeviceId = String(request.target_device_id || request.device_id || '').trim();
     if (!deviceId || requestDeviceId !== deviceId) {
       throw new SkillHubThinRpcError('DEVICE_MISMATCH', 'The request targets a different XiaoBa device.');
