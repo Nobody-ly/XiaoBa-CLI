@@ -15,6 +15,7 @@ import {
   SYSTEM_PROMPT_RELATIVE_PATH,
 } from '../utils/prompt-template';
 import { prepareBoundBotSkills, type PreparedBoundBotSkills } from '../bot-skills/runtime';
+import { botSkillRefsEqual } from '../bot-skills/canonical';
 import {
   catalogRuntimeMatchesModelId,
   createBotDefinitionSyncService,
@@ -48,6 +49,12 @@ export interface PrepareBoundBotDefinitionOptions extends BotDefinitionSyncServi
    * portion of a unified BotDefinition revision to become active.
    */
   preserveSkills?: boolean;
+  /**
+   * The desired Skill references are identical to the last locally active
+   * definition. Reuse that already-applied Skill dimension without scanning or
+   * mutating the workspace while a model/prompt-only revision is activated.
+   */
+  reuseAppliedSkills?: boolean;
   /** Hot reload must not silently fall back to legacy/local startup after a failed cloud read. */
   requireCloud?: boolean;
 }
@@ -88,6 +95,7 @@ export async function prepareBoundBotDefinition(
   }
   let sync = definitionService.pullOrBootstrap(botId);
   let localDefinition = sync?.definition;
+  const previouslyActiveDefinition = localDefinition;
   let initializedDefaultFromEmpty = false;
   const auth = options.auth ?? createCatsCoLocalConfigService({ runtimeRoot: options.runtimeRoot, env: options.env }).getAuthState();
   const cloudDefinitionSync = createBotDefinitionCloudSyncService({
@@ -225,7 +233,19 @@ export async function prepareBoundBotDefinition(
           cloudSnapshot = await cloudDefinitionSync.pushPrompt(botId, auth, definition.prompt)
             ?? cloudSnapshot;
         }
-        const skillSync = options.prepareSkills === false || options.preserveSkills
+        const reuseAppliedSkills = options.reuseAppliedSkills ?? Boolean(
+          previouslyActiveDefinition
+          && cloudSnapshot.definition
+          && botSkillRefsEqual(
+            previouslyActiveDefinition.skills,
+            cloudSnapshot.definition.skills,
+          )
+        );
+        const skillSync = (
+          options.prepareSkills === false
+          || options.preserveSkills
+          || reuseAppliedSkills
+        )
           ? undefined
           : await prepareBoundBotSkills({
               runtimeRoot: options.runtimeRoot,
@@ -242,12 +262,17 @@ export async function prepareBoundBotDefinition(
           options.prepareSkills === false
           && cloudSnapshot.definition?.skills === undefined
         );
-        const targetRevisionApplied = options.preserveSkills || skippedSkillsAreAbsent || Boolean(
-          skillSync
-          && (skillApplyStatus === 'applied' || skillApplyStatus === 'already_applied')
-          && skillSync.sync?.desiredRevision === desiredRevision
-          && skillSync.sync?.observedRevision === desiredRevision
-          && skillSync.sync?.appliedRevision === desiredRevision
+        const targetRevisionApplied = (
+          options.preserveSkills
+          || reuseAppliedSkills
+          || skippedSkillsAreAbsent
+          || Boolean(
+            skillSync
+            && (skillApplyStatus === 'applied' || skillApplyStatus === 'already_applied')
+            && skillSync.sync?.desiredRevision === desiredRevision
+            && skillSync.sync?.observedRevision === desiredRevision
+            && skillSync.sync?.appliedRevision === desiredRevision
+          )
         );
         const appliedRevision = targetRevisionApplied ? desiredRevision : undefined;
         const cloudApplyError = targetRevisionApplied
@@ -572,6 +597,7 @@ export async function prepareBoundBotDefinition(
   const skillSync = (
     options.prepareSkills === false
     || options.preserveSkills
+    || options.reuseAppliedSkills
     || (cloudSelection && !cloudSelection.definition)
   )
     ? undefined

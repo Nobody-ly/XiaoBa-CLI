@@ -123,6 +123,87 @@ describe('operator-managed Skill workspace preservation', () => {
       fs.rmSync(runtimeRoot, { recursive: true, force: true });
     }
   });
+
+  test('reuses unchanged Skill references for model/prompt startup updates without touching the workspace', async () => {
+    const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-unchanged-skills-startup-'));
+    try {
+      createCatsCoLocalConfigService({ runtimeRoot }).save({
+        version: 1,
+        endpoints: {
+          httpBaseUrl: 'https://cats.example.test',
+          serverUrl: 'wss://cats.example.test/v0/channels',
+        },
+        account: { token: 'owner-token', uid: 'owner-7' },
+        currentBot: {
+          uid: 'bot-43',
+          apiKey: 'bot-api-key',
+          boundByUserUid: 'owner-7',
+          bindingSource: 'test',
+        },
+      });
+      const previous = {
+        schema: BOT_DEFINITION_SCHEMA,
+        botId: 'bot-43',
+        model: {
+          kind: 'custom' as const,
+          protocol: 'openai-responses' as const,
+          apiBase: 'https://models.example.test/v1',
+          model: 'previous-model',
+          apiKey: 'test-model-key',
+          contextWindowTokens: 128000,
+        },
+        prompt: { selected: 'custom' as const, customSystemPrompt: 'Unchanged prompt.' },
+        skills: [],
+      };
+      const desired = {
+        ...previous,
+        model: { ...previous.model, model: 'next-model' },
+        prompt: { selected: 'custom' as const, customSystemPrompt: 'Updated prompt.' },
+      };
+      createBotDefinitionSyncService({ runtimeRoot }).acceptCanonical(previous);
+      const skillRoot = path.join(runtimeRoot, 'skills', 'server-local');
+      fs.mkdirSync(skillRoot, { recursive: true });
+      fs.writeFileSync(path.join(skillRoot, 'SKILL.md'), [
+        '---',
+        'name: server-local',
+        'description: Server-local Skill that startup must leave unchanged.',
+        '---',
+        '',
+        'Keep this content.',
+        '',
+      ].join('\n'));
+      const before = snapshotDirectory(path.join(runtimeRoot, 'skills'));
+      const requests: string[] = [];
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        const method = init?.method || 'GET';
+        requests.push(`${method} ${url.pathname}`);
+        if (url.pathname === '/api/bot/definition' && method === 'GET') {
+          return Response.json({ configured: true, revision: 7, definition: desired });
+        }
+        if (url.pathname === '/api/bot/definition/default-prompt') {
+          return Response.json({ status: 'stored' });
+        }
+        throw new Error(`Unexpected test request: ${method} ${url.pathname}`);
+      }) as typeof fetch;
+
+      const prepared = await prepareBoundBotDefinition({
+        runtimeRoot,
+        fetchImpl,
+        acknowledgeCloudSelection: false,
+      });
+
+      assert.equal(prepared?.botId, 'bot-43');
+      assert.equal(prepared?.cloudRevision, 7);
+      assert.equal(prepared?.skillSync, undefined);
+      assert.deepStrictEqual(snapshotDirectory(path.join(runtimeRoot, 'skills')), before);
+      assert.equal(requests.some(request => request.includes('/api/bot/definition/skills')), false);
+      assert.deepStrictEqual(prepared?.definition.model, desired.model);
+      assert.deepStrictEqual(prepared?.definition.prompt, desired.prompt);
+    } finally {
+      fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 function snapshotDirectory(root: string): Array<[string, string]> {

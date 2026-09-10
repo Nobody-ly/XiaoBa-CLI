@@ -36,6 +36,7 @@ import {
   assertOperatorManagedSkillWorkspaceBinding,
   preserveOperatorManagedSkills,
 } from '../bot-skills/preservation';
+import { botSkillRefsEqual } from '../bot-skills/canonical';
 
 const CONNECTOR_OWNER_POLL_MS = 2000;
 const CLOUD_MODEL_POLL_MS = 5000;
@@ -464,6 +465,11 @@ async function applyCloudBotDefinitionSelection(
   });
   const previousPrompt = promptCoordinator.captureActiveSnapshot();
   const effectiveIncoming = resolveRunnableCloudDefinition(incoming, previousDefinition);
+  const reuseAppliedSkills = Boolean(
+    previousDefinition
+    && effectiveIncoming
+    && botSkillRefsEqual(previousDefinition.skills, effectiveIncoming.skills)
+  );
   const modelChanged = !previousDefinition
     || !effectiveIncoming
     || JSON.stringify(previousDefinition.model) !== JSON.stringify(effectiveIncoming.model);
@@ -483,12 +489,14 @@ async function applyCloudBotDefinitionSelection(
     return 'deferred';
   }
 
-  const restorePreviousRuntime = () => {
+  const restorePreviousRuntime = (preservePreparedSkills = false) => {
     if (previousDefinition) {
-      const activeSkills = definitionService.read(options.botId)?.skills;
+      const activeSkills = preservePreparedSkills
+        ? definitionService.read(options.botId)?.skills
+        : undefined;
       definitionService.acceptCanonical({
         ...previousDefinition,
-        ...(activeSkills !== undefined ? { skills: activeSkills } : {}),
+        ...(preservePreparedSkills && activeSkills !== undefined ? { skills: activeSkills } : {}),
       });
     }
     if (previousCatalogRuntime) definitionService.storeCatalogRuntime(previousCatalogRuntime);
@@ -507,6 +515,7 @@ async function applyCloudBotDefinitionSelection(
       auth: options.auth,
       acknowledgeCloudSelection: false,
       preserveSkills,
+      reuseAppliedSkills,
       requireCloud: true,
     });
   } catch (error) {
@@ -518,7 +527,7 @@ async function applyCloudBotDefinitionSelection(
   }
 
   if (!options.canApply()) {
-    restorePreviousRuntime();
+    restorePreviousRuntime(true);
     return 'deferred';
   }
 
@@ -555,13 +564,13 @@ async function applyCloudBotDefinitionSelection(
   let nextBot: CatsCompanyBot | undefined;
   try {
     await previousBot.destroy();
-    if (!options.canApply()) { restorePreviousRuntime(); return 'deferred'; }
+    if (!options.canApply()) { restorePreviousRuntime(true); return 'deferred'; }
     nextBot = new CatsCompanyBot(options.connectorConfig);
     await nextBot.start();
     await nextBot.waitUntilReady();
     if (!options.canApply()) {
       await nextBot.destroy();
-      restorePreviousRuntime();
+      restorePreviousRuntime(true);
       return 'deferred';
     }
     options.replaceBot(nextBot);
@@ -571,7 +580,7 @@ async function applyCloudBotDefinitionSelection(
         Logger.warning(`Failed to clean up an unstarted CatsCo connector: ${errorMessage(cleanupError)}`);
       });
     }
-    restorePreviousRuntime();
+    restorePreviousRuntime(true);
     const message = redactCloudBotModelError(error, options.selection);
     await acknowledgeCloudModelApply(options, message, appliedSelection);
     await recoverCloudModelFallbackConnector({
