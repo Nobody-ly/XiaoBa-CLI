@@ -311,6 +311,107 @@ test('post-start prompt-only updates reuse unchanged Skills without restarting t
   assert.deepEqual(definitions.read('43')?.prompt, desired.prompt);
 });
 
+test('preparation that advances from a prompt-only revision to a model revision restarts before ACK', async t => {
+  const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'model-apply-advanced-revision-'));
+  t.after(() => fs.rmSync(runtimeRoot, { recursive: true, force: true }));
+  const configService = createCatsCoLocalConfigService({ runtimeRoot });
+  configService.save({
+    version: 1,
+    endpoints: { httpBaseUrl: 'https://cats.example.test', serverUrl: 'wss://cats.example.test/v0/channels' },
+    account: { token: 'test-owner-token', uid: '7' },
+    currentBot: { uid: '43', apiKey: 'test-bot-key', boundByUserUid: '7', bindingSource: 'test' },
+  });
+  const auth = configService.getAuthState();
+  const definitions = createBotDefinitionSyncService({ runtimeRoot });
+  const previous: BotDefinition = {
+    schema: BOT_DEFINITION_SCHEMA,
+    botId: '43',
+    model: {
+      kind: 'custom', protocol: 'openai-responses', apiBase: 'https://models.example.test/v1',
+      model: 'old-model', apiKey: 'test-model-key', contextWindowTokens: 128000,
+    },
+    prompt: { selected: 'custom', customSystemPrompt: 'Previous prompt.' },
+    skills: [TEST_SKILL_REFERENCE],
+  };
+  const queuedPromptOnly: BotDefinition = {
+    ...previous,
+    prompt: { selected: 'custom', customSystemPrompt: 'Queued prompt.' },
+  };
+  const advancedModelChange: BotDefinition = {
+    ...queuedPromptOnly,
+    model: { ...previous.model, model: 'new-model' },
+  };
+  definitions.acceptCanonical(previous);
+  const localSkillRoot = path.join(runtimeRoot, 'skills', 'server-local');
+  fs.mkdirSync(localSkillRoot, { recursive: true });
+  fs.writeFileSync(path.join(localSkillRoot, 'SKILL.md'), 'verified local content\n');
+  writeVerifiedSkillBase(runtimeRoot, '43', 6, TEST_SKILL_REFERENCE);
+
+  let definitionReads = 0;
+  const acks: unknown[] = [];
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = init?.method || 'GET';
+    if (url.pathname === '/api/bot/definition' && method === 'GET') {
+      definitionReads += 1;
+      return Response.json({
+        configured: true,
+        revision: definitionReads === 1 ? 7 : 8,
+        definition: definitionReads === 1 ? queuedPromptOnly : advancedModelChange,
+      });
+    }
+    if (url.pathname === '/api/bot/definition/ack' && method === 'POST') {
+      acks.push(JSON.parse(String(init?.body)));
+      return Response.json({ status: 'applied' });
+    }
+    if (url.pathname === '/api/bot/definition/default-prompt') {
+      return Response.json({ status: 'stored' });
+    }
+    throw new Error(`Unexpected test request: ${method} ${url.pathname}`);
+  });
+
+  let idleChecks = 0;
+  let stopped = 0;
+  let started = 0;
+  const oldBot = {
+    isIdleForRuntimeReload: () => { idleChecks += 1; return true; },
+    destroy: async () => { stopped += 1; },
+  } as CatsCompanyBot;
+  let bot = oldBot;
+  t.mock.method(CatsCompanyBot.prototype, 'start', async function (this: CatsCompanyBot) {
+    started += 1;
+    t.after(() => this.destroy());
+  });
+  t.mock.method(CatsCompanyBot.prototype, 'waitUntilReady', async () => {});
+
+  const result = await applyCloudModelRuntimeSelection({
+    runtimeRoot,
+    botId: '43',
+    auth,
+    selection: {
+      kind: 'custom', modelId: 'old-model', customModel: queuedPromptOnly.model,
+      revision: 7, definition: queuedPromptOnly,
+    },
+    canApply: () => true,
+    connectorConfig: {
+      serverUrl: 'wss://cats.example.test/v0/channels', apiKey: 'test-bot-key', botUid: '43',
+    },
+    currentBot: () => bot,
+    replaceBot: next => { bot = next; },
+    scheduleAckRetry: () => assert.fail('ACK should succeed'),
+    clearAckRetry: () => {},
+  });
+
+  assert.equal(result, 'applied');
+  assert.equal(definitionReads, 2);
+  assert.equal(idleChecks, 1, 'the effective model change must re-check connector idleness');
+  assert.equal(stopped, 1);
+  assert.equal(started, 1);
+  assert.notEqual(bot, oldBot);
+  assert.deepEqual(acks, [{ revision: 8 }]);
+  assert.deepEqual(definitions.read('43')?.model, advancedModelChange.model);
+});
+
 for (const workspaceCase of ['missing', 'corrupt'] as const) {
 test(`unchanged Skill refs do not bypass strict activation for a ${workspaceCase} workspace`, async t => {
   const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), `model-apply-${workspaceCase}-skills-`));

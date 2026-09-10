@@ -471,11 +471,11 @@ async function applyCloudBotDefinitionSelection(
     && effectiveIncoming.skills !== undefined
     && botSkillRefsEqual(previousDefinition.skills, effectiveIncoming.skills)
   );
-  const modelChanged = !previousDefinition
+  const queuedModelChanged = !previousDefinition
     || !effectiveIncoming
     || JSON.stringify(previousDefinition.model) !== JSON.stringify(effectiveIncoming.model);
 
-  if (modelChanged && (!options.canApply() || !options.currentBot().isIdleForRuntimeReload())) {
+  if (queuedModelChanged && (!options.canApply() || !options.currentBot().isIdleForRuntimeReload())) {
     return 'deferred';
   }
 
@@ -555,13 +555,19 @@ async function applyCloudBotDefinitionSelection(
     definition: prepared.definition,
   };
 
-  if (!modelChanged) {
+  const appliedModelChanged = !previousDefinition
+    || JSON.stringify(previousDefinition.model) !== JSON.stringify(prepared.definition.model);
+  if (!appliedModelChanged) {
     await acknowledgeCloudModelApply(options, '', appliedSelection);
     Logger.success(`CatsCo applied BotDefinition revision=${appliedSelection.revision} without restarting the connector.`);
     return 'applied';
   }
 
   const previousBot = options.currentBot();
+  if (!options.canApply() || !previousBot.isIdleForRuntimeReload()) {
+    restorePreviousRuntime(true);
+    return 'deferred';
+  }
   let nextBot: CatsCompanyBot | undefined;
   try {
     await previousBot.destroy();
@@ -593,8 +599,11 @@ async function applyCloudBotDefinitionSelection(
   }
 
   await acknowledgeCloudModelApply(options, '', appliedSelection);
+  const appliedModelId = prepared.definition.model.kind === 'custom'
+    ? prepared.definition.model.model
+    : prepared.definition.model.modelId;
   Logger.success(
-    `CatsCo applied BotDefinition model ${options.selection.modelId}, revision=${options.selection.revision}.`,
+    `CatsCo applied BotDefinition model ${appliedModelId}, revision=${appliedSelection.revision}.`,
   );
   return 'applied';
 }
