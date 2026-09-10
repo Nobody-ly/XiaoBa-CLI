@@ -84,7 +84,7 @@ export class MemoryLogStore {
     const matches: MemorySearchMatch[] = [];
     for (const root of this.roots) {
       throwIfAborted(signal);
-      const files = await collectJsonlFiles(root.root, signal);
+      const files = await collectJsonlFiles(root.root, { start, end }, signal);
       for (const file of files) {
         throwIfAborted(signal);
         const records = await this.readTurnsFromFile(root.root, file, signal);
@@ -109,8 +109,7 @@ export class MemoryLogStore {
 
     return matches
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.ref.localeCompare(a.ref))
-      .slice(0, limit)
-      .map(({ ref, hits }) => ({ ref, hits, timestamp: '' }));
+      .slice(0, limit);
   }
 
   async readTurn(ref: string, options: ReadMemoryTurnOptions = {}, signal?: AbortSignal): Promise<MemoryReadResult> {
@@ -285,37 +284,71 @@ function resolveLogRoots(workingDirectory: string): string[] {
   });
 }
 
-async function collectJsonlFiles(root: string, signal?: AbortSignal): Promise<string[]> {
+async function collectJsonlFiles(
+  root: string,
+  range: { start: number | null; end: number | null },
+  signal?: AbortSignal,
+): Promise<string[]> {
   const files: Array<{ file: string; mtimeMs: number }> = [];
-  await walk(root, files, signal);
+  const sessionTypes = await readDirectories(root, signal);
+  for (const sessionType of sessionTypes) {
+    const sessionTypeRoot = path.join(root, sessionType);
+    const dates = await readDirectories(sessionTypeRoot, signal);
+    for (const date of dates) {
+      throwIfAborted(signal);
+      if (!dateDirectoryOverlapsRange(date, range.start, range.end)) continue;
+      const dateRoot = path.join(sessionTypeRoot, date);
+      let entries: fs.Dirent[];
+      try {
+        entries = await fs.promises.readdir(dateRoot, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        throwIfAborted(signal);
+        if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+        const file = path.join(dateRoot, entry.name);
+        try {
+          const stat = await fs.promises.stat(file);
+          files.push({ file, mtimeMs: stat.mtimeMs });
+        } catch {
+          // ignore unreadable files
+        }
+      }
+    }
+  }
   return files
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .map(item => item.file);
 }
 
-async function walk(dir: string, files: Array<{ file: string; mtimeMs: number }>, signal?: AbortSignal): Promise<void> {
+async function readDirectories(dir: string, signal?: AbortSignal): Promise<string[]> {
   throwIfAborted(signal);
   let entries: fs.Dirent[];
   try {
     entries = await fs.promises.readdir(dir, { withFileTypes: true });
   } catch {
-    return;
+    return [];
   }
-  for (const entry of entries) {
-    throwIfAborted(signal);
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walk(fullPath, files, signal);
-      continue;
-    }
-    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
-    try {
-      const stat = await fs.promises.stat(fullPath);
-      files.push({ file: fullPath, mtimeMs: stat.mtimeMs });
-    } catch {
-      // ignore unreadable files
-    }
-  }
+  return entries.filter(entry => entry.isDirectory()).map(entry => entry.name);
+}
+
+export function dateDirectoryOverlapsRange(
+  date: string,
+  start: number | null,
+  end: number | null,
+): boolean {
+  const match = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const dayStart = new Date(year, month - 1, day).getTime();
+  const nextDayStart = new Date(year, month - 1, day + 1).getTime();
+  if (!Number.isFinite(dayStart) || !Number.isFinite(nextDayStart)) return false;
+  if (start !== null && nextDayStart <= start) return false;
+  if (end !== null && dayStart > end) return false;
+  return true;
 }
 
 function parseCanonicalRef(ref: string): ParsedRef {
