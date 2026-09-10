@@ -2246,6 +2246,38 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     );
   });
 
+  test('pending evidence excludes regenerable runtime environments', () => {
+    const fixture = createFixture(roots);
+    fs.writeFileSync(path.join(fixture.skillsRoot, 'README.md'), 'durable evidence');
+    const runtimeFile = path.join(
+      fixture.skillsRoot,
+      'local-skill',
+      '.venv',
+      'lib',
+      'python',
+      'site-packages',
+      'runtime.bin',
+    );
+    fs.mkdirSync(path.dirname(runtimeFile), { recursive: true });
+    fs.writeFileSync(runtimeFile, Buffer.alloc(2 * 1024 * 1024 + 1));
+
+    const snapshot = snapshotPendingBotSkillWorkspace({
+      runtimeRoot: fixture.runtimeRoot,
+      botId: fixture.botId,
+      sourcePath: fixture.skillsRoot,
+      reason: 'activation_cloud_reconcile',
+      cloudRevision: 1,
+    });
+
+    assert.equal(snapshot.fileCount, 1);
+    assert.equal(
+      fs.readFileSync(path.join(snapshot.path, 'package', 'README.md'), 'utf8'),
+      'durable evidence',
+    );
+    assert.equal(fs.existsSync(path.join(snapshot.path, 'package', 'local-skill', '.venv')), false);
+    assert.equal(fs.existsSync(runtimeFile), true);
+  });
+
   test('pending evidence refuses a workspace root symbolic link', () => {
     const fixture = createFixture(roots);
     const external = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoba-bot-skills-external-'));
