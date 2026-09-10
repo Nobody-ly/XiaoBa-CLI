@@ -236,15 +236,16 @@ export async function prepareBoundBotDefinition(
         const reuseAppliedSkills = options.reuseAppliedSkills ?? Boolean(
           previouslyActiveDefinition
           && cloudSnapshot.definition
+          && cloudSnapshot.definition.skills !== undefined
           && botSkillRefsEqual(
             previouslyActiveDefinition.skills,
             cloudSnapshot.definition.skills,
           )
         );
+        const desiredRevision = cloudSnapshot.revision;
         const skillSync = (
           options.prepareSkills === false
           || options.preserveSkills
-          || reuseAppliedSkills
         )
           ? undefined
           : await prepareBoundBotSkills({
@@ -253,9 +254,16 @@ export async function prepareBoundBotDefinition(
               auth,
               fetchImpl: options.fetchImpl,
               definitionService,
+              ...(reuseAppliedSkills && cloudSnapshot.definition?.skills
+                ? {
+                    reuseVerifiedLocal: {
+                      skills: cloudSnapshot.definition.skills,
+                      definitionRevision: desiredRevision,
+                    },
+                  }
+                : {}),
             });
         definition = definitionService.read(botId) ?? definition;
-        const desiredRevision = cloudSnapshot.revision;
         const observedRevision = skillSync?.sync?.observedRevision ?? desiredRevision;
         const skillApplyStatus = skillSync?.sync?.applyStatus;
         const skippedSkillsAreAbsent = (
@@ -264,7 +272,6 @@ export async function prepareBoundBotDefinition(
         );
         const targetRevisionApplied = (
           options.preserveSkills
-          || reuseAppliedSkills
           || skippedSkillsAreAbsent
           || Boolean(
             skillSync
@@ -597,7 +604,6 @@ export async function prepareBoundBotDefinition(
   const skillSync = (
     options.prepareSkills === false
     || options.preserveSkills
-    || options.reuseAppliedSkills
     || (cloudSelection && !cloudSelection.definition)
   )
     ? undefined
@@ -607,6 +613,14 @@ export async function prepareBoundBotDefinition(
         auth,
         fetchImpl: options.fetchImpl,
         definitionService,
+        ...(options.reuseAppliedSkills && cloudSelection?.definition?.skills
+          ? {
+              reuseVerifiedLocal: {
+                skills: cloudSelection.definition.skills,
+                definitionRevision: cloudSelection.revision,
+              },
+            }
+          : {}),
       });
   const portableDefinition = definitionService.read(botId);
   if (portableDefinition) {

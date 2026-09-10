@@ -468,6 +468,7 @@ async function applyCloudBotDefinitionSelection(
   const reuseAppliedSkills = Boolean(
     previousDefinition
     && effectiveIncoming
+    && effectiveIncoming.skills !== undefined
     && botSkillRefsEqual(previousDefinition.skills, effectiveIncoming.skills)
   );
   const modelChanged = !previousDefinition

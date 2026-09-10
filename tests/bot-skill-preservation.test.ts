@@ -5,13 +5,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { prepareBoundBotDefinition } from '../src/bot-definition/activation';
 import { createBotDefinitionSyncService } from '../src/bot-definition/service';
-import { BOT_DEFINITION_SCHEMA } from '../src/bot-definition/types';
+import { BOT_DEFINITION_SCHEMA, type BotSkillRef } from '../src/bot-definition/types';
 import { createCatsCoLocalConfigService } from '../src/catscompany/local-config';
 import {
   assertOperatorManagedSkillWorkspaceBinding,
   preserveOperatorManagedSkills,
 } from '../src/bot-skills/preservation';
 import { BotSkillWorkspaceService } from '../src/bot-skills/workspace';
+import { BotSkillBaseStore } from '../src/bot-skills/base-store';
+import { scanBotSkillWorkspace } from '../src/bot-skills/local-manifest';
 
 describe('operator-managed Skill workspace preservation', () => {
   test('is disabled by default', () => {
@@ -153,7 +155,7 @@ describe('operator-managed Skill workspace preservation', () => {
           contextWindowTokens: 128000,
         },
         prompt: { selected: 'custom' as const, customSystemPrompt: 'Unchanged prompt.' },
-        skills: [],
+        skills: [TEST_SKILL_REFERENCE],
       };
       const desired = {
         ...previous,
@@ -172,6 +174,7 @@ describe('operator-managed Skill workspace preservation', () => {
         'Keep this content.',
         '',
       ].join('\n'));
+      writeVerifiedSkillBase(runtimeRoot, 'bot-43', 6, TEST_SKILL_REFERENCE);
       const before = snapshotDirectory(path.join(runtimeRoot, 'skills'));
       const requests: string[] = [];
       const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -195,7 +198,7 @@ describe('operator-managed Skill workspace preservation', () => {
 
       assert.equal(prepared?.botId, 'bot-43');
       assert.equal(prepared?.cloudRevision, 7);
-      assert.equal(prepared?.skillSync, undefined);
+      assert.equal(prepared?.skillSync?.sync?.applyStatus, 'already_applied');
       assert.deepStrictEqual(snapshotDirectory(path.join(runtimeRoot, 'skills')), before);
       assert.equal(requests.some(request => request.includes('/api/bot/definition/skills')), false);
       assert.deepStrictEqual(prepared?.definition.model, desired.model);
@@ -205,6 +208,36 @@ describe('operator-managed Skill workspace preservation', () => {
     }
   });
 });
+
+const TEST_SKILL_REFERENCE: BotSkillRef = {
+  source: 'skillhub',
+  skillId: 'private/server-local',
+  version: 'sha256-server-local',
+  contentHash: 'a'.repeat(64),
+};
+
+function writeVerifiedSkillBase(
+  runtimeRoot: string,
+  botId: string,
+  definitionRevision: number,
+  reference: BotSkillRef,
+): void {
+  const local = scanBotSkillWorkspace(path.join(runtimeRoot, 'skills'), { writeMarkers: false });
+  assert.equal(local.length, 1);
+  new BotSkillBaseStore(runtimeRoot).write({
+    schema: 'xiaoba.bot-skill-sync-base.v2',
+    botId,
+    definitionRevision,
+    skills: local.map(entry => ({
+      localSkillId: entry.localSkillId,
+      name: entry.name,
+      installName: entry.installName,
+      contentHash: entry.contentHash,
+      reference,
+    })),
+    updatedAt: new Date().toISOString(),
+  });
+}
 
 function snapshotDirectory(root: string): Array<[string, string]> {
   const snapshot: Array<[string, string]> = [];
