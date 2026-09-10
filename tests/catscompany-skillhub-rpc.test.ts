@@ -863,6 +863,40 @@ describe('CatsCompany SkillHub thin RPC', () => {
     );
   });
 
+  test('accepts the registered installation ID when body and installation identities differ', async () => {
+    createCatsCoLocalConfigService({ runtimeRoot }).save({
+      version: 1,
+      account: { token: 'user-token', uid: '7', username: 'alice' },
+      currentBot: {
+        uid: '42',
+        apiKey: 'bot-key',
+        boundByUserUid: '7',
+      },
+      device: {
+        deviceId: 'alice-body',
+        bodyId: 'alice-body',
+        installationId: 'alice-installation',
+      },
+    });
+
+    const result = await handler.execute(request({
+      request_id: 'installation-device',
+      target_device_id: 'alice-installation',
+      device_id: 'alice-installation',
+    }));
+    assert.equal(result.schema, 'xiaoba.skillhub.local_workspace.v1');
+    assert.equal(result.bot_uid, '42');
+
+    await assert.rejects(
+      handler.execute(request({
+        request_id: 'body-device',
+        target_device_id: 'alice-body',
+        device_id: 'alice-body',
+      })),
+      (error: any) => error instanceof SkillHubThinRpcError && error.code === 'DEVICE_MISMATCH',
+    );
+  });
+
   test('schedules an explicit Bot switch once for a replayed request', async () => {
     const switchRequest = request({
       request_id: 'switch-1',
