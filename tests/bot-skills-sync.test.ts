@@ -1887,7 +1887,7 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     );
   });
 
-  test('activation preserves a no-Base legacy workspace before materializing Cloud', async () => {
+  test('activation keeps a no-Base legacy workspace while materializing Cloud', async () => {
     const fixture = createFixture(roots);
     writeSkill(fixture.skillsRoot, 'legacy', 'legacy', 'legacy local only');
     const cloudPackage = createPackage(roots, 'cloud-a', 'cloud-a', 'canonical cloud');
@@ -1898,14 +1898,341 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
 
     assert.equal(fixture.uploads, 0);
     assert.equal(fixture.patches, 0);
-    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'legacy')), false);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'legacy', 'SKILL.md'), 'utf8'),
+      /legacy local only/,
+    );
     assert.match(
       fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-a', 'SKILL.md'), 'utf8'),
       /canonical cloud/,
     );
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ),
+      ['cloud-a'],
+    );
     const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
     assert.equal(snapshot.manifest.reason, 'activation_without_base');
     assert.equal(snapshot.manifest.baseRevision, undefined);
+  });
+
+  test('activation keeps operator-managed local Skills next to Cloud Skills', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    writeSkill(fixture.skillsRoot, 'operator-a', 'operator-a', 'operator managed a');
+    writeSkill(fixture.skillsRoot, 'operator-b', 'operator-b', 'operator managed b');
+    const cloudPackage = createPackage(roots, 'managed', 'managed', 'owner approved cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    const result = await fixture.activate();
+
+    assert.equal(result.direction, 'cloud_to_local');
+    assert.equal(fixture.uploads, 0);
+    assert.equal(fixture.patches, 0);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'managed', 'SKILL.md'), 'utf8'),
+      /owner approved cloud/,
+    );
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'operator-a', 'SKILL.md'), 'utf8'),
+      /operator managed a/,
+    );
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'operator-b', 'SKILL.md'), 'utf8'),
+      /operator managed b/,
+    );
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ),
+      ['managed'],
+    );
+    assert.deepStrictEqual(
+      fixture.definitionService.read(fixture.botId)?.skills,
+      [definitionRef(cloudPackage)],
+    );
+  });
+
+  test('activation prefers the Cloud Skill over a local entry on the same install path', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(
+      fixture.skillsRoot,
+      'image-asset-generator',
+      'image-asset-generator',
+      'operator local copy',
+    );
+    const cloudPackage = createPackage(
+      roots,
+      'image-asset-generator',
+      'image-asset-generator',
+      'canonical cloud copy',
+    );
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
+
+    const result = await fixture.activate();
+
+    assert.equal(result.direction, 'cloud_to_local');
+    assert.equal(fixture.uploads, 0);
+    assert.match(
+      fs.readFileSync(
+        path.join(fixture.skillsRoot, 'image-asset-generator', 'SKILL.md'),
+        'utf8',
+      ),
+      /canonical cloud copy/,
+    );
+    const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
+    assert.match(
+      fs.readFileSync(
+        path.join(snapshot.path, 'package', 'image-asset-generator', 'SKILL.md'),
+        'utf8',
+      ),
+      /operator local copy/,
+    );
+  });
+
+  test('activation restores Cloud around an operator Skill too large to package', async () => {
+    const fixture = createFixture(roots);
+    const operatorRoot = writeOversizedSkill(fixture.skillsRoot, 'big-operator-skill');
+    const cloudPackage = createPackage(roots, 'cloud-a', 'cloud-a', 'canonical cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
+
+    // With no Base nothing proves the oversized entry is local-only, so the
+    // routine sync keeps failing loudly instead of risking the Cloud Definition.
+    await assert.rejects(fixture.sync(), /too many files/i);
+
+    await fixture.activate();
+
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-a', 'SKILL.md'), 'utf8'),
+      /canonical cloud/,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(operatorRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
+    );
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ),
+      ['cloud-a'],
+    );
+    // The oversized operator Skill is not in Base, so it is provably not
+    // Cloud-owned and the next routine sync keeps converging without it.
+    const converged = await fixture.sync();
+    assert.equal(converged.direction, 'none');
+    assert.equal(fixture.patches, 0);
+  });
+
+  test('preserved operator Skills take part in the next routine sync', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    writeSkill(fixture.skillsRoot, 'operator-a', 'operator-a', 'operator managed a');
+    const cloudPackage = createPackage(roots, 'managed', 'managed', 'owner approved cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    const activation = await fixture.activate();
+    assert.equal(activation.direction, 'cloud_to_local');
+    assert.equal(fixture.uploads, 0);
+
+    // Activation only stops the delete. The carried entry stays an ordinary
+    // local Skill, so the established Local -> Cloud direction still applies.
+    const published = await fixture.sync();
+
+    assert.equal(published.direction, 'local_to_cloud');
+    assert.equal(fixture.uploads, 1);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ).sort(),
+      ['managed', 'operator-a'],
+    );
+  });
+
+  test('a local Skill too large to package does not block the next routine sync', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    const operatorRoot = writeOversizedSkill(fixture.skillsRoot, 'big-operator-skill');
+    const cloudPackage = createPackage(roots, 'managed', 'managed', 'owner approved cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    await fixture.activate();
+
+    // The rejected entry is skipped instead of failing the whole sync, so the
+    // workspace, Base and the Cloud Definition still converge.
+    const converged = await fixture.sync();
+
+    assert.equal(converged.direction, 'none');
+    assert.equal(fixture.uploads, 0);
+    assert.equal(
+      fs.readFileSync(path.join(operatorRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
+    );
+  });
+
+  test('a local Skill too large to package survives a Cloud restore', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    const operatorRoot = writeOversizedSkill(fixture.skillsRoot, 'big-operator-skill');
+    const cloudPackage = createPackage(roots, 'cloud-b', 'cloud-b', 'cloud only');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = {
+      revision: fixture.cloud.revision + 1,
+      skills: [definitionRef(cloudPackage)],
+    };
+
+    const restored = await fixture.sync();
+
+    assert.equal(restored.direction, 'cloud_to_local');
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-b', 'SKILL.md'), 'utf8'),
+      /cloud only/,
+    );
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'managed')), false);
+    assert.equal(
+      fs.readFileSync(path.join(operatorRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
+    );
+  });
+
+  test('a Cloud-owned Skill too large to package fails the sync instead of deleting its Cloud reference', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+    const ownedRoot = path.join(fixture.skillsRoot, 'cloud-owned');
+    const publishedReference = fixture.cloud.skills[0];
+    assert.ok(publishedReference);
+
+    // The same Cloud-owned install path, bloated past the package limits locally.
+    writeOversizedSkill(fixture.skillsRoot, 'cloud-owned');
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    // A skipped entry disappears from the local manifest, and pushLocal builds the
+    // next BotDefinition from that manifest. Dropping a Cloud-owned entry that way
+    // would rewrite the Definition without its reference, so every other device
+    // would uninstall its copy. Keep failing loudly instead.
+    await assert.rejects(fixture.sync(), /too many files/i);
+
+    assert.equal(fixture.patches, 0);
+    assert.deepStrictEqual(fixture.cloud.skills, [publishedReference]);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ),
+      ['cloud-owned'],
+    );
+    assert.equal(
+      fs.readFileSync(path.join(ownedRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
+    );
+  });
+
+  test('a renamed Cloud-owned Skill too large to package still blocks the routine sync', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+    const publishedReference = fixture.cloud.skills[0];
+    assert.ok(publishedReference);
+
+    // The operator renames the install directory. Base correlates entries with
+    // local Skills by localSkillId, and the renamed copy still carries the marker
+    // of its original install, so it is the same Cloud-owned Skill even though
+    // its install path no longer matches Base.
+    fs.renameSync(
+      path.join(fixture.skillsRoot, 'cloud-owned'),
+      path.join(fixture.skillsRoot, 'renamed-cloud'),
+    );
+    writeOversizedSkill(fixture.skillsRoot, 'renamed-cloud');
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    // Ownership by install path alone would call this entry local-only, skip it
+    // and rewrite the Definition without the reference, uninstalling the Skill on
+    // every other device. Keep failing loudly instead.
+    await assert.rejects(fixture.sync(), /too many files/i);
+
+    assert.equal(fixture.patches, 0);
+    assert.deepStrictEqual(fixture.cloud.skills, [publishedReference]);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.installName,
+      ),
+      ['cloud-owned'],
+    );
+    assert.equal(
+      fs.readFileSync(
+        path.join(fixture.skillsRoot, 'renamed-cloud', 'assets', 'file-259.txt'),
+        'utf8',
+      ),
+      'asset 259',
+    );
+  });
+
+  test('a renamed Cloud-owned Skill stays bound to its Cloud reference', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+    const publishedReference = fixture.cloud.skills[0];
+    assert.ok(publishedReference);
+
+    fs.renameSync(
+      path.join(fixture.skillsRoot, 'cloud-owned'),
+      path.join(fixture.skillsRoot, 'renamed-cloud'),
+    );
+
+    // Renaming alone is an ordinary Base follow-up: the entry keeps its
+    // localSkillId, so the Cloud reference is preserved and only the install
+    // name moves.
+    await fixture.sync();
+
+    assert.deepStrictEqual(fixture.cloud.skills, [publishedReference]);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.installName,
+      ),
+      ['renamed-cloud'],
+    );
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'renamed-cloud', 'SKILL.md'), 'utf8'),
+      /approved cloud owned/,
+    );
+  });
+
+  test('activation replaces a Cloud-owned Skill that is too large to package locally', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+
+    writeOversizedSkill(fixture.skillsRoot, 'cloud-owned');
+
+    // Routine sync() fails loudly for a Cloud-owned entry, so activation stays the
+    // recovery path: Cloud is authoritative for the install paths its Base record
+    // owns, and the local copy is snapshotted before it is replaced.
+    const activation = await fixture.activate();
+
+    assert.equal(activation.direction, 'cloud_to_local');
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-owned', 'SKILL.md'), 'utf8'),
+      /approved cloud owned/,
+    );
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'cloud-owned', 'assets')), false);
+    assert.equal((await fixture.sync()).direction, 'none');
   });
 
   test('activation keeps a no-Base local workspace when the Cloud Definition is empty', async () => {
@@ -2151,7 +2478,7 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     );
   });
 
-  test('activation snapshots unscanned workspace files before a Cloud change removes them', async () => {
+  test('activation carries unscanned workspace files through a Cloud change', async () => {
     const fixture = createFixture(roots);
     writeSkill(fixture.skillsRoot, 'local-a', 'local-a', 'approved local');
     await fixture.sync();
@@ -2164,7 +2491,20 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
 
     await fixture.activate();
 
-    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'README.md')), false);
+    assert.equal(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'README.md'), 'utf8'),
+      'local operator notes',
+    );
+    assert.equal(
+      fs.readFileSync(path.join(fixture.skillsRoot, '.drafts', 'idea.md'), 'utf8'),
+      'recoverable draft',
+    );
+    // Base-owned Skills stay replaceable, so the removed Cloud Skill is gone.
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'local-a')), false);
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-b', 'SKILL.md'), 'utf8'),
+      /canonical cloud/,
+    );
     const snapshot = readPendingSnapshot(fixture.runtimeRoot, fixture.botId);
     assert.equal(snapshot.manifest.reason, 'activation_cloud_reconcile');
     assert.equal(
@@ -2581,6 +2921,20 @@ function writeSkill(root: string, directory: string, name: string, body: string)
 
 function skillText(name: string, body: string): string {
   return `---\nname: ${name}\ndescription: test\n---\n\n${body}\n`;
+}
+
+/** Writes an operator Skill past MAX_FILES so the package validator rejects it. */
+function writeOversizedSkill(root: string, directory: string): string {
+  const skillRoot = path.join(root, directory);
+  fs.mkdirSync(path.join(skillRoot, 'assets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(skillRoot, 'SKILL.md'),
+    skillText(directory, 'too many files to package'),
+  );
+  for (let index = 0; index < 260; index += 1) {
+    fs.writeFileSync(path.join(skillRoot, 'assets', `file-${index}.txt`), `asset ${index}`);
+  }
+  return skillRoot;
 }
 
 function createPackage(

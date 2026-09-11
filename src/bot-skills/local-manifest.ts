@@ -15,9 +15,19 @@ import type {
 export const BOT_SKILL_LOCAL_MARKER_FILE = '.xiaoba-bot-skill.json';
 
 export class BotSkillPackageValidationError extends Error {
-  constructor(message: string) {
+  /**
+   * Packaged size limits describe the synchronization channel, not the Skill:
+   * a workspace may legitimately hold a Skill that is too large to publish, and
+   * callers that synchronize can skip such an entry instead of failing forever.
+   * Every other failure reports broken content - invalid frontmatter, unsafe
+   * paths, secrets - and must keep failing loudly wherever it is found.
+   */
+  readonly kind: 'content' | 'package-limit';
+
+  constructor(message: string, kind: 'content' | 'package-limit' = 'content') {
     super(message);
     this.name = 'BotSkillPackageValidationError';
+    this.kind = kind;
   }
 }
 
@@ -370,11 +380,14 @@ export function collectBotSkillPackageFiles(
         }
       }
       if (bytes.length > MAX_SINGLE_FILE_BYTES) {
-        throw new BotSkillPackageValidationError(`Skill file is too large: ${relativePath}`);
+        throw new BotSkillPackageValidationError(
+          `Skill file is too large: ${relativePath}`,
+          'package-limit',
+        );
       }
       totalBytes += bytes.length;
       if (totalBytes > MAX_TOTAL_BYTES) {
-        throw new BotSkillPackageValidationError('Skill package is too large');
+        throw new BotSkillPackageValidationError('Skill package is too large', 'package-limit');
       }
       files.push({
         path: relativePath,
@@ -383,7 +396,10 @@ export function collectBotSkillPackageFiles(
         contentBase64: bytes.toString('base64'),
       });
       if (files.length > MAX_FILES) {
-        throw new BotSkillPackageValidationError('Skill package contains too many files');
+        throw new BotSkillPackageValidationError(
+          'Skill package contains too many files',
+          'package-limit',
+        );
       }
     }
   };
