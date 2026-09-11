@@ -229,7 +229,7 @@
     }
     if (bodyState === 'offline') {
       return {
-        key: 'error',
+        key: 'offline_binding',
         title: '当前 Agent 仍绑定在另一台设备',
         error: '原设备当前虽然离线，但平台仍保留它的绑定。本机无法自动接管，请先在 CatsCompany 的设备或 Agent 管理处完成转移，再点击重新连接。',
       };
@@ -270,16 +270,18 @@
 
     $('login-form').hidden = view.key !== 'auth';
     $('progress-list').hidden = view.key !== 'connecting';
-    $('error-card').hidden = view.key !== 'error';
+    $('error-card').hidden = !['error', 'offline_binding'].includes(view.key);
     $('webapp-button').hidden = view.key !== 'ready';
     $('logout-button').hidden = view.key === 'auth' || (!cats.connected && !cats.tokenPresent);
     $('retry-button').hidden = view.key !== 'error';
+    $('transfer-body-button').hidden = view.key !== 'offline_binding';
     $('close-hint').hidden = view.key !== 'ready';
 
     if (view.key === 'auth') renderAuth(view);
     if (view.key === 'connecting') renderConnecting(cats, service);
     if (view.key === 'ready') renderReady(cats);
     if (view.key === 'error') renderError(view);
+    if (view.key === 'offline_binding') renderError(view);
     renderUpdate();
     syncPolling(view.key);
     maybeOpenWebAppAfterLogin(view.key);
@@ -342,6 +344,23 @@
     setText('error-title', title);
     setText('error-copy', detail);
     setNotice(`${title}：${detail}`, 'error');
+  }
+
+  async function transferBody() {
+    if (state.actionBusy) return;
+    state.actionBusy = true;
+    setBusyButtons(true);
+    try {
+      await request('/cats/connector/transfer-body', { method: 'POST', body: '{}' });
+      state.bootstrap = { stage: 'connecting', message: '绑定已转移，正在重新连接这台电脑' };
+      await refresh({ force: true });
+      showToast('绑定已转移，正在重新连接');
+    } catch (error) {
+      showToast(`转移失败：${humanError(error)}`);
+    } finally {
+      state.actionBusy = false;
+      setBusyButtons(false);
+    }
   }
 
   function markStep(name, status) {
@@ -1249,6 +1268,7 @@
   });
   $('refresh-button').addEventListener('click', () => refresh({ force: true }));
   $('retry-button').addEventListener('click', retry);
+  $('transfer-body-button').addEventListener('click', transferBody);
   $('diagnostic-retry').addEventListener('click', retry);
   $('logout-button').addEventListener('click', openLogoutDialog);
   $('logout-confirm').addEventListener('click', () => { void logout(); });

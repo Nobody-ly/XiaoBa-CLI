@@ -3822,6 +3822,25 @@ export function createApiRouter(
     }
   });
 
+  router.post('/cats/connector/transfer-body', async (_req, res) => {
+    try {
+      const state = trustCatsAuthStateEndpoints(getCatsAuthState());
+      if (!state.token || !state.uid) return res.status(401).json({ error: 'CatsCo user login is required' });
+      const botUid = currentBoundBotId();
+      const bodyId = String(createCatsCoLocalConfigService({ runtimeRoot: runtimeDataRoot() }).load().device?.bodyId || '').trim();
+      if (!botUid || !bodyId) return res.status(409).json({ error: 'No local CatsCo bot or body is configured' });
+      await catsRequest('POST', state.httpBaseUrl, '/api/bots/body-transfer', {
+        bot_uid: Number(botUid),
+        body_id: bodyId,
+      }, state.token);
+      const result = await startCatsCompanyConnectorIfReady(serviceManager, { restartIfRunning: true });
+      return res.json({ ok: true, botUid, bodyId, connectorRestarted: result.connectorRestarted, service: result.service });
+    } catch (e: any) {
+      const payload = catsErrorResponse(e);
+      return res.status(payload.status).json(payload.body);
+    }
+  });
+
   router.post('/cats/setup', async (req, res) => {
     try {
       const state = trustCatsAuthStateEndpoints(getCatsAuthState(req.body || {}));
