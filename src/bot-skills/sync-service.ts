@@ -21,13 +21,16 @@ import { BotSkillBaseStore } from './base-store';
 import {
   BOT_SKILL_LOCAL_MARKER_FILE,
   computeBotSkillPackageHash,
+  isPortablePackagePath,
   readBotSkillLocalMarker,
+  scanLocalBotSkill,
   scanBotSkillWorkspace,
   type BotSkillWorkspaceValidationFailure,
   type ScanBotSkillWorkspaceOptions,
   writeBotSkillLocalMarker,
 } from './local-manifest';
 import { BotPrivateSkillClient } from './private-package-client';
+import { Logger } from '../utils/logger';
 import { renameBotSkillWorkspaceSync } from './workspace-fs';
 import { BotSkillWorkspaceService } from './workspace';
 import type {
@@ -333,8 +336,11 @@ export class BotSkillSyncService {
 
   /**
    * Reconciles the formal Skill workspace while a Bot is being activated.
-   * Cloud BotDefinition is the only authority in this path: local changes are
-   * preserved as evidence and are never uploaded or written back to Cloud.
+   * The Cloud BotDefinition is authoritative only for the Skills it owns: local
+   * changes to those Skills are preserved as evidence and are never uploaded or
+   * written back to Cloud. Workspace entries the Definition does not own -
+   * operator managed and user authored Skills, plus stray files such as notes -
+   * are carried into the restored workspace instead of being deleted.
    */
   async reconcileActivationFromCloudOnly(): Promise<BotSkillSyncResult> {
     try {
@@ -456,7 +462,7 @@ export class BotSkillSyncService {
       }
 
       return this.restoreCloud(cloud, {
-        preserveUnmanaged: false,
+        preserveLocalOnlyWorkspace: true,
         pendingSnapshot: {
           reason: localChanged
             ? base ? 'activation_local_changed' : 'activation_without_base'
@@ -1011,6 +1017,16 @@ export class BotSkillSyncService {
   private async restoreCloud(
     cloud: CloudBotSkills,
     options: {
+      /**
+       * Cloud is authoritative for the Skills its own Definition owns. When
+       * set, only the workspace directories Base attributes to this Bot's
+       * Definition may be replaced or removed: operator managed Skills, user
+       * authored Skills and stray files survive the restore. The activation
+       * path needs this because its previous workspace may never have matched
+       * Base, so "every Skill on disk" is not the same set as "every Skill
+       * Cloud owns".
+       */
+      preserveLocalOnlyWorkspace?: boolean;
       preserveUnmanaged?: boolean;
       validateScope?: () => Promise<void> | void;
       pendingSnapshot?: {
@@ -1035,6 +1051,8 @@ export class BotSkillSyncService {
   private async restoreCloudUnchecked(
     cloud: CloudBotSkills,
     options: {
+      /** See restoreCloud: keep workspace entries this Bot's Definition does not own. */
+      preserveLocalOnlyWorkspace?: boolean;
       preserveUnmanaged?: boolean;
       validateScope?: () => Promise<void> | void;
       pendingSnapshot?: {
@@ -1050,9 +1068,23 @@ export class BotSkillSyncService {
     const stage = path.join(parent, `.bot-skills-stage-${operationID}`);
     const backup = path.join(parent, `.bot-skills-backup-${operationID}`);
     const packages: BotSkillPackage[] = [];
-    const previousManagedRoots = fs.existsSync(this.skillsRoot) && options.preserveUnmanaged !== false
-      ? scanBotSkillWorkspace(this.skillsRoot).map(entry => path.resolve(entry.path))
-      : [];
+    const workspaceExists = fs.existsSync(this.skillsRoot);
+    const preserveLocalOnlyWorkspace = options.preserveLocalOnlyWorkspace === true;
+    const preserveUnmanaged = options.preserveUnmanaged !== false || preserveLocalOnlyWorkspace;
+    /*
+     * Base is the only durable record of which workspace directories this Bot's
+     * Cloud Definition owns. The activation path must not fall back to "every
+     * Skill currently on disk is mine to replace": a first migration, a stale
+     * Base or an operator-attached server workspace would lose the Skills the
+     * owner never declared to Cloud. Without that record nothing is treated as
+     * replaceable, so the restore can only add Cloud Skills.
+     */
+    const previousBase = this.baseStore.read(this.botId);
+    const previousManagedRoots = !workspaceExists || !preserveUnmanaged
+      ? []
+      : preserveLocalOnlyWorkspace
+        ? cloudOwnedSkillRoots(this.skillsRoot, previousBase)
+        : scanBotSkillWorkspace(this.skillsRoot).map(entry => path.resolve(entry.path));
     const previousDefinition = this.definitionService.read(this.botId);
     let entries: BotSkillSyncBaseEntry[] = [];
     let localPendingEvidence: BotSkillSyncResult['localPendingEvidence'];
@@ -1062,7 +1094,7 @@ export class BotSkillSyncService {
     try {
       this.writeRestoreJournal({ stage, backup, phase: 'prepared' });
       const previousInstallNames = new Map(
-        (this.baseStore.read(this.botId)?.skills ?? []).map(entry => [
+        (previousBase?.skills ?? []).map(entry => [
           referenceKey(entry.reference),
           entry.installName,
         ]),
@@ -1097,14 +1129,15 @@ export class BotSkillSyncService {
       if (!botSkillRefsEqual(restoredRefs, cloud.skills)) {
         throw new Error('Restored Bot Skill workspace does not match its cloud Definition.');
       }
-      if (fs.existsSync(this.skillsRoot) && options.preserveUnmanaged !== false) {
+      if (workspaceExists && preserveUnmanaged) {
         copyUnmanagedWorkspaceContent(
           this.skillsRoot,
           stage,
           previousManagedRoots,
           stagedLocal.map(entry => path.resolve(entry.path)),
+          { skipConflicts: preserveLocalOnlyWorkspace },
         );
-        entries = verifiedRestoredEntries(stage, packages, cloud.skills);
+        entries = verifiedRestoredEntries(stagedLocal, packages, cloud.skills);
       }
 
       if (fs.existsSync(this.skillsRoot)) {
@@ -1494,12 +1527,40 @@ function referenceKey(reference: BotSkillRef): string {
   return `${reference.skillId}\0${reference.version}`;
 }
 
+/**
+ * Resolves the workspace directories Base attributes to this Bot's Cloud
+ * Definition. Only those paths may be replaced or removed by a Cloud restore:
+ * every other entry on disk belongs to the operator or the user.
+ */
+function cloudOwnedSkillRoots(
+  skillsRoot: string,
+  base: BotSkillSyncBase | undefined,
+): string[] {
+  const root = path.resolve(skillsRoot);
+  const owned = new Set<string>();
+  for (const entry of base?.skills ?? []) {
+    const installName = String(entry.installName || '').trim();
+    if (!installName || !isPortablePackagePath(installName)) continue;
+    const resolved = path.resolve(root, installName);
+    if (!isContainedPath(root, resolved)) continue;
+    owned.add(resolved);
+  }
+  return [...owned];
+}
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
 function copyUnmanagedWorkspaceContent(
   sourceRoot: string,
   targetRoot: string,
   managedRoots: string[],
   targetManagedRoots: string[],
+  options: { skipConflicts?: boolean } = {},
 ): void {
+  const displaced: string[] = [];
   const visit = (current: string): void => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) continue;
@@ -1511,7 +1572,14 @@ function copyUnmanagedWorkspaceContent(
       if (targetManagedRoots.some(managed => (
         target === managed || target.startsWith(`${managed}${path.sep}`)
       ))) {
-        throw new Error(`Unmanaged workspace content conflicts with a restored Skill: ${relative}`);
+        if (!options.skipConflicts) {
+          throw new Error(`Unmanaged workspace content conflicts with a restored Skill: ${relative}`);
+        }
+        // Cloud owns this install path, so the restored Skill wins. The
+        // displaced entry stays recoverable in the snapshot the activation
+        // path takes before it replaces the workspace.
+        displaced.push(relative.replace(/\\/g, '/'));
+        continue;
       }
       if (entry.isDirectory()) {
         fs.mkdirSync(target, { recursive: true });
@@ -1523,27 +1591,45 @@ function copyUnmanagedWorkspaceContent(
     }
   };
   visit(sourceRoot);
+  if (displaced.length > 0) {
+    Logger.warning(
+      `Skill workspace restore preferred the Cloud Skill for ${displaced.length} local `
+      + `entr${displaced.length === 1 ? 'y' : 'ies'} sharing its install path: `
+      + `${displaced.slice(0, 5).join(', ')}${displaced.length > 5 ? ', ...' : ''}`,
+    );
+  }
 }
 
+/**
+ * Re-reads every Cloud package that was materialized into the stage after the
+ * workspace entries Cloud does not own were copied in. The copy only ever adds
+ * paths - it never overwrites a restored Skill - so this pass proves that each
+ * restored Skill is still intact and returns the Base entries for those Skills
+ * alone. Preserved local-only entries stay out of Base, which keeps them out of
+ * the Cloud definition instead of pretending Cloud owns them.
+ */
 function verifiedRestoredEntries(
-  stage: string,
+  stagedSkills: readonly LocalBotSkillManifestEntry[],
   packages: BotSkillPackage[],
   expectedRefs: BotSkillRef[],
 ): BotSkillSyncBaseEntry[] {
-  const finalLocal = scanBotSkillWorkspace(stage);
   const packageByLocalID = new Map(packages.map(item => [item.localSkillId, item]));
-  const entries = finalLocal.map(entry => {
-    const packageValue = packageByLocalID.get(entry.localSkillId);
-    if (!packageValue || packageValue.contentHash !== entry.contentHash || !entry.reference) {
-      throw new Error(`Restored Bot Skill failed post-copy verification: ${entry.name}`);
+  const entries = stagedSkills.map(staged => {
+    const packageValue = packageByLocalID.get(staged.localSkillId);
+    if (!packageValue) {
+      throw new Error(`Restored Bot Skill has no Cloud package: ${staged.name}`);
+    }
+    const current = scanLocalBotSkill(staged.path);
+    if (current.contentHash !== packageValue.contentHash || !current.reference) {
+      throw new Error(`Restored Bot Skill failed post-copy verification: ${staged.name}`);
     }
     return {
-      localSkillId: entry.localSkillId,
-      name: entry.name,
-      installName: entry.installName,
-      contentHash: entry.contentHash,
-      reference: entry.reference,
-      ...(entry.origin ? { origin: entry.origin } : {}),
+      localSkillId: current.localSkillId,
+      name: current.name,
+      installName: staged.installName,
+      contentHash: current.contentHash,
+      reference: current.reference,
+      ...(current.origin ? { origin: current.origin } : {}),
     };
   });
   const restoredRefs = canonicalizeBotSkillRefs(entries.map(entry => entry.reference));
