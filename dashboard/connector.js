@@ -227,6 +227,13 @@
         error: '为了避免两台电脑同时接管同一个 Agent，本机暂时没有启动 Connector。请先退出另一台设备，或稍后重试。',
       };
     }
+    if (bodyState === 'offline') {
+      return {
+        key: 'error',
+        title: '当前 Agent 仍绑定在另一台设备',
+        error: '原设备当前虽然离线，但平台仍保留它的绑定。本机无法自动接管，请先在 CatsCompany 的设备或 Agent 管理处完成转移，再点击重新连接。',
+      };
+    }
     if (bodyState === 'auth_error') {
       return { key: 'error', title: 'Agent 绑定需要重新确认', error: cats.bodyStatus?.error || '当前账号无法使用这个 Agent。' };
     }
