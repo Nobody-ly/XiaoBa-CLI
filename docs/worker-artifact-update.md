@@ -4,6 +4,10 @@
 `update/worker/<version>/`，并触发 `.github/workflows/worker-image.yml` 自动 bake
 云镜像。正常发布无需手动触发；`workflow_dispatch` 仅用于补发或故障恢复。
 
+Release CD 会在发布成功后清理 `catsco-worker-release` 应用制品，只保留最近三个
+版本；较旧且至少存在一天的完整版本才会删除。因此控制面用于更新和回滚的应用
+版本列表与镜像历史都保持在最近三个以内。
+
 已有云员工由控制面获取私有制品并调用 `scripts/update-worker-artifact.sh`。更新器
 只修改 `/opt/catsco/releases` 与 `/opt/catsco/current`，重启并验证服务，失败自动
 回滚；`/srv/catsco-agent` 用户数据、会话、技能和凭据不受影响。

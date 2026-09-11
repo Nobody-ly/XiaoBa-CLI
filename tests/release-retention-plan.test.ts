@@ -23,6 +23,14 @@ function release(version: string, modified = oldDate) {
   ];
 }
 
+function workerRelease(version: string, modified = oldDate) {
+  return [
+    object(`update/worker/${version}/catsco-worker-${version}-linux-x64.tar.gz`, modified),
+    object(`update/worker/${version}/catsco-worker-${version}-linux-x64.tar.gz.sha256`, modified),
+    object(`update/worker/${version}/manifest.json`, modified),
+  ];
+}
+
 test('semantic versions sort numerically', () => {
   assert.equal(compareReleaseVersions('1.10.0', '1.9.9') > 0, true);
   assert.equal(compareReleaseVersions('1.4.8', '1.4.8-beta.1') > 0, true);
@@ -50,7 +58,7 @@ test('protects current metadata and the newest two complete releases', () => {
   assert.deepEqual(plan.deleteVersions, ['1.0.1', '1.1.0', '1.4.6']);
   assert.equal(plan.deleteObjects.length, 15);
   assert.equal(plan.deleteObjects.some((row) => row.key.includes('1.4.8')), false);
-  assert.deepEqual(plan.ignoredKeys.sort(), ['update/latest.yml', 'update/worker/1.4.8/manifest.json']);
+  assert.deepEqual(plan.ignoredKeys.sort(), ['update/latest.yml']);
 });
 
 test('does not delete a release with any recently republished artifact', () => {
@@ -85,4 +93,23 @@ test('deletion cap never splits a release group', () => {
   assert.deepEqual(plan.deleteVersions, ['1.0.0']);
   assert.deepEqual(plan.deferredVersions, ['1.0.1']);
   assert.equal(plan.deleteObjects.length, 5);
+});
+
+test('worker artifacts are grouped and retain the newest three versions', () => {
+  const plan = buildReleaseRetentionPlan({
+    objects: [
+      ...workerRelease('1.5.7'),
+      ...workerRelease('1.5.6'),
+      ...workerRelease('1.5.5'),
+      ...workerRelease('1.5.4'),
+    ],
+    keepVersions: 3,
+    minAgeDays: 1,
+    maxDeleteObjects: 20,
+    now,
+  });
+
+  assert.deepEqual(plan.protectedVersions, ['1.5.7', '1.5.6', '1.5.5']);
+  assert.deepEqual(plan.deleteVersions, ['1.5.4']);
+  assert.equal(plan.deleteObjects.length, 3);
 });

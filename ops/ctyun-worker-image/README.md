@@ -59,13 +59,13 @@ application releases while still allowing new workers to start without GitHub.
   > this `.ps1`.
 - `-Action Latest` : print the newest imageID (used by deployment to pick the
   latest image)
-- `-Action Prune`  : keep the newest `-Keep` images (default 6) and delete
+- `-Action Prune`  : keep the newest `-Keep` images (default 3) and delete
   older bake-labeled `catsco-worker-*` images; each deletion is confirmed by a
   name-scoped `ListImage` read, and failures fail closed.
   Requires `-ProtectedImageIDs` (comma-separated) when there are images to
   delete — protected images are never deleted.
 
-CI runs `Prune -Keep 6` after every successful bake (`continue-on-error`,
+CI runs `Prune -Keep 3` after every successful bake (`continue-on-error`,
 30-minute budget), passing `$env:WORKER_PROTECTED_IMAGE_IDS` (repo var
 `CTYUN_WORKER_PROTECTED_IMAGE_IDS`).
 
@@ -75,7 +75,7 @@ CI runs `Prune -Keep 6` after every successful bake (`continue-on-error`,
   launch template, plus any pinned rollback/staged-rollout target. The script
   only verifies the list is non-empty; it does not auto-discover the template
   reference, so keep it in sync when the template moves.
-- **Local invocation**: `./Manage-WorkerImages.ps1 -Action Prune -Keep 6
+- **Local invocation**: `./Manage-WorkerImages.ps1 -Action Prune -Keep 3
   -RegionID <region> -ProjectID 0 -ProtectedImageIDs
   "<imageID1>,<imageID2>"`.
 - **Rotating / emergency**: after a bake that becomes the new production

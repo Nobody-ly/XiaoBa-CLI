@@ -8,7 +8,7 @@
 - **本计划目标：** 把云虚拟员工（worker）的**创建 / 版本展示 / 回滚 / 重置**统一到**控制面 web（"云托管"入口）**，并完善**镜像生命周期**（保留 N 个、bake 后自动清理、部署/控制面取最新镜像）。
 - **用户当前思路（2026-08-07 确认）：**
   1. 控制面 web 界面放在「**云托管**」按钮这里（截图：AI 助手管理对话框的"自托管 / 云托管"选项，云托管 → 云虚拟员工管理），**所有云虚拟员工的界面配置控制集中在此**。
-  2. **私有镜像保留 6 个**（`catsco-worker-*`），**bake 成功后自动触发清理**旧镜像。
+  2. **私有镜像保留 3 个**（`catsco-worker-*`），**bake 成功后自动触发清理**旧镜像。
   3. 虚拟员工**显示版本**；有历史镜像可选时支持**镜像回滚**。
   4. web 按钮带「**可创建云虚拟员工次数**」配额——有剩余次数就能点按钮触发创建，后端跑脚本（复用现有 bake/供给流程）。**配额用环境变量控制**（谁能开、开几个），**初始值 0**。
   5. **重置**是**针对单个服务器上的那个虚拟员工**，用户一般**一个一个**重置（非批量）。
@@ -23,25 +23,25 @@
 
 ## 模块 A：镜像生命周期管理（XiaoBa-CLI 侧）
 
-**目标：** 私有 `catsco-worker-*` 镜像**最多保留 6 个**；bake 成功后自动清理更旧的；提供"取最新镜像"能力供部署/控制面使用；支持列出历史镜像供回滚选择。
+**目标：** 私有 `catsco-worker-*` 镜像**最多保留 3 个**；bake 成功后自动清理更旧的；提供"取最新镜像"能力供部署/控制面使用；支持列出历史镜像供回滚选择。
 
 ### A1. 镜像保留与自动清理
 - [x] **步骤 A1-1：清理逻辑设计**（2026-08-07）
   - 在 bake **成功后**自动触发清理（幂等，可独立调用）。
-  - 规则：列出私有镜像 `catsco-worker-*`（`ims ListImage --imageVisibilityCode 0`），按 `createdTime` 排序，**保留最新 6 个**，删除更旧的。
+  - 规则：列出私有镜像 `catsco-worker-*`（`ims ListImage --imageVisibilityCode 0`），按 `createdTime` 排序，**保留最新 3 个**，删除更旧的。
   - **安全（fail-closed）**：只删名称以 `catsco-worker-` 开头且带 `bake` label 的镜像；删除前连续空读确认（用 `ListImage` 全量过滤，不用 `GetImageDetail`——实测其对私有镜像偶发 NotFound）；删除失败聚合报告。
   - 触发：`worker-image.yml` bake 成功步骤后自动调用（`continue-on-error`，清理失败仅告警不阻塞镜像产出）。
 - [x] **步骤 A1-2：测试**（`tests/manage-worker-images.test.ts`）
-  - fake `ims ListImage/DeleteImage` 支持多镜像排序；场景：List 只列带 bake label 的 `catsco-worker-*`、Latest 输出最新、Prune 6 删最旧 2、≤6 不删、删除失败 fail-closed 且其它照常删、非 worker/无 bake label 镜像永不删。
+  - fake `ims ListImage/DeleteImage` 支持多镜像排序；场景：List 只列带 bake label 的 `catsco-worker-*`、Latest 输出最新、Prune 3 删最旧 2、≤3 不删、删除失败 fail-closed 且其它照常删、非 worker/无 bake label 镜像永不删。
 - [x] **步骤 A1-3：实现 + 验证**
-  - 新建 `ops/ctyun-worker-image/Manage-WorkerImages.ps1`（`-Action List/Latest/Prune -Keep 6`）；`worker-image.yml` bake 成功后接入 `Prune -Keep 6`；`npm run build` + 测试 12/12 全绿。
+  - 新建 `ops/ctyun-worker-image/Manage-WorkerImages.ps1`（`-Action List/Latest/Prune -Keep 3`）；`worker-image.yml` bake 成功后接入 `Prune -Keep 3`；`npm run build` + 测试 12/12 全绿。
 
 ### A2. 部署/控制面取最新镜像
 - [x] **步骤 A2-1：`resolve-latest-worker-image`**（`Manage-WorkerImages.ps1 -Action Latest`）
   - 列出 `catsco-worker-*` 私有镜像，按 `createdTime`（降序，id 兜底）取最新，输出 `imageID`。
   - 部署脚本 / 控制面（Part B）用它创建新 worker。
 - [x] **步骤 A2-2：历史镜像列表（供回滚选择）**（`Manage-WorkerImages.ps1 -Action List`）
-  - 输出 `imageID / name / version / commit / createdTime / status`，控制面据此展示"镜像回滚"可选列表（保留 6 个内的历史镜像）。
+  - 输出 `imageID / name / version / commit / createdTime / status`，控制面据此展示"镜像回滚"可选列表（保留 3 个内的历史镜像）。
 
 ---
 
@@ -77,7 +77,7 @@
 
 ## 关键决策（已确认 / 待确认）
 
-- ✅ 镜像保留 **6 个**；bake 成功后自动清理。
+- ✅ 镜像保留 **3 个**；bake 成功后自动清理。
 - ✅ 重置为**单 worker** 逐个操作（强确认）。
 - ✅ 控制面入口为「云托管」按钮，含创建配额。
 - ✅ **回滚与重置两个动作都提供并写清楚分开**：「回滚」=保留数据（Part A 制品切版本）；「重置/重装」=丢弃数据（销毁重建到镜像）。

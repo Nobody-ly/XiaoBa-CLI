@@ -711,7 +711,7 @@ jobs:
             -SecurityGroupID $env:WORKER_SECURITY_GROUP_ID
 
       - name: Prune old worker images
-        # Keep the latest 6 worker images after a successful bake; cleaning up
+        # Keep the latest 3 worker images after a successful bake; cleaning up
         # old images is housekeeping, so a prune failure only warns and never
         # blocks the freshly baked image (the primary deliverable). 30 minutes
         # covers the worst case where many stale images accumulated (each
@@ -732,7 +732,7 @@ jobs:
         run: |
           ./ops/ctyun-worker-image/Manage-WorkerImages.ps1 `
             -Action Prune `
-            -Keep 6 `
+            -Keep 3 `
             -RegionID $env:WORKER_REGION_ID `
             -ProjectID $env:WORKER_IMAGE_PROJECT_ID `
             -ProtectedImageIDs $env:WORKER_PROTECTED_IMAGE_IDS
