@@ -64,6 +64,19 @@ test('desktop releases are pruned only after publication with bounded retention'
   assert.match(releaseWorkflow, /One or more old \$label release objects still exist/);
 });
 
+test('worker application releases are pruned after publication with three-version retention', () => {
+  const releaseJob = releaseWorkflow.match(/\r?\n  release:\r?\n[\s\S]*$/)?.[0] || '';
+
+  assert.match(releaseJob, /- name: Prune old worker application releases/);
+  assert.match(releaseJob, /--prefix update\/worker\//);
+  assert.match(releaseJob, /--keep-versions 3/);
+  assert.match(releaseJob, /--min-age-days 1/);
+  assert.match(releaseJob, /--max-delete-objects 40/);
+  assert.match(releaseJob, /TOS_WORKER_BUCKET/);
+  assert.match(releaseJob, /worker-delete-result\.json/);
+  assert.match(releaseJob, /newest three versions were preserved/);
+});
+
 test('worker artifacts never enter the public release paths', () => {
   const publicSourceUpload = releaseWorkflow.match(
     /- name: Upload release payloads to Hong Kong source bucket[\s\S]*?- name: Wait for Guangzhou bucket replication/,

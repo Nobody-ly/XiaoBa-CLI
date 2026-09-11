@@ -83,7 +83,7 @@ process.stdout.write(JSON.stringify({
 }));
 `;
 
-test("worker image lifecycle: list, latest, and prune keeps N (default 6)", () => {
+test("worker image lifecycle: list, latest, and prune keeps N (default 3)", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "catsco-img-mgmt-"));
   try {
     const statePath = path.join(sandbox, "state.json");
@@ -194,10 +194,10 @@ process.exit(result.status ?? 1);
     );
     assert.equal(latestResult.stdout.trim(), "img-08");
 
-    // --- Prune 6: deletes the 2 oldest, keeps 6 (protected list declared) ---
+    // --- Prune 3: deletes the 5 oldest, keeps 3 (protected list declared) ---
     writeState();
     fs.rmSync(logPath, { force: true });
-    const pruneResult = runScript("Prune", ["-Keep", "6", "-ProtectedImageIDs", "img-000"]);
+    const pruneResult = runScript("Prune", ["-Keep", "3", "-ProtectedImageIDs", "img-000"]);
     assert.equal(
       pruneResult.status,
       0,
@@ -210,14 +210,14 @@ process.exit(result.status ?? 1);
       i.imageName.startsWith("catsco-worker-") &&
       i.labels.some((l: any) => l.labelKey === "bake"),
     );
-    assert.equal(remaining.length, 6);
+    assert.equal(remaining.length, 3);
     assert.ok(!remaining.some((i: any) => i.imageID === "img-01"));
     assert.ok(!remaining.some((i: any) => i.imageID === "img-02"));
     // unrelated and no-bake images untouched
     assert.ok(prunedState.images.some((i: any) => i.imageID === "img-other"));
     assert.ok(prunedState.images.some((i: any) => i.imageID === "img-nobake"));
 
-    // --- Prune 6 with only 5 -> nothing to delete ---
+    // --- Prune 3 with only 5 -> nothing to delete ---
     writeState({
       images: images.slice(0, 5),
     });
@@ -231,10 +231,10 @@ process.exit(result.status ?? 1);
     const noOpCalls = fs.readFileSync(logPath, "utf8");
     assert.doesNotMatch(noOpCalls, /ims DeleteImage/);
 
-    // --- Prune with a delete failure -> fail closed, keeps others ---
+    // --- Prune 3 with a delete failure -> fail closed, keeps others ---
     writeState({ deleteFailures: ["img-01"] });
     fs.rmSync(logPath, { force: true });
-    const failResult = runScript("Prune", ["-Keep", "6", "-ProtectedImageIDs", "img-000"]);
+    const failResult = runScript("Prune", ["-Keep", "3", "-ProtectedImageIDs", "img-000"]);
     assert.notEqual(failResult.status, 0);
     assert.match(failResult.stderr, /Worker image cleanup failed/);
     const failCalls = fs.readFileSync(logPath, "utf8");
@@ -336,7 +336,7 @@ test("worker image lifecycle: multi-round confirm, pagination, and confirm timeo
     const eight = workerImages(8);
     sb.writeState(eight, { deleteDelayRounds: { "img-001": 3 } });
     fs.rmSync(sb.logPath, { force: true });
-    const pruneRes = sb.runScript("Prune", ["-Keep", "6", "-ProtectedImageIDs", "img-000"]);
+    const pruneRes = sb.runScript("Prune", ["-Keep", "3", "-ProtectedImageIDs", "img-000"]);
     assert.equal(pruneRes.status, 0, `${pruneRes.stdout}\n${pruneRes.stderr}`);
     const pruned = JSON.parse(fs.readFileSync(sb.statePath, "utf8"));
     assert.ok(!pruned.images.some((i: any) => i.imageID === "img-001"), "delayed image must still be removed");
@@ -406,7 +406,7 @@ test("worker image lifecycle: prune protects production-referenced images", () =
     // --- protected oldest image survives prune ---
     sb.writeState(eight, {});
     fs.rmSync(sb.logPath, { force: true });
-    const r = sb.runScript("Prune", ["-Keep", "6", "-ProtectedImageIDs", "img-001"]);
+    const r = sb.runScript("Prune", ["-Keep", "3", "-ProtectedImageIDs", "img-001"]);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     const state = JSON.parse(fs.readFileSync(sb.statePath, "utf8"));
     const remaining = state.images.filter((i: any) => i.labels?.some((l: any) => l.labelKey === "bake"));
@@ -423,7 +423,7 @@ test("worker image lifecycle: prune protects production-referenced images", () =
     // --- no protected list configured -> refuse (fail closed) ---
     sb.writeState(eight, {});
     fs.rmSync(sb.logPath, { force: true });
-    const r3 = sb.runScript("Prune", ["-Keep", "6"]);
+    const r3 = sb.runScript("Prune", ["-Keep", "3"]);
     assert.notEqual(r3.status, 0, `expected refusal:\n${r3.stdout}\n${r3.stderr}`);
     assert.match(r3.stderr, /no protected image IDs configured/);
     assert.doesNotMatch(fs.readFileSync(sb.logPath, "utf8"), /ims DeleteImage/);

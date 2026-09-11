@@ -4,7 +4,7 @@ Worker 私有镜像生命周期管理（与 New-CatsCoWorkerImage.ps1 配套）�
 
   -List   : 列出全部 catsco-worker-* 私有镜像（imageID/name/version/commit/createdTime）
   -Latest : 输出最新 bake 的 worker 镜像 imageID（供部署/控制面取最新镜像）
-  -Prune  : 保留最新 N 个（默认 6），删除更旧的（带 bake label 的 catsco-worker-*），
+  -Prune  : 保留最新 N 个（默认 3），删除更旧的（带 bake label 的 catsco-worker-*），
             删除需连续空读确认（按 --imageName 精确过滤，避免 >200 张时最旧镜像
             不在第 1 页导致的误判），确认超时可配（-ConfirmTimeoutMinutes），
             失败 fail-closed 聚合报告
@@ -26,7 +26,7 @@ param(
     [string]$Action = "List",
 
     [ValidateRange(1, 50)]
-    [int]$Keep = 6,
+    [int]$Keep = 3,
 
     [ValidateRange(1, 30)]
     [int]$ConfirmTimeoutMinutes = 3,

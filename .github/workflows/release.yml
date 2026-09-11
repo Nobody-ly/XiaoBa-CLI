@@ -923,3 +923,59 @@ jobs:
 
           prune_bucket "$TOS_TARGET_BUCKET" "$TOS_TARGET_REGION" guangzhou
           prune_bucket "$TOS_SOURCE_BUCKET" "$TOS_SOURCE_REGION" hong-kong
+
+      - name: Prune old worker application releases
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.VOLC_TOS_WORKER_PUBLISH_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.VOLC_TOS_WORKER_PUBLISH_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+
+          WORKER_ENDPOINT_URL="https://tos-s3-${TOS_WORKER_REGION}.volces.com"
+          RETENTION_DIR="$(mktemp -d)"
+          trap 'rm -rf "$RETENTION_DIR"' EXIT
+
+          aws s3api list-objects-v2 \
+            --bucket "$TOS_WORKER_BUCKET" \
+            --prefix update/worker/ \
+            --endpoint-url "$WORKER_ENDPOINT_URL" \
+            --output json > "$RETENTION_DIR/worker-before.json"
+
+          node scripts/plan-release-retention.mjs \
+            --listing "$RETENTION_DIR/worker-before.json" \
+            --keep-versions 3 \
+            --min-age-days 1 \
+            --max-delete-objects 40 \
+            > "$RETENTION_DIR/worker-plan.json"
+
+          jq '{policy, protectedVersions, deleteVersions, deferredVersions, totals}' \
+            "$RETENTION_DIR/worker-plan.json"
+          delete_count="$(jq -r '.totals.deleteObjects' "$RETENTION_DIR/worker-plan.json")"
+          if [ "$delete_count" -eq 0 ]; then
+            echo "No old worker application release objects are eligible for deletion"
+            exit 0
+          fi
+
+          jq '{Objects: [.deleteObjects[] | {Key: .key}], Quiet: false}' \
+            "$RETENTION_DIR/worker-plan.json" > "$RETENTION_DIR/worker-delete.json"
+          aws s3api delete-objects \
+            --bucket "$TOS_WORKER_BUCKET" \
+            --delete "file://$RETENTION_DIR/worker-delete.json" \
+            --endpoint-url "$WORKER_ENDPOINT_URL" \
+            --output json > "$RETENTION_DIR/worker-delete-result.json"
+          jq -e '(.Errors // []) | length == 0' "$RETENTION_DIR/worker-delete-result.json" >/dev/null
+
+          aws s3api list-objects-v2 \
+            --bucket "$TOS_WORKER_BUCKET" \
+            --prefix update/worker/ \
+            --endpoint-url "$WORKER_ENDPOINT_URL" \
+            --output json > "$RETENTION_DIR/worker-after.json"
+          jq -n -e \
+            --slurpfile plan "$RETENTION_DIR/worker-plan.json" \
+            --slurpfile after "$RETENTION_DIR/worker-after.json" '
+              ($plan[0].deleteObjects | map(.key)) as $deleted
+              | ($after[0].Contents // [] | map(.Key)) as $remaining
+              | [$deleted[] | select(. as $key | $remaining | index($key))] | length == 0
+            ' >/dev/null
+          echo "Deleted $delete_count old worker application objects; newest three versions were preserved"

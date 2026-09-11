@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const RELEASE_PATTERNS = [
+  /^update\/worker\/([^/]+)\/[^/]+$/,
   /^update\/CatsCo-(.+)-win\.exe(?:\.blockmap)?$/,
   /^update\/CatsCo-(.+)-linux\.(?:AppImage|deb)(?:\.blockmap)?$/,
   /^update\/macos-(x64|arm64)\/CatsCo-(.+)-mac-\1\.(?:dmg|zip)(?:\.blockmap)?$/,
