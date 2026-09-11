@@ -471,6 +471,13 @@ async function applyCloudBotDefinitionSelection(
     && effectiveIncoming.skills !== undefined
     && botSkillRefsEqual(previousDefinition.skills, effectiveIncoming.skills)
   );
+  const preserveLocalOnlySkills = Boolean(
+    previousDefinition
+    && previousDefinition.skills !== undefined
+    && effectiveIncoming?.skills
+    && effectiveIncoming.skills.length === 0
+    && botSkillRefsEqual(previousDefinition.skills, effectiveIncoming.skills)
+  );
   const queuedModelChanged = !previousDefinition
     || !effectiveIncoming
     || JSON.stringify(previousDefinition.model) !== JSON.stringify(effectiveIncoming.model);
@@ -517,6 +524,7 @@ async function applyCloudBotDefinitionSelection(
       acknowledgeCloudSelection: false,
       preserveSkills,
       reuseAppliedSkills,
+      preserveLocalOnlySkills,
       requireCloud: true,
     });
   } catch (error) {

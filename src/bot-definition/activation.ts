@@ -51,10 +51,19 @@ export interface PrepareBoundBotDefinitionOptions extends BotDefinitionSyncServi
   preserveSkills?: boolean;
   /**
    * The desired Skill references are identical to the last locally active
-   * definition. Reuse that already-applied Skill dimension without scanning or
-   * mutating the workspace while a model/prompt-only revision is activated.
+   * definition. Reuse that already-applied Skill dimension after verifying
+   * workspace ownership, Base metadata, and local package hashes.
    */
   reuseAppliedSkills?: boolean;
+  /**
+   * A hot-reload caller proved that both the previous and desired Definitions
+   * explicitly contain no synchronized Skill references. Preserve any
+   * local-only workspace without treating it as a synchronized Skill package.
+   * The workspace is still activated for this Bot so the ownership invariant
+   * from the strict path keeps holding. This escape hatch is valid only while
+   * the desired Skill list stays empty.
+   */
+  preserveLocalOnlySkills?: boolean;
   /** Hot reload must not silently fall back to legacy/local startup after a failed cloud read. */
   requireCloud?: boolean;
 }
@@ -243,10 +252,18 @@ export async function prepareBoundBotDefinition(
           )
         );
         const desiredRevision = cloudSnapshot.revision;
-        const skillSync = (
-          options.prepareSkills === false
-          || options.preserveSkills
-        )
+        // Ownership is never part of the escape hatch: the workspace is still
+        // activated for this Bot, only the Cloud package reconciliation is
+        // skipped.
+        const preserveLocalOnlySkills = Boolean(
+          options.preserveLocalOnlySkills
+          && previouslyActiveDefinition?.skills?.length === 0
+          && cloudSnapshot.definition?.skills?.length === 0
+        );
+        const skillsManagedOutsidePreparation = (
+          options.prepareSkills === false || options.preserveSkills
+        );
+        const skillSync = skillsManagedOutsidePreparation
           ? undefined
           : await prepareBoundBotSkills({
               runtimeRoot: options.runtimeRoot,
@@ -254,6 +271,9 @@ export async function prepareBoundBotDefinition(
               auth,
               fetchImpl: options.fetchImpl,
               definitionService,
+              ...(preserveLocalOnlySkills
+                ? { preserveLocalOnlyWorkspace: { definitionRevision: desiredRevision } }
+                : {}),
               ...(reuseAppliedSkills && cloudSnapshot.definition?.skills
                 ? {
                     reuseVerifiedLocal: {
@@ -272,6 +292,7 @@ export async function prepareBoundBotDefinition(
         );
         const targetRevisionApplied = (
           options.preserveSkills
+          || (preserveLocalOnlySkills && options.prepareSkills === false)
           || skippedSkillsAreAbsent
           || Boolean(
             skillSync
