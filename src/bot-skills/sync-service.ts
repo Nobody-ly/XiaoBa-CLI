@@ -225,7 +225,7 @@ export class BotSkillSyncService {
       this.skillsRoot,
     );
     const base = this.baseStore.read(this.botId);
-    let local = this.readLocalManifest();
+    let local = this.readSyncableLocalManifest();
     let cloud: CloudBotSkills | undefined;
     try {
       cloud = await pullCloudBotSkills(this.cloudOptions);
@@ -239,7 +239,7 @@ export class BotSkillSyncService {
     }
 
     this.recoverInterruptedFinalizes(cloud);
-    local = this.readLocalManifest();
+    local = this.readSyncableLocalManifest();
 
     if (!cloud.definition) {
       if (!this.workspaceExisted && base?.skills.length) {
@@ -341,6 +341,11 @@ export class BotSkillSyncService {
    * written back to Cloud. Workspace entries the Definition does not own -
    * operator managed and user authored Skills, plus stray files such as notes -
    * are carried into the restored workspace instead of being deleted.
+   *
+   * Activation itself writes nothing to Cloud, but a carried entry stays an
+   * ordinary local Skill: a later routine sync() or an explicit owner publish
+   * can still turn it into a Bot private package. Only the delete-on-activate
+   * behaviour changes here, not the established Local to Cloud sync direction.
    */
   async reconcileActivationFromCloudOnly(): Promise<BotSkillSyncResult> {
     try {
@@ -818,6 +823,26 @@ export class BotSkillSyncService {
     };
   }
 
+  /**
+   * Routine sync reads the workspace through this helper. A single Skill the
+   * package validator rejects for its packaged size - too many files, or a file
+   * past the size limit - must not wedge every later sync: the entry is reported
+   * and skipped so the remaining Skills, the Base record and the Cloud Definition
+   * still converge. A skipped entry is never treated as Cloud owned, so a restore
+   * keeps it on disk. Broken content still fails loudly, and the owner-facing
+   * publish paths keep the strict read, because that owner asked to publish this
+   * workspace and needs to see the validation error.
+   */
+  private readSyncableLocalManifest(): LocalBotSkillManifestEntry[] {
+    const rejected: BotSkillWorkspaceValidationFailure[] = [];
+    const entries = this.readLocalManifest({
+      onValidationFailure: failure => rejected.push(failure),
+    });
+    assertOnlyPackageLimitsSkipped(rejected);
+    reportSkippedLocalSkills(rejected);
+    return entries;
+  }
+
   private async pushLocal(
     local: LocalBotSkillManifestEntry[],
     initialCloud: CloudBotSkills,
@@ -1084,7 +1109,7 @@ export class BotSkillSyncService {
       ? []
       : preserveLocalOnlyWorkspace
         ? cloudOwnedSkillRoots(this.skillsRoot, previousBase)
-        : scanBotSkillWorkspace(this.skillsRoot).map(entry => path.resolve(entry.path));
+        : scanManageableWorkspaceRoots(this.skillsRoot);
     const previousDefinition = this.definitionService.read(this.botId);
     let entries: BotSkillSyncBaseEntry[] = [];
     let localPendingEvidence: BotSkillSyncResult['localPendingEvidence'];
@@ -1528,6 +1553,44 @@ function referenceKey(reference: BotSkillRef): string {
 }
 
 /**
+ * Scans the workspace for the restore fallback, tolerating Skills the package
+ * validator rejects. An unreadable entry cannot be attributed to Cloud, so it is
+ * copied through the restore instead of being dropped, and one oversized Skill
+ * can no longer fail the whole restore. It is reported so the operator sees it.
+ */
+function scanManageableWorkspaceRoots(skillsRoot: string): string[] {
+  const rejected: BotSkillWorkspaceValidationFailure[] = [];
+  const roots = scanBotSkillWorkspace(skillsRoot, {
+    onValidationFailure: failure => rejected.push(failure),
+  }).map(entry => path.resolve(entry.path));
+  assertOnlyPackageLimitsSkipped(rejected);
+  reportSkippedLocalSkills(rejected);
+  return roots;
+}
+
+/**
+ * Skipping is only ever allowed for the packaged size limits. A Skill whose
+ * frontmatter, paths or contents are broken must keep failing the caller with
+ * the original validation error.
+ */
+function assertOnlyPackageLimitsSkipped(
+  rejected: BotSkillWorkspaceValidationFailure[],
+): void {
+  const blocking = rejected.find(failure => failure.error.kind !== 'package-limit');
+  if (blocking) throw blocking.error;
+}
+
+function reportSkippedLocalSkills(skipped: BotSkillWorkspaceValidationFailure[]): void {
+  if (skipped.length === 0) return;
+  Logger.warning(
+    `Skipped ${skipped.length} local Skill${skipped.length === 1 ? '' : 's'} that cannot be `
+    + 'packaged for synchronization; they stay on disk and are not uploaded: '
+    + `${skipped.slice(0, 5).map(entry => entry.installName).join(', ')}`
+    + `${skipped.length > 5 ? ', ...' : ''}`,
+  );
+}
+
+/**
  * Resolves the workspace directories Base attributes to this Bot's Cloud
  * Definition. Only those paths may be replaced or removed by a Cloud restore:
  * every other entry on disk belongs to the operator or the user.
@@ -1605,8 +1668,10 @@ function copyUnmanagedWorkspaceContent(
  * workspace entries Cloud does not own were copied in. The copy only ever adds
  * paths - it never overwrites a restored Skill - so this pass proves that each
  * restored Skill is still intact and returns the Base entries for those Skills
- * alone. Preserved local-only entries stay out of Base, which keeps them out of
- * the Cloud definition instead of pretending Cloud owns them.
+ * alone. Preserved local-only entries stay out of Base because this restore must
+ * not claim Cloud owns them - not because they are exempt from synchronization.
+ * They stay ordinary local Skills, so the next routine sync() may still publish
+ * them, and Base only records them once that publish actually happened.
  */
 function verifiedRestoredEntries(
   stagedSkills: readonly LocalBotSkillManifestEntry[],

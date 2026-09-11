@@ -1998,15 +1998,7 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
 
   test('activation restores Cloud around an operator Skill too large to package', async () => {
     const fixture = createFixture(roots);
-    const operatorRoot = path.join(fixture.skillsRoot, 'big-operator-skill');
-    fs.mkdirSync(path.join(operatorRoot, 'assets'), { recursive: true });
-    fs.writeFileSync(
-      path.join(operatorRoot, 'SKILL.md'),
-      skillText('big-operator-skill', 'too many files to package'),
-    );
-    for (let index = 0; index < 260; index += 1) {
-      fs.writeFileSync(path.join(operatorRoot, 'assets', `file-${index}.txt`), `asset ${index}`);
-    }
+    const operatorRoot = writeOversizedSkill(fixture.skillsRoot, 'big-operator-skill');
     const cloudPackage = createPackage(roots, 'cloud-a', 'cloud-a', 'canonical cloud');
     fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
     fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
@@ -2026,6 +2018,86 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
         entry => entry.name,
       ),
       ['cloud-a'],
+    );
+  });
+
+  test('preserved operator Skills take part in the next routine sync', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    writeSkill(fixture.skillsRoot, 'operator-a', 'operator-a', 'operator managed a');
+    const cloudPackage = createPackage(roots, 'managed', 'managed', 'owner approved cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    const activation = await fixture.activate();
+    assert.equal(activation.direction, 'cloud_to_local');
+    assert.equal(fixture.uploads, 0);
+
+    // Activation only stops the delete. The carried entry stays an ordinary
+    // local Skill, so the established Local -> Cloud direction still applies.
+    const published = await fixture.sync();
+
+    assert.equal(published.direction, 'local_to_cloud');
+    assert.equal(fixture.uploads, 1);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ).sort(),
+      ['managed', 'operator-a'],
+    );
+  });
+
+  test('a local Skill too large to package does not block the next routine sync', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    const operatorRoot = writeOversizedSkill(fixture.skillsRoot, 'big-operator-skill');
+    const cloudPackage = createPackage(roots, 'managed', 'managed', 'owner approved cloud');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = { revision: 2, skills: [definitionRef(cloudPackage)] };
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    await fixture.activate();
+
+    // The rejected entry is skipped instead of failing the whole sync, so the
+    // workspace, Base and the Cloud Definition still converge.
+    const converged = await fixture.sync();
+
+    assert.equal(converged.direction, 'none');
+    assert.equal(fixture.uploads, 0);
+    assert.equal(
+      fs.readFileSync(path.join(operatorRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
+    );
+  });
+
+  test('a local Skill too large to package survives a Cloud restore', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'managed', 'managed', 'approved managed');
+    await fixture.sync();
+    const operatorRoot = writeOversizedSkill(fixture.skillsRoot, 'big-operator-skill');
+    const cloudPackage = createPackage(roots, 'cloud-b', 'cloud-b', 'cloud only');
+    fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
+    fixture.cloud = {
+      revision: fixture.cloud.revision + 1,
+      skills: [definitionRef(cloudPackage)],
+    };
+
+    const restored = await fixture.sync();
+
+    assert.equal(restored.direction, 'cloud_to_local');
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-b', 'SKILL.md'), 'utf8'),
+      /cloud only/,
+    );
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'managed')), false);
+    assert.equal(
+      fs.readFileSync(path.join(operatorRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
     );
   });
 
@@ -2715,6 +2787,20 @@ function writeSkill(root: string, directory: string, name: string, body: string)
 
 function skillText(name: string, body: string): string {
   return `---\nname: ${name}\ndescription: test\n---\n\n${body}\n`;
+}
+
+/** Writes an operator Skill past MAX_FILES so the package validator rejects it. */
+function writeOversizedSkill(root: string, directory: string): string {
+  const skillRoot = path.join(root, directory);
+  fs.mkdirSync(path.join(skillRoot, 'assets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(skillRoot, 'SKILL.md'),
+    skillText(directory, 'too many files to package'),
+  );
+  for (let index = 0; index < 260; index += 1) {
+    fs.writeFileSync(path.join(skillRoot, 'assets', `file-${index}.txt`), `asset ${index}`);
+  }
+  return skillRoot;
 }
 
 function createPackage(
