@@ -315,12 +315,25 @@ function extractArchive(archivePath, extractRoot, archiveType) {
   switch (archiveType) {
     case 'zip':
       if (process.platform === 'win32') {
-        runCommand('powershell.exe', [
+        // Some stripped Windows images do not ship the Microsoft.PowerShell.Archive
+        // module. Use the inbox tar implementation as a compatible fallback so
+        // packaging does not depend on an optional PowerShell module.
+        const probe = spawnSync('powershell.exe', [
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          `Expand-Archive -LiteralPath \"${escapePowerShellPath(archivePath)}\" -DestinationPath \"${escapePowerShellPath(extractRoot)}\" -Force`,
-        ]);
+          'Get-Command Expand-Archive -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name',
+        ], { encoding: 'utf8', windowsHide: true });
+        if (probe.status === 0 && String(probe.stdout || '').trim() === 'Expand-Archive') {
+          runCommand('powershell.exe', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `Expand-Archive -LiteralPath \"${escapePowerShellPath(archivePath)}\" -DestinationPath \"${escapePowerShellPath(extractRoot)}\" -Force`,
+          ]);
+        } else {
+          runCommand('tar', ['-xf', archivePath, '-C', extractRoot]);
+        }
       } else {
         runCommand('unzip', ['-q', archivePath, '-d', extractRoot]);
       }
