@@ -129,10 +129,12 @@ export async function pullLegacyCloudBotModelSelection(
       ...(reasoningEffort ? { reasoningEffort } : {}),
     };
   }
+  const catalogRuntime = parseCloudCatalogRuntime(response?.desired?.runtime);
   return {
     kind: 'catalog',
     modelId,
     revision,
+    ...(catalogRuntime ? { catalogRuntime } : {}),
     ...(parseCloudContextWindowTokens(response?.desired?.context_window_tokens) !== undefined
       ? { contextWindowTokens: parseCloudContextWindowTokens(response?.desired?.context_window_tokens) }
       : {}),
@@ -392,9 +394,10 @@ function parseCloudCatalogRuntime(value: unknown): RelayModelRuntimeDescriptor |
   const contextWindowTokens = Number(input.contextWindowTokens);
   const rawCapabilities = input.capabilities;
   if (!provider || !model || !Number.isInteger(contextWindowTokens)
-    || contextWindowTokens < 1_024 || contextWindowTokens > 4_000_000
-    || !rawCapabilities || typeof rawCapabilities !== 'object') return undefined;
-  const capabilities = rawCapabilities as Record<string, unknown>;
+    || contextWindowTokens < 1_024 || contextWindowTokens > 4_000_000) return undefined;
+  const capabilities = rawCapabilities && typeof rawCapabilities === 'object'
+    ? rawCapabilities as Record<string, unknown>
+    : input;
   if (typeof capabilities.vision !== 'boolean'
     || typeof capabilities.toolCalling !== 'boolean'
     || typeof capabilities.streaming !== 'boolean') return undefined;

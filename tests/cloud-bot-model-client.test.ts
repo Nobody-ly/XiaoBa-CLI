@@ -362,4 +362,37 @@ describe('cloud bot model client local handoff', () => {
       revision: 10,
     });
   });
+
+  test('reads dynamic relay runtime metadata from the legacy model-config contract', async () => {
+    const selection = await pullCloudBotModelSelection({
+      botId: '43',
+      auth,
+      fetchImpl: (async () => Response.json({
+        uid: 43,
+        configured: true,
+        desired: {
+          kind: 'catalog', model_id: 'deepseek-flash', revision: 11,
+          runtime: {
+            catalogModelId: 'deepseek-flash',
+            model: 'deepseek-flash-openai',
+            provider: 'openai',
+            contextWindowTokens: 1_000_000,
+            openaiApiMode: 'chat_completions',
+            capabilities: { vision: true, toolCalling: true, streaming: true },
+          },
+        },
+      })) as typeof fetch,
+    });
+
+    assert.equal(selection?.kind, 'catalog');
+    assert.equal(selection?.modelId, 'deepseek-flash');
+    assert.deepStrictEqual(selection?.catalogRuntime, {
+      catalogModelId: 'deepseek-flash',
+      model: 'deepseek-flash-openai',
+      provider: 'openai',
+      contextWindowTokens: 1_000_000,
+      openaiApiMode: 'chat_completions',
+      capabilities: { vision: true, toolCalling: true, streaming: true },
+    });
+  });
 });
