@@ -839,6 +839,11 @@ export class BotSkillSyncService {
    * dropping a Cloud-owned entry here would silently remove its reference from the
    * Definition and make every other device uninstall it. Without a Base there is
    * no way to prove the entry is local-only either, so both cases keep failing.
+   *
+   * Ownership is not a question of the install path alone. Base correlates its
+   * entries with local Skills by localSkillId, and a renamed Cloud-owned Skill
+   * keeps the marker id of its original install, so a moved directory still
+   * belongs to the Definition and both signals have to block the skip.
    */
   private readSyncableLocalManifest(
     base: BotSkillSyncBase | undefined,
@@ -848,10 +853,14 @@ export class BotSkillSyncService {
       onValidationFailure: failure => rejected.push(failure),
     });
     const cloudOwned = new Set(cloudOwnedSkillRoots(this.skillsRoot, base));
+    const cloudOwnedLocalIds = new Set(
+      (base?.skills ?? []).map(entry => entry.localSkillId),
+    );
     const blocking = rejected.find(failure => (
       failure.error.kind !== 'package-limit'
       || !base
       || cloudOwned.has(path.resolve(failure.path))
+      || cloudOwnedLocalIds.has(failure.localSkillId)
     ));
     if (blocking) throw blocking.error;
     reportSkippedLocalSkills(rejected);

@@ -2003,6 +2003,10 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     fixture.packages.set(refKey(cloudPackage.reference), cloudPackage);
     fixture.cloud = { revision: 1, skills: [definitionRef(cloudPackage)] };
 
+    // With no Base nothing proves the oversized entry is local-only, so the
+    // routine sync keeps failing loudly instead of risking the Cloud Definition.
+    await assert.rejects(fixture.sync(), /too many files/i);
+
     await fixture.activate();
 
     assert.match(
@@ -2136,6 +2140,77 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
     assert.equal(
       fs.readFileSync(path.join(ownedRoot, 'assets', 'file-259.txt'), 'utf8'),
       'asset 259',
+    );
+  });
+
+  test('a renamed Cloud-owned Skill too large to package still blocks the routine sync', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+    const publishedReference = fixture.cloud.skills[0];
+    assert.ok(publishedReference);
+
+    // The operator renames the install directory. Base correlates entries with
+    // local Skills by localSkillId, and the renamed copy still carries the marker
+    // of its original install, so it is the same Cloud-owned Skill even though
+    // its install path no longer matches Base.
+    fs.renameSync(
+      path.join(fixture.skillsRoot, 'cloud-owned'),
+      path.join(fixture.skillsRoot, 'renamed-cloud'),
+    );
+    writeOversizedSkill(fixture.skillsRoot, 'renamed-cloud');
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    // Ownership by install path alone would call this entry local-only, skip it
+    // and rewrite the Definition without the reference, uninstalling the Skill on
+    // every other device. Keep failing loudly instead.
+    await assert.rejects(fixture.sync(), /too many files/i);
+
+    assert.equal(fixture.patches, 0);
+    assert.deepStrictEqual(fixture.cloud.skills, [publishedReference]);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.installName,
+      ),
+      ['cloud-owned'],
+    );
+    assert.equal(
+      fs.readFileSync(
+        path.join(fixture.skillsRoot, 'renamed-cloud', 'assets', 'file-259.txt'),
+        'utf8',
+      ),
+      'asset 259',
+    );
+  });
+
+  test('a renamed Cloud-owned Skill stays bound to its Cloud reference', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+    const publishedReference = fixture.cloud.skills[0];
+    assert.ok(publishedReference);
+
+    fs.renameSync(
+      path.join(fixture.skillsRoot, 'cloud-owned'),
+      path.join(fixture.skillsRoot, 'renamed-cloud'),
+    );
+
+    // Renaming alone is an ordinary Base follow-up: the entry keeps its
+    // localSkillId, so the Cloud reference is preserved and only the install
+    // name moves.
+    await fixture.sync();
+
+    assert.deepStrictEqual(fixture.cloud.skills, [publishedReference]);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.installName,
+      ),
+      ['renamed-cloud'],
+    );
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'renamed-cloud', 'SKILL.md'), 'utf8'),
+      /approved cloud owned/,
     );
   });
 
