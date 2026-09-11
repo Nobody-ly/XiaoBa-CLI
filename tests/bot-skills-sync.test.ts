@@ -2019,6 +2019,11 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       ),
       ['cloud-a'],
     );
+    // The oversized operator Skill is not in Base, so it is provably not
+    // Cloud-owned and the next routine sync keeps converging without it.
+    const converged = await fixture.sync();
+    assert.equal(converged.direction, 'none');
+    assert.equal(fixture.patches, 0);
   });
 
   test('preserved operator Skills take part in the next routine sync', async () => {
@@ -2099,6 +2104,60 @@ describe('Bot Skill Local/Base/Cloud sync', () => {
       fs.readFileSync(path.join(operatorRoot, 'assets', 'file-259.txt'), 'utf8'),
       'asset 259',
     );
+  });
+
+  test('a Cloud-owned Skill too large to package fails the sync instead of deleting its Cloud reference', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+    const ownedRoot = path.join(fixture.skillsRoot, 'cloud-owned');
+    const publishedReference = fixture.cloud.skills[0];
+    assert.ok(publishedReference);
+
+    // The same Cloud-owned install path, bloated past the package limits locally.
+    writeOversizedSkill(fixture.skillsRoot, 'cloud-owned');
+    fixture.uploads = 0;
+    fixture.patches = 0;
+
+    // A skipped entry disappears from the local manifest, and pushLocal builds the
+    // next BotDefinition from that manifest. Dropping a Cloud-owned entry that way
+    // would rewrite the Definition without its reference, so every other device
+    // would uninstall its copy. Keep failing loudly instead.
+    await assert.rejects(fixture.sync(), /too many files/i);
+
+    assert.equal(fixture.patches, 0);
+    assert.deepStrictEqual(fixture.cloud.skills, [publishedReference]);
+    assert.deepStrictEqual(
+      new BotSkillBaseStore(fixture.runtimeRoot).read(fixture.botId)?.skills.map(
+        entry => entry.name,
+      ),
+      ['cloud-owned'],
+    );
+    assert.equal(
+      fs.readFileSync(path.join(ownedRoot, 'assets', 'file-259.txt'), 'utf8'),
+      'asset 259',
+    );
+  });
+
+  test('activation replaces a Cloud-owned Skill that is too large to package locally', async () => {
+    const fixture = createFixture(roots);
+    writeSkill(fixture.skillsRoot, 'cloud-owned', 'cloud-owned', 'approved cloud owned');
+    await fixture.sync();
+
+    writeOversizedSkill(fixture.skillsRoot, 'cloud-owned');
+
+    // Routine sync() fails loudly for a Cloud-owned entry, so activation stays the
+    // recovery path: Cloud is authoritative for the install paths its Base record
+    // owns, and the local copy is snapshotted before it is replaced.
+    const activation = await fixture.activate();
+
+    assert.equal(activation.direction, 'cloud_to_local');
+    assert.match(
+      fs.readFileSync(path.join(fixture.skillsRoot, 'cloud-owned', 'SKILL.md'), 'utf8'),
+      /approved cloud owned/,
+    );
+    assert.equal(fs.existsSync(path.join(fixture.skillsRoot, 'cloud-owned', 'assets')), false);
+    assert.equal((await fixture.sync()).direction, 'none');
   });
 
   test('activation keeps a no-Base local workspace when the Cloud Definition is empty', async () => {

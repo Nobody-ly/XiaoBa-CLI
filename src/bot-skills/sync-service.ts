@@ -225,7 +225,7 @@ export class BotSkillSyncService {
       this.skillsRoot,
     );
     const base = this.baseStore.read(this.botId);
-    let local = this.readSyncableLocalManifest();
+    let local = this.readSyncableLocalManifest(base);
     let cloud: CloudBotSkills | undefined;
     try {
       cloud = await pullCloudBotSkills(this.cloudOptions);
@@ -239,7 +239,7 @@ export class BotSkillSyncService {
     }
 
     this.recoverInterruptedFinalizes(cloud);
-    local = this.readSyncableLocalManifest();
+    local = this.readSyncableLocalManifest(base);
 
     if (!cloud.definition) {
       if (!this.workspaceExisted && base?.skills.length) {
@@ -832,13 +832,28 @@ export class BotSkillSyncService {
    * keeps it on disk. Broken content still fails loudly, and the owner-facing
    * publish paths keep the strict read, because that owner asked to publish this
    * workspace and needs to see the validation error.
+   *
+   * Skipping is only safe for a Skill this Bot's Definition cannot own. A skipped
+   * entry disappears from the local manifest, and pushLocal builds the next
+   * Definition from that manifest plus the Base entries it is told to preserve, so
+   * dropping a Cloud-owned entry here would silently remove its reference from the
+   * Definition and make every other device uninstall it. Without a Base there is
+   * no way to prove the entry is local-only either, so both cases keep failing.
    */
-  private readSyncableLocalManifest(): LocalBotSkillManifestEntry[] {
+  private readSyncableLocalManifest(
+    base: BotSkillSyncBase | undefined,
+  ): LocalBotSkillManifestEntry[] {
     const rejected: BotSkillWorkspaceValidationFailure[] = [];
     const entries = this.readLocalManifest({
       onValidationFailure: failure => rejected.push(failure),
     });
-    assertOnlyPackageLimitsSkipped(rejected);
+    const cloudOwned = new Set(cloudOwnedSkillRoots(this.skillsRoot, base));
+    const blocking = rejected.find(failure => (
+      failure.error.kind !== 'package-limit'
+      || !base
+      || cloudOwned.has(path.resolve(failure.path))
+    ));
+    if (blocking) throw blocking.error;
     reportSkippedLocalSkills(rejected);
     return entries;
   }
@@ -1557,6 +1572,12 @@ function referenceKey(reference: BotSkillRef): string {
  * validator rejects. An unreadable entry cannot be attributed to Cloud, so it is
  * copied through the restore instead of being dropped, and one oversized Skill
  * can no longer fail the whole restore. It is reported so the operator sees it.
+ *
+ * Rejected entries also stay out of the managed set, which is the fail-safe
+ * direction here: copyUnmanagedWorkspaceContent then refuses to let a rejected
+ * Cloud-owned install path overwrite the Skill restored from Cloud (a loud
+ * conflict, never a silent deletion). Routine sync has no such second chance,
+ * which is why readSyncableLocalManifest keeps failing for Cloud-owned entries.
  */
 function scanManageableWorkspaceRoots(skillsRoot: string): string[] {
   const rejected: BotSkillWorkspaceValidationFailure[] = [];
