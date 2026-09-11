@@ -37,6 +37,16 @@ export interface PrepareBoundBotSkillsOptions {
     skills: readonly BotSkillRef[];
     definitionRevision: number;
   };
+  /**
+   * The caller proved that the previous and desired BotDefinitions both list no
+   * synchronized Skill references. Activate this Bot's workspace so the
+   * ownership invariant still holds (a foreign workspace gets parked and this
+   * Bot's own workspace is restored), but skip Cloud package reconciliation so
+   * local-only content is neither read, uploaded, nor deleted.
+   */
+  preserveLocalOnlyWorkspace?: {
+    definitionRevision: number;
+  };
 }
 
 export interface PreparedBoundBotSkills {
@@ -117,6 +127,23 @@ export async function prepareBoundBotSkills(
         BotSkillSyncService.recoverInterruptedRestore(runtimeRoot, activeBotId, activeRoot);
       }
       activation = workspace.activate(options.botId);
+      if (options.preserveLocalOnlyWorkspace) {
+        const revision = options.preserveLocalOnlyWorkspace.definitionRevision;
+        return {
+          sync: {
+            botId: options.botId,
+            direction: 'none',
+            cloudRevision: revision,
+            observedRevision: revision,
+            desiredRevision: revision,
+            appliedRevision: revision,
+            applyStatus: 'already_applied',
+            skills: [],
+          },
+          workspaceExisted: activation.existed,
+          activation,
+        };
+      }
       const syncService = new BotSkillSyncService({
         runtimeRoot,
         botId: options.botId,
