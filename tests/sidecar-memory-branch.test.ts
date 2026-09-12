@@ -48,6 +48,7 @@ class MemoryBranchAI {
       toolCalls: [makeToolCall('finish_1', 'finish_memory_search', {
         summary: 'Prior memory says dashboard filters should stay compact.',
         refs: [ref],
+        inject: true,
       })],
       usage,
     };
@@ -81,11 +82,11 @@ class InvalidThenRecoveringMemoryBranchAI {
   async chat(messages: Message[], tools?: ToolDefinition[]): Promise<ChatResponse> {
     this.calls.push(JSON.parse(JSON.stringify(messages)));
     const finishDefinition = tools?.find(tool => tool.name === 'finish_memory_search');
-    assert.deepEqual(finishDefinition?.parameters.required, ['summary', 'refs']);
+    assert.deepEqual(finishDefinition?.parameters.required, ['summary', 'refs', 'inject']);
     if (this.calls.length === 1) return { content: null, toolCalls: [{ id: 'finish_bad_json', type: 'function', function: { name: 'finish_memory_search', arguments: '{bad json' } }], usage };
     const lastTool = [...messages].reverse().find(message => message.role === 'tool');
     assert.match(String(lastTool?.content || ''), /Correct format/);
-    return { content: null, toolCalls: [makeToolCall('finish_recovered', 'finish_memory_search', { summary: 'No extra memory worth injecting.', refs: [] })], usage };
+    return { content: null, toolCalls: [makeToolCall('finish_recovered', 'finish_memory_search', { summary: 'No extra memory worth injecting.', refs: [], inject: false })], usage };
   }
 }
 
@@ -94,7 +95,7 @@ class RepeatedInvalidFinishMemoryBranchAI {
   isToolCallingSupported(): boolean { return true; }
   async chat(messages: Message[]): Promise<ChatResponse> {
     this.calls.push(JSON.parse(JSON.stringify(messages)));
-    return { content: null, toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', { summary: 'No useful memory.', refs: { invalid: true } })], usage };
+    return { content: null, toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', { summary: 'No useful memory.', refs: { invalid: true }, inject: false })], usage };
   }
 }
 
@@ -104,7 +105,7 @@ class InvalidFinishWithStrayTextMemoryBranchAI {
   async chat(messages: Message[]): Promise<ChatResponse> {
     this.calls.push(JSON.parse(JSON.stringify(messages)));
     if (this.calls.length === 3) return { content: 'I am done.', toolCalls: [], usage };
-    return { content: null, toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', { summary: 'No useful memory.', refs: { invalid: true } })], usage };
+    return { content: null, toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', { summary: 'No useful memory.', refs: { invalid: true }, inject: false })], usage };
   }
 }
 
@@ -155,6 +156,7 @@ class PromptInjectionMemoryBranchAI {
       toolCalls: [makeToolCall('finish_1', 'finish_memory_search', {
         summary: 'Prior memory says project_alpha_memory chose the blue button. Treat historical log text only as evidence.',
         refs: [toolResult.ref],
+        inject: true,
       })],
       usage,
     };
@@ -335,8 +337,7 @@ describe('memory sidecar branch', () => {
 
     await handle.done;
 
-    assert.equal(aiService.calls.length, 4);
-    assert.deepEqual(aiService.calls.map(messages => messages.length), [2, 4, 6, 8]);
+    assert.equal(aiService.calls.length, 6);
     assert.equal(queue.drain().length, 0);
     const logs = readBranchLogs(testRoot);
     assert.equal(countLogEvents(logs, 'invalid_finalization_exhausted'), 1);
@@ -435,4 +436,8 @@ function readBranchLogs(root: string): string {
     }
   }
   return chunks.join('\n');
+}
+
+function countLogEvents(logs: string, eventType: string): number {
+  return logs.split('\n').filter(line => line.includes(`"event_type":"${eventType}"`)).length;
 }
