@@ -75,6 +75,39 @@ class NoInjectMemoryBranchAI {
   }
 }
 
+class InvalidThenRecoveringMemoryBranchAI {
+  calls: Message[][] = [];
+  isToolCallingSupported(): boolean { return true; }
+  async chat(messages: Message[], tools?: ToolDefinition[]): Promise<ChatResponse> {
+    this.calls.push(JSON.parse(JSON.stringify(messages)));
+    const finishDefinition = tools?.find(tool => tool.name === 'finish_memory_search');
+    assert.deepEqual(finishDefinition?.parameters.required, ['summary', 'refs']);
+    if (this.calls.length === 1) return { content: null, toolCalls: [{ id: 'finish_bad_json', type: 'function', function: { name: 'finish_memory_search', arguments: '{bad json' } }], usage };
+    const lastTool = [...messages].reverse().find(message => message.role === 'tool');
+    assert.match(String(lastTool?.content || ''), /Correct format/);
+    return { content: null, toolCalls: [makeToolCall('finish_recovered', 'finish_memory_search', { summary: 'No extra memory worth injecting.', refs: [] })], usage };
+  }
+}
+
+class RepeatedInvalidFinishMemoryBranchAI {
+  calls: Message[][] = [];
+  isToolCallingSupported(): boolean { return true; }
+  async chat(messages: Message[]): Promise<ChatResponse> {
+    this.calls.push(JSON.parse(JSON.stringify(messages)));
+    return { content: null, toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', { summary: 'No useful memory.', refs: { invalid: true } })], usage };
+  }
+}
+
+class InvalidFinishWithStrayTextMemoryBranchAI {
+  calls: Message[][] = [];
+  isToolCallingSupported(): boolean { return true; }
+  async chat(messages: Message[]): Promise<ChatResponse> {
+    this.calls.push(JSON.parse(JSON.stringify(messages)));
+    if (this.calls.length === 3) return { content: 'I am done.', toolCalls: [], usage };
+    return { content: null, toolCalls: [makeToolCall(`finish_invalid_${this.calls.length}`, 'finish_memory_search', { summary: 'No useful memory.', refs: { invalid: true } })], usage };
+  }
+}
+
 class PromptInjectionMemoryBranchAI {
   calls: Message[][] = [];
   sawUntrustedEvidenceRule = false;
