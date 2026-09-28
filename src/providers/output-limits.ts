@@ -2,7 +2,10 @@ import { ChatConfig } from '../types';
 import { isCatsRelayApiBase } from '../utils/catsco-domains';
 
 const DEFAULT_MAX_TOKENS = 8192;
-const DEFAULT_RELAY_MAX_TOKENS = 32768;
+// Relay-backed models used by Saturday support a larger single-response budget.
+// Keep this as a request ceiling: the provider still stops earlier when the
+// response is complete, and explicit per-bot maxTokens continues to win.
+const DEFAULT_RELAY_MAX_TOKENS = 128 * 1024;
 
 export function resolveMaxTokens(config: ChatConfig): number {
   let maxTokens: number;
