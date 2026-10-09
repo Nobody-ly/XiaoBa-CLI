@@ -74,6 +74,39 @@ test('manual checkpoint compaction can run below the automatic threshold', async
   assert.match(String(requests[0][0]?.content), /explicit user-requested checkpoint compaction/);
 });
 
+test('retries a checkpoint summary truncated by the provider output limit', async () => {
+  let calls = 0;
+  const service = {
+    chatStream: async (
+      _messages: Message[],
+      _tools: unknown,
+      callbacks: { onText?: (text: string) => void },
+    ) => {
+      calls += 1;
+      const text = calls === 1
+        ? '截断的摘要，不能作为完整检查点。'
+        : '完整检查点：保留当前目标、已完成事项和下一步。';
+      callbacks.onText?.(text);
+      return { content: text, stopReason: calls === 1 ? 'max_tokens' : 'stop', usage };
+    },
+  };
+  const coordinator = new CheckpointCompactionCoordinator(service, { maxContextTokens: 2_000 });
+  const messages: Message[] = [
+    { role: 'user', content: `旧任务要求\n${'历史内容 '.repeat(500)}` },
+    { role: 'assistant', content: '已经完成前置调查。' },
+  ];
+
+  const result = await coordinator.compactIfNeeded(messages, {
+    sessionKey: 'truncated-summary-retry',
+    phase: 'manual',
+    force: true,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.compacted, true);
+  assert.match(String(result.messages.find(message => message.__checkpointSummary)?.content), /完整检查点/);
+});
+
 test('checkpoint input limit is 85 percent for supported 256K+ windows', () => {
   assert.equal(calculateCheckpointInputLimitTokens(256_000), 217_600);
   assert.equal(calculateCheckpointInputLimitTokens(1_000_000), 850_000);

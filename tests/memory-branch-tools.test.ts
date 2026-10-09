@@ -147,13 +147,33 @@ describe('memory branch tools', () => {
     });
 
     assert.equal(tool.definition.controlMode, 'pause_turn');
+    assert.deepEqual(tool.definition.parameters.required, ['summary', 'evidence']);
+    assert.equal('refs' in tool.definition.parameters.properties, false);
 
     const invalid = await tool.execute({
       summary: 'done',
       refs: ['m1'],
     }, { workingDirectory: testRoot, conversationHistory: [] });
     assert.equal(invalid.ok, false);
-    assert.match(JSON.parse(String(invalid.message)).error, /invalid canonical ref/);
+    assert.match(JSON.parse(String(invalid.message)).error, /invalid evidence location/);
+
+    const invalidString = await tool.execute({
+      summary: 'done',
+      evidence: 'chat/2026-06-16/demo.jsonl#2',
+    } as any, { workingDirectory: testRoot, conversationHistory: [] });
+    assert.equal(invalidString.ok, false);
+    assert.match(JSON.parse(String(invalidString.message)).error, /evidence must be an array/);
+
+    const validEvidence = await tool.execute({
+      summary: 'Evidence field is accepted.',
+      evidence: ['chat/2026-06-16/demo.jsonl#2'],
+    }, { workingDirectory: testRoot, conversationHistory: [] });
+    assert.equal(validEvidence.ok, true);
+    assert.deepEqual(captured, {
+      summary: 'Evidence field is accepted.',
+      refs: ['chat/2026-06-16/demo.jsonl#2'],
+      inject: true,
+    });
 
     const emptyDefaultInject = await tool.execute({
       summary: 'No useful memory.',
@@ -190,7 +210,7 @@ describe('memory branch tools', () => {
       ],
     }, { workingDirectory: testRoot, conversationHistory: [] });
     assert.equal(knowledge.ok, false);
-    assert.match(JSON.parse(String(knowledge.message)).error, /invalid canonical ref/);
+    assert.match(JSON.parse(String(knowledge.message)).error, /invalid evidence location/);
 
     const knowledgeValid = await tool.execute({
       summary: 'KB decision found.',
@@ -239,7 +259,7 @@ describe('memory branch tools', () => {
       inject: false,
     }, { workingDirectory: testRoot, conversationHistory: [] });
     assert.equal(contradictory.ok, false);
-    assert.match(JSON.parse(String(contradictory.message)).error, /refs must be empty/);
+    assert.match(JSON.parse(String(contradictory.message)).error, /evidence must be empty/);
   });
 
   test('finish accepts generated CatsLog citations but still rejects arbitrary refs', async () => {
@@ -350,9 +370,9 @@ describe('memory branch tools', () => {
       const { tool } = makeFinishTool();
       assert.equal(tool.definition.controlMode, 'pause_turn');
       assert.equal(tool.definition.name, 'finish_memory_search');
-      assert.deepEqual(tool.definition.parameters.required, ['summary', 'refs']);
+      assert.deepEqual(tool.definition.parameters.required, ['summary', 'evidence']);
       assert.equal(tool.definition.parameters.properties.summary.type, 'string');
-      assert.equal(tool.definition.parameters.properties.refs.type, 'array');
+      assert.equal(tool.definition.parameters.properties.evidence.type, 'array');
       assert.equal(tool.definition.parameters.properties.inject.type, 'boolean');
       assert.deepEqual(tool.definition.parameters.properties.delivery.enum, ['context', 'audit', 'discard']);
       assert.equal(tool.definition.parameters.properties.detail_needed.type, 'boolean');
@@ -367,16 +387,16 @@ describe('memory branch tools', () => {
         { summary: 'x', refs: CONTEXT_REFS, inject: false, delivery: 'discard' },
         context,
       );
-      assert.match(JSON.parse(String(discardWithRefs.message)).error, /refs must be empty when delivery is discard/);
+      assert.match(JSON.parse(String(discardWithRefs.message)).error, /evidence must be empty when delivery is discard/);
 
       const auditWithoutRefs = await tool.execute(
         { summary: 'x', refs: [], inject: false, delivery: 'audit' },
         context,
       );
-      assert.match(JSON.parse(String(auditWithoutRefs.message)).error, /refs must include at least one canonical memory ref for audit/);
+      assert.match(JSON.parse(String(auditWithoutRefs.message)).error, /evidence must include at least one canonical memory location for audit/);
 
       const badRef = await tool.execute({ summary: 'x', refs: ['not-a-ref'] }, context);
-      assert.match(JSON.parse(String(badRef.message)).error, /invalid canonical ref/);
+      assert.match(JSON.parse(String(badRef.message)).error, /invalid evidence location/);
 
       const ok = await tool.execute({ summary: 'fine', refs: CONTEXT_REFS, delivery: 'context' }, context);
       assert.equal(ok.ok, true);

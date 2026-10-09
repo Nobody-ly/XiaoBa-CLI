@@ -278,9 +278,9 @@ export class FinishMemorySearchTool implements Tool {
       '结束 memory search branch。',
       '当你已经拿到足够的记忆证据，或确认没有有用记忆时，调用这个工具。',
       'summary 是精简交付说明（≤400 字符：结论 + 关键锚点 + 冲突/时效提示；证据包会作为数据一并交付，详细内容不必复述）；主题确实需要更长说明时设 detail_needed:true（上限 800 字符）。',
-      '正常找到有新增价值的记忆时不需要设置 inject，并必须提供支撑 summary 的 refs。',
-      '如果证据只需要留在 branch 审计日志、不应注入主 agent，可设置 delivery:"audit"、inject:false，并保留 refs。',
-      '如果完全没有可保留的价值，设置 delivery:"discard"、inject:false，并传空 refs。',
+      '正常找到有新增价值的记忆时不需要设置 inject，并必须提供支撑 summary 的 evidence 数组。',
+      '如果证据只需要留在 branch 审计日志、不应注入主 agent，可设置 delivery:"audit"、inject:false，并保留 evidence。',
+      '如果完全没有可保留的价值，设置 delivery:"discard"、inject:false，并传空 evidence。',
       '调用成功后 branch 会立刻结束。',
     ].join(' '),
     controlMode: 'pause_turn',
@@ -291,9 +291,9 @@ export class FinishMemorySearchTool implements Tool {
           type: 'string',
           description: '面向主 agent 的精简交付说明（≤400 字符）：结论、关键锚点、冲突/时效提示；详细内容写「详情见证据包」。主题确实需要更长说明时设 detail_needed:true（上限 800 字符）。没有新增价值时简短说明原因。',
         },
-        refs: {
+        evidence: {
           type: 'array',
-          description: '支撑 summary 的 canonical refs。context/audit 至少一个；discard 必须为空。',
+          description: '支撑 summary 的 canonical evidence locations。context/audit 至少一个；discard 必须为空。',
           items: { type: 'string' },
         },
         inject: {
@@ -310,7 +310,7 @@ export class FinishMemorySearchTool implements Tool {
           description: '可选，默认 false。多主题或冲突较多、确实需要超过 400 字符的交付说明时设为 true，summary 上限放宽到 800 字符；不要为凑简短丢掉冲突/时效提示，也不要用它恢复检索过程汇报。',
         },
       },
-      required: ['summary', 'refs'],
+      required: ['summary', 'evidence'],
     },
   };
 
@@ -359,8 +359,12 @@ function validateFinishArgs(args: any):
         + (detailNeeded === true ? '' : ', or set detail_needed:true if the topic genuinely needs more'),
     };
   }
-  if (!Array.isArray(args?.refs)) {
-    return { ok: false, error: 'refs must be an array of canonical memory refs' };
+  // `refs` is accepted only as a narrow migration alias for already-running
+  // branches. It is intentionally not advertised in the tool schema and is
+  // never coerced from a string; new calls must use evidence[].
+  const rawEvidence = args?.evidence ?? args?.refs;
+  if (!Array.isArray(rawEvidence)) {
+    return { ok: false, error: 'evidence must be an array of canonical memory locations' };
   }
   if (typeof args?.inject !== 'undefined' && typeof args.inject !== 'boolean') {
     return { ok: false, error: 'inject must be a boolean when provided' };
@@ -375,13 +379,13 @@ function validateFinishArgs(args: any):
     : rawDelivery === undefined || rawDelivery === 'context';
   const delivery: MemorySearchFinishPayload['delivery'] = rawDelivery
     || (inject ? 'context' : 'discard');
-  const refs: string[] = args.refs.map((ref: unknown) => String(ref || '').trim()).filter(Boolean);
-  for (const ref of refs) {
+  const evidence: string[] = rawEvidence.map((location: unknown) => String(location || '').trim()).filter(Boolean);
+  for (const ref of evidence) {
     if (!isMemoryCitationRef(ref)) {
-      return { ok: false, error: `invalid canonical ref: ${ref}` };
+      return { ok: false, error: `invalid evidence location: ${ref}` };
     }
   }
-  const uniqueRefs: string[] = Array.from(new Set(refs));
+  const uniqueRefs: string[] = Array.from(new Set(evidence));
   if (delivery === 'context' && !inject) {
     return { ok: false, error: 'inject must be true when delivery is context' };
   }
@@ -392,20 +396,20 @@ function validateFinishArgs(args: any):
     return {
       ok: false,
       error: rawDelivery === undefined
-        ? 'refs must include at least one canonical memory ref unless inject is false'
-        : 'refs must include at least one canonical memory ref for context delivery',
+        ? 'evidence must include at least one canonical memory location unless inject is false'
+        : 'evidence must include at least one canonical memory location for context delivery',
     };
   }
   if (delivery === 'discard' && uniqueRefs.length > 0) {
     return {
       ok: false,
       error: rawDelivery === undefined
-        ? 'refs must be empty when inject is false'
-        : 'refs must be empty when delivery is discard',
+        ? 'evidence must be empty when inject is false'
+        : 'evidence must be empty when delivery is discard',
     };
   }
   if (delivery === 'audit' && uniqueRefs.length === 0) {
-    return { ok: false, error: 'refs must include at least one canonical memory ref for audit delivery' };
+    return { ok: false, error: 'evidence must include at least one canonical memory location for audit delivery' };
   }
   return {
     ok: true,
