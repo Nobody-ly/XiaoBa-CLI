@@ -499,6 +499,14 @@ export class CheckpointCompactionCoordinator {
           Metrics.recordAICall('stream', response.usage);
         }
         const summary = (streamed || response.content || '').trim();
+        const stopReason = String(response.stopReason || '').toLowerCase();
+        const outputWasTruncated = stopReason === 'max_tokens'
+          || stopReason === 'max_output_tokens'
+          || stopReason === 'length';
+        if (outputWasTruncated) {
+          if (invalidSummaryAttempts++ < 1) continue;
+          throw new Error('checkpoint compaction reached the summary output limit; original context preserved');
+        }
         if (!summary || response.toolCalls?.length || /<\s*(?:minimax:)?tool_call\b|<invoke\s+name\s*=|\]<\]minimax\[>/i.test(summary)) {
           if (invalidSummaryAttempts++ < 1) continue;
           throw new Error('checkpoint compaction returned an invalid summary; original context preserved');
