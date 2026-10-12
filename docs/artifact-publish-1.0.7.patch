@@ -17,8 +17,9 @@ index a69d4f6..0082bf2 100644
  
 -凭据和公钥都由脚本自己取。返回里 `remote_port` 第 4 步要用。
 +凭据和公钥都由脚本自己取。由 CatsCo 当前对话启动的可信 Skill 运行时还会自动附带
-+当前会话和触发发布的人类消息作为 Artifact 来源；不要手工填写或伪造
-+`source_topic_id` / `source_message_id`。返回里 `remote_port` 第 4 步要用。
++当前会话和触发发布的人类消息作为 Artifact 来源；不要手工填写
++`source_topic_id` / `source_message_id`。这两个字段只是运行时的来源提示，最终真实性
++必须由 Artifact API 服务端根据自己的消息记录校验。返回里 `remote_port` 第 4 步要用。
 +
 +新建 Artifact 必须从当前 CatsCo 对话发布。若运行时没有可信来源，脚本会停止并提示
 +重新从当前对话发起；对已经存在的应用，改名、换端口或调整上传上限仍可按下方管理命令
@@ -34,10 +35,11 @@ index 2d8467c..16a8d1b 100644
  // from the key pair `init-connector.mjs` created), so the key never has to be copied
  // by hand — a mistyped or empty key is rejected by the gateway as an invalid
  // registration, which is a confusing way to learn about a copy-paste mistake.
-+// For a new application the XiaoBa runtime injects the canonical conversation
-+// and human-message pair through CATSCO_ARTIFACT_SOURCE_* environment variables.
-+// They are intentionally not accepted as command-line options: the model must
-+// not be able to forge an Artifact's source message.
++// For a new application the XiaoBa runtime supplies the canonical conversation
++// and human-message pair through CATSCO_ARTIFACT_SOURCE_* environment
++// variables. They are intentionally not accepted as command-line options.
++// This is a client-side defense-in-depth hint; the Artifact API remains the
++// authority and must validate the pair against its own canonical message store.
  import fs from 'node:fs';
  import path from 'node:path';
  import { resolveBotCredential, authHeader } from './credential.mjs';

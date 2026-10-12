@@ -72,10 +72,13 @@ const CONNECTOR_ENV_NAMES = [
 ] as const;
 
 /**
- * Source identity for a newly-created Cloud Artifact.  These values are
- * deliberately transient environment variables: they are injected only for
- * the verified artifact-publish Skill entrypoint and are never added to the
- * model prompt, shell transcript, or persistent session state.
+ * Source attribution hint for a newly-created Cloud Artifact. These values
+ * are deliberately transient environment variables: they are injected only
+ * for the verified artifact-publish Skill entrypoint and are never added to
+ * the model prompt, shell transcript, or persistent session state. This is a
+ * client-side defense-in-depth measure, not an authorization boundary; the
+ * Artifact API must validate the pair against its own canonical message
+ * records.
  */
 export const ARTIFACT_SOURCE_ENV_NAMES = [
   'CATSCO_ARTIFACT_SOURCE_TOPIC_ID',
@@ -125,10 +128,12 @@ export function withTrustedBotSkillConnectorEnvironment(
 }
 
 /**
- * Inject the canonical CatsCo conversation/message pair required by the
- * artifact-publish API.  The runtime, rather than the model or Skill script
- * arguments, is the only source of these values.  Existing environment values
- * are always removed first so a stale/manual override cannot be submitted.
+ * Inject the canonical CatsCo conversation/message pair expected by the
+ * artifact-publish API. The runtime supplies these values on the normal
+ * trusted path and strips inherited stale values. This protects the normal
+ * Skill flow from accidental or stale overrides, but cannot make a bearer API
+ * credential or an arbitrary copied script non-forgeable; server-side
+ * validation remains authoritative.
  */
 export function withTrustedBotSkillArtifactSourceEnvironment(
   invocation: TrustedBotSkillScriptInvocation | undefined,
