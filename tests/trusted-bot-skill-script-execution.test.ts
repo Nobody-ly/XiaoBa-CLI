@@ -355,17 +355,19 @@ describe('trusted Bot Skill script execution', () => {
       },
     });
 
-    const injected = withTrustedBotSkillArtifactSourceEnvironment({
-      scriptPath,
-      args: [scriptPath],
-      skillId: 'yii/artifact-publish',
-      skillName: 'Artifact publish',
-      version: '1.0.6',
-    }, context, environment);
+    for (const skillId of ['yii/artifact-publish', 'david/artifact-publish']) {
+      const injected = withTrustedBotSkillArtifactSourceEnvironment({
+        scriptPath,
+        args: [scriptPath],
+        skillId,
+        skillName: 'Artifact publish',
+        version: '1.0.7',
+      }, context, environment);
 
-    assert.equal(injected.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, 'grp_5063');
-    assert.equal(injected.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, '1328899');
-    assert.equal(injected.SAFE_VALUE, 'kept');
+      assert.equal(injected.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, 'grp_5063');
+      assert.equal(injected.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, '1328899');
+      assert.equal(injected.SAFE_VALUE, 'kept');
+    }
 
     const unrelated = withTrustedBotSkillArtifactSourceEnvironment({
       scriptPath,
@@ -376,15 +378,25 @@ describe('trusted Bot Skill script execution', () => {
     }, context, environment);
     assert.equal(unrelated.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, undefined);
     assert.equal(unrelated.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, undefined);
+
+    const untrustedArtifactPublisher = withTrustedBotSkillArtifactSourceEnvironment({
+      scriptPath,
+      args: [scriptPath],
+      skillId: 'attacker/artifact-publish',
+      skillName: 'Artifact publish',
+      version: '1.0.7',
+    }, context, environment);
+    assert.equal(untrustedArtifactPublisher.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, undefined);
+    assert.equal(untrustedArtifactPublisher.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, undefined);
   });
 
   test('does not inject an artifact source pair without a trusted canonical sequence', () => {
     const invocation = {
       scriptPath,
       args: [scriptPath],
-      skillId: 'yii/artifact-publish',
+      skillId: 'david/artifact-publish',
       skillName: 'Artifact publish',
-      version: '1.0.6',
+      version: '1.0.7',
     };
     const baseEnvironment = {
       CATSCO_ARTIFACT_SOURCE_TOPIC_ID: 'stale-topic',
@@ -436,10 +448,10 @@ describe('trusted Bot Skill script execution', () => {
     writeSkillHubInstallMarker(artifactSkillDir, {
       source: 'skillhub',
       userId: 'skillhub-user-1',
-      skillId: 'yii/artifact-publish',
+      skillId: 'david/artifact-publish',
       name: 'Artifact publish',
       installName: 'artifact-publish',
-      version: '1.0.6',
+      version: '1.0.7',
       packageChecksumSha256: 'b'.repeat(64),
       signature: {
         algorithm: 'ed25519',
@@ -452,8 +464,8 @@ describe('trusted Bot Skill script execution', () => {
     const initial = scanLocalBotSkill(artifactSkillDir, path.dirname(artifactSkillDir));
     const artifactReference: BotSkillRef = {
       source: 'skillhub',
-      skillId: 'yii/artifact-publish',
-      version: '1.0.6',
+      skillId: 'david/artifact-publish',
+      version: '1.0.7',
       contentHash: initial.contentHash,
     };
     writeBotSkillLocalMarker(artifactSkillDir, {
