@@ -99,7 +99,9 @@ export function registerSkillHubRoutes(router: Router, options: SkillHubRouteOpt
         return res.status(400).json({ error: 'query too short', code: 'skillhub.share_target_query_invalid' });
       }
       const cats = await options.getCatsCoAuth();
-      const service = serviceFrom(req.query);
+      // Target lookup is request-scoped: exchanging the current CatsCo token
+      // must never replace a user's persisted SkillHub session cookie.
+      const service = serviceFrom(req.query, { sessionScope: 'memory' });
       await service.loginWithCatsCo(cats);
       const result = await service.getCatsCoShareTargets(
         cats.token,

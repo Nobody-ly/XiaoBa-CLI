@@ -142,7 +142,20 @@ export class SkillHubClient {
     const path = kind === 'friends'
       ? '/api/catsco/share-targets/friends'
       : `/api/catsco/share-targets/search?q=${encodeURIComponent(String(query || '').trim())}`;
-    return this.request('GET', path, undefined, { 'X-CatsCo-Access-Token': accessToken });
+    const response = await this.request<any>(
+      'GET',
+      path,
+      undefined,
+      { 'X-CatsCo-Access-Token': accessToken },
+    );
+    const users = Array.isArray(response?.users) ? response.users : [];
+    return {
+      users: users.map((user: any) => ({
+        uid: String(user?.uid ?? '').trim(),
+        username: String(user?.username ?? '').trim(),
+        displayName: String(user?.displayName ?? '').trim(),
+      })).filter((user: any) => user.uid && user.username && user.displayName),
+    };
   }
 
   async downloadPackage(entry: SkillHubRegistryEntry): Promise<Buffer> {

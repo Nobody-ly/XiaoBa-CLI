@@ -133,9 +133,15 @@ describe('dashboard connected SkillHub API', () => {
     process.env.CATSCO_USER_UID = '116';
     await startDashboard();
 
+    const login = await post('/api/skillhub/auth/login', { email: 'demo@example.com', password: 'passw0rd!!' });
+    assert.equal(login.status, 200);
+    const sessionPath = path.join(testRoot, 'data/skillhub/session.json');
+    const persistedBefore = fs.readFileSync(sessionPath, 'utf8');
+
     const friends = await get('/api/skillhub/share-targets/friends');
     assert.equal(friends.status, 200);
     assert.deepEqual(friends.body.users, [{ uid: '951', username: 'john', displayName: 'John' }]);
+    assert.equal(fs.readFileSync(sessionPath, 'utf8'), persistedBefore);
 
     const search = await get('/api/skillhub/share-targets/search?q=john');
     assert.equal(search.status, 200);
@@ -460,12 +466,12 @@ describe('dashboard connected SkillHub API', () => {
     app.get('/api/skills', (_req, res) => res.json({ skills: [fixture.entry] }));
     app.get('/api/catsco/share-targets/friends', (req, res) => {
       assert.equal(req.header('x-catsco-access-token'), 'cats-token');
-      res.json({ users: [{ uid: '951', username: 'john', displayName: 'John' }] });
+      res.json({ users: [{ uid: '951', username: 'john', displayName: 'John', email: 'private@example.com', internalNote: 'private' }] });
     });
     app.get('/api/catsco/share-targets/search', (req, res) => {
       assert.equal(req.header('x-catsco-access-token'), 'cats-token');
       assert.equal(req.query.q, 'john');
-      res.json({ users: [{ uid: '951', username: 'john', displayName: 'John' }] });
+      res.json({ users: [{ uid: '951', username: 'john', displayName: 'John', email: 'private@example.com', internalNote: 'private' }] });
     });
     app.get('/api/trust/public-keys', (_req, res) => res.json(fixture.trust));
     app.get(/^\/api\/skills\/(.+)\/versions\/([^/]+)\/download$/, (_req, res) => res.type('application/octet-stream').send(fixture.packageBytes));
