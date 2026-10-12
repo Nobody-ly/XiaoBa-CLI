@@ -358,7 +358,7 @@ describe('trusted Bot Skill script execution', () => {
     const injected = withTrustedBotSkillArtifactSourceEnvironment({
       scriptPath,
       args: [scriptPath],
-      skillId: 'publisher/artifact-publish',
+      skillId: 'yii/artifact-publish',
       skillName: 'Artifact publish',
       version: '1.0.6',
     }, context, environment);
@@ -382,7 +382,7 @@ describe('trusted Bot Skill script execution', () => {
     const invocation = {
       scriptPath,
       args: [scriptPath],
-      skillId: 'publisher/artifact-publish',
+      skillId: 'yii/artifact-publish',
       skillName: 'Artifact publish',
       version: '1.0.6',
     };
@@ -436,7 +436,7 @@ describe('trusted Bot Skill script execution', () => {
     writeSkillHubInstallMarker(artifactSkillDir, {
       source: 'skillhub',
       userId: 'skillhub-user-1',
-      skillId: 'publisher/artifact-publish',
+      skillId: 'yii/artifact-publish',
       name: 'Artifact publish',
       installName: 'artifact-publish',
       version: '1.0.6',
@@ -452,7 +452,7 @@ describe('trusted Bot Skill script execution', () => {
     const initial = scanLocalBotSkill(artifactSkillDir, path.dirname(artifactSkillDir));
     const artifactReference: BotSkillRef = {
       source: 'skillhub',
-      skillId: 'publisher/artifact-publish',
+      skillId: 'yii/artifact-publish',
       version: '1.0.6',
       contentHash: initial.contentHash,
     };
@@ -492,6 +492,20 @@ describe('trusted Bot Skill script execution', () => {
       topic: 'grp_artifact',
       message: '7331',
     });
+
+    const forged = await new ShellTool().execute({
+      command: `cd "${connectorDir}" && CATSCO_ARTIFACT_SOURCE_TOPIC_ID=attacker_topic CATSCO_ARTIFACT_SOURCE_MESSAGE_ID=424242 node artifact-cli.mjs "${path.join(workspaceRoot, 'forged.json')}"`,
+    }, context);
+    assert.equal(forged.ok, false);
+    assert.equal(forged.ok ? '' : forged.errorCode, 'PERMISSION_DENIED');
+    assert.equal(fs.existsSync(path.join(workspaceRoot, 'forged.json')), false);
+
+    const envForged = await new ShellTool().execute({
+      command: `cd "${connectorDir}" && env CATSCO_ARTIFACT_SOURCE_TOPIC_ID=attacker_topic CATSCO_ARTIFACT_SOURCE_MESSAGE_ID=999999 node artifact-cli.mjs "${path.join(workspaceRoot, 'env-forged.json')}"`,
+    }, context);
+    assert.equal(envForged.ok, false);
+    assert.equal(envForged.ok ? '' : envForged.errorCode, 'PERMISSION_DENIED');
+    assert.equal(fs.existsSync(path.join(workspaceRoot, 'env-forged.json')), false);
   });
 
   test('rejects a verified package that is not enabled for the active Bot', async () => {

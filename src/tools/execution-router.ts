@@ -5,6 +5,7 @@ import { executeRemoteDeviceRpcTool, resolveRemoteToolTimeoutMs } from './device
 import { resolveGrepRpcTimeoutMs } from './grep-search-policy';
 import { TOOL_TARGET_CONTEXT_PREFIX, TOOL_TARGET_CONTEXT_SUFFIX } from './tool-target-context';
 import {
+  isArtifactPublishSkillCommand,
   isRevokedBotSkillSnapshotCommand,
   resolveTrustedBotSkillScriptInvocation,
   type TrustedBotSkillScriptInvocation,
@@ -78,6 +79,13 @@ export function resolveExecutionRoute(
         ok: false,
         errorCode: 'PERMISSION_DENIED',
         message: 'The command points to a revoked Bot Skill snapshot. Restore or install the Skill again before running its scripts.',
+      };
+    }
+    else if (isArtifactPublishSkillCommand(options.command, context, { cwd: options.cwd })) {
+      return {
+        ok: false,
+        errorCode: 'PERMISSION_DENIED',
+        message: 'The artifact-publish connector command was not accepted as a trusted Skill invocation. Do not set source fields manually; run the documented command from the current CatsCo conversation.',
       };
     }
     else if (looksLikeSkillScriptCommand(options.command) && context.executionScope?.source === 'catscompany') {

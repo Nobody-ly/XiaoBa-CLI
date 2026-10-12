@@ -159,7 +159,52 @@ export function withTrustedBotSkillArtifactSourceEnvironment(
 
 function isArtifactPublishSkill(skillId: string): boolean {
   const normalized = stringValue(skillId).toLowerCase();
+  return normalized === 'yii/artifact-publish';
+}
+
+function isArtifactPublishSkillPackage(skillId: string): boolean {
+  const normalized = stringValue(skillId).toLowerCase();
   return normalized === 'artifact-publish' || normalized.endsWith('/artifact-publish');
+}
+
+/**
+ * Detect a command that targets an installed artifact-publish connector but
+ * was not accepted by the trusted direct-spawn parser.  Such commands must
+ * not fall through to the ordinary shell: an inline environment assignment
+ * could otherwise forge the source pair intended to be runtime-only.
+ */
+export function isArtifactPublishSkillCommand(
+  command: unknown,
+  context: ToolExecutionContext,
+  options: { cwd?: unknown } = {},
+): boolean {
+  if (!isTrustedLocalCatsCoRuntime(context) || typeof command !== 'string') return false;
+  const executionDirectory = resolveExecutionDirectory(options.cwd, context.workingDirectory);
+  if (!executionDirectory) return false;
+  const skillsRoot = path.resolve(
+    context.turnSkillSnapshot instanceof TurnSkillSnapshotLease
+      ? context.turnSkillSnapshot.snapshot.rootPath
+      : PathResolver.getSkillsPath(),
+  );
+  return resolveShellScriptEntryPaths(command, executionDirectory).some(scriptPath => {
+    const relative = path.relative(skillsRoot, scriptPath);
+    const segments = relative.split(path.sep).filter(Boolean);
+    if (
+      !relative
+      || relative.startsWith('..')
+      || path.isAbsolute(relative)
+      || segments.length !== 3
+      || segments[1] !== 'connector'
+      || segments[2].toLowerCase() !== 'artifact-cli.mjs'
+    ) return false;
+    const skillDir = path.join(skillsRoot, segments[0]);
+    const installMarker = readSkillHubInstallMarker(skillDir);
+    return Boolean(
+      installMarker
+      && installMarker.installName === segments[0]
+      && isArtifactPublishSkillPackage(installMarker.skillId),
+    );
+  });
 }
 
 /**
