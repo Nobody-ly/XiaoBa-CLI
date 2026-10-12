@@ -27,6 +27,14 @@ XiaoBa 在可信 `yii/artifact-publish` Skill 直执行路径注入当前 turn �
 
 ## 当前状态
 
-本 PR 只修改 XiaoBa。Artifact API `/api/artifacts/apps` 的权威写入实现不在本仓库，因而
-服务端真实性校验需要在对应平台/API 仓库另行实现并配套测试；在该校验上线前，不应把
-客户端来源字段描述为不可伪造的安全保证。
+权威写入接口不在 XiaoBa 仓库，也不在 `catsco-artifact-gateway`（后者负责隧道和网关
+控制面）。它位于 `buildsense-ai/cats-company` 的平台服务中：
+
+- `server/artifact_apps.go` 接收并转发发布请求；
+- `server/artifact_app_metadata.go` 的 `prepareMetadata` 对 Bot 新建请求执行来源校验；
+- [cats-company PR #581](https://github.com/buildsense-ai/cats-company/pull/581) 已合并，
+  关键校验提交为 `427021df`。
+
+因此本 PR 不需要再等待一个新的服务端实现 PR。仍需在发布前确认 `cats-company` main 的
+这部分代码已经部署到实际承载 `/api/artifacts/apps` 的生产环境；代码合并本身不等于
+生产已发布。
