@@ -32,8 +32,8 @@ XiaoBa 在可信 `yii/artifact-publish` Skill 直执行路径注入当前 turn �
 
 - `server/artifact_apps.go` 接收并转发发布请求；
 - `server/artifact_app_metadata.go` 的 `prepareMetadata` 对 Bot 新建请求执行来源校验；
-- [cats-company PR #581](https://github.com/buildsense-ai/cats-company/pull/581) 已合并，
-  关键校验提交为 `427021df`。
+- [cats-company PR #581](https://github.com/buildsense-ai/cats-company/pull/581) 已合并；
+  来源校验首次引入于提交 `dc228f09`，后续提交 `427021df` 属于该 PR 的审阅修正。
 
 因此本 PR 不需要再等待一个新的服务端实现 PR。仍需在发布前确认 `cats-company` main 的
 这部分代码已经部署到实际承载 `/api/artifacts/apps` 的生产环境；代码合并本身不等于
