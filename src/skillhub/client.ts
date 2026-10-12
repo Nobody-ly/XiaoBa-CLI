@@ -127,6 +127,24 @@ export class SkillHubClient {
     return this.request<SkillHubTrustResponse>('GET', '/api/trust/public-keys');
   }
 
+  async getCatsCoShareTargets(
+    token: string,
+    kind: 'friends' | 'search',
+    query = '',
+  ): Promise<{ users: Array<{ uid: string; username: string; displayName: string }> }> {
+    const accessToken = String(token || '').trim();
+    if (!accessToken) {
+      const error: any = new Error('CatsCo login is required before loading Skill share targets.');
+      error.status = 401;
+      error.code = 'skillhub.catsco_login_required';
+      throw error;
+    }
+    const path = kind === 'friends'
+      ? '/api/catsco/share-targets/friends'
+      : `/api/catsco/share-targets/search?q=${encodeURIComponent(String(query || '').trim())}`;
+    return this.request('GET', path, undefined, { 'X-CatsCo-Access-Token': accessToken });
+  }
+
   async downloadPackage(entry: SkillHubRegistryEntry): Promise<Buffer> {
     const path = `/api/skills/${encodeSkillIdPath(entry.skillId)}/versions/${encodeURIComponent(entry.latestVersion)}/download`;
     const response = await this.fetchRaw('GET', path);
@@ -196,8 +214,8 @@ export class SkillHubClient {
     );
   }
 
-  private async request<T>(method: string, apiPath: string, body?: unknown): Promise<T> {
-    const response = await this.fetchRaw(method, apiPath, body);
+  private async request<T>(method: string, apiPath: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
+    const response = await this.fetchRaw(method, apiPath, body, extraHeaders);
     const bytes = await readResponseBytes(
       response,
       MAX_JSON_RESPONSE_BYTES,
@@ -217,13 +235,14 @@ export class SkillHubClient {
     }
   }
 
-  private async fetchRaw(method: string, apiPath: string, body?: unknown): Promise<Response> {
+  private async fetchRaw(method: string, apiPath: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const cookie = this.sessionStore.getCookieHeader(this.config.baseUrl);
     if (cookie) headers.Cookie = cookie;
+    Object.assign(headers, extraHeaders);
 
     let response: Response;
     try {
