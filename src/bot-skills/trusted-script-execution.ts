@@ -164,7 +164,12 @@ export function withTrustedBotSkillArtifactSourceEnvironment(
 
 function isArtifactPublishSkill(skillId: string): boolean {
   const normalized = stringValue(skillId).toLowerCase();
-  return normalized === 'yii/artifact-publish';
+  // Keep this allow-list explicit: the source pair is a privileged runtime
+  // capability, so an arbitrary SkillHub publisher must not gain it merely by
+  // naming a skill `artifact-publish`. `yii` is the original publisher and
+  // `david` is the current David_owner publisher.
+  return normalized === 'yii/artifact-publish'
+    || normalized === 'david/artifact-publish';
 }
 
 function isArtifactPublishSkillPackage(skillId: string): boolean {
