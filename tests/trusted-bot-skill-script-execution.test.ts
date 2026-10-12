@@ -17,6 +17,7 @@ import {
 import {
   isRevokedBotSkillSnapshotCommand,
   resolveTrustedBotSkillScriptInvocation,
+  withTrustedBotSkillArtifactSourceEnvironment,
   withTrustedBotSkillConnectorEnvironment,
 } from '../src/bot-skills/trusted-script-execution';
 import { writeSkillHubInstallMarker } from '../src/skillhub/install-marker';
@@ -338,6 +339,78 @@ describe('trusted Bot Skill script execution', () => {
     assert.equal(unrelated.CATSCO_ACTOR_TOKEN, undefined);
     assert.equal(unrelated.CATSCO_SKILL_ID, undefined);
     assert.equal(unrelated.SAFE_VALUE, 'kept');
+  });
+
+  test('injects the canonical source pair only for artifact-publish', () => {
+    const environment = {
+      CATSCO_ARTIFACT_SOURCE_TOPIC_ID: 'stale-topic',
+      CATSCO_ARTIFACT_SOURCE_MESSAGE_ID: '999',
+      SAFE_VALUE: 'kept',
+    };
+    const context = catsContext({
+      executionScope: {
+        ...catsContext().executionScope!,
+        topicId: 'grp_5063',
+        channelSeq: 1328899,
+      },
+    });
+
+    const injected = withTrustedBotSkillArtifactSourceEnvironment({
+      scriptPath,
+      args: [scriptPath],
+      skillId: 'publisher/artifact-publish',
+      skillName: 'Artifact publish',
+      version: '1.0.6',
+    }, context, environment);
+
+    assert.equal(injected.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, 'grp_5063');
+    assert.equal(injected.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, '1328899');
+    assert.equal(injected.SAFE_VALUE, 'kept');
+
+    const unrelated = withTrustedBotSkillArtifactSourceEnvironment({
+      scriptPath,
+      args: [scriptPath],
+      skillId: 'publisher/other-skill',
+      skillName: 'Other skill',
+      version: '1.0.0',
+    }, context, environment);
+    assert.equal(unrelated.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, undefined);
+    assert.equal(unrelated.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, undefined);
+  });
+
+  test('does not inject an artifact source pair without a trusted canonical sequence', () => {
+    const invocation = {
+      scriptPath,
+      args: [scriptPath],
+      skillId: 'publisher/artifact-publish',
+      skillName: 'Artifact publish',
+      version: '1.0.6',
+    };
+    const baseEnvironment = {
+      CATSCO_ARTIFACT_SOURCE_TOPIC_ID: 'stale-topic',
+      CATSCO_ARTIFACT_SOURCE_MESSAGE_ID: '999',
+    };
+    const missingSequence = withTrustedBotSkillArtifactSourceEnvironment(
+      invocation,
+      catsContext(),
+      baseEnvironment,
+    );
+    assert.equal(missingSequence.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, undefined);
+    assert.equal(missingSequence.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, undefined);
+
+    const untrusted = withTrustedBotSkillArtifactSourceEnvironment(
+      invocation,
+      catsContext({
+        executionScope: {
+          ...catsContext().executionScope!,
+          channelSeq: 42,
+          isTrusted: false,
+        },
+      }),
+      baseEnvironment,
+    );
+    assert.equal(untrusted.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, undefined);
+    assert.equal(untrusted.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, undefined);
   });
 
   test('rejects a verified package that is not enabled for the active Bot', async () => {

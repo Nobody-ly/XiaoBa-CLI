@@ -10,7 +10,10 @@ import { withArtifactTaskRefEnvironment } from '../utils/artifact-task-ref';
 import { resolveRuntimeEnvironment } from '../utils/runtime-environment';
 import { isToolAllowed, isBashCommandAllowed } from '../utils/safety';
 import { executeRouteIfRemote, resolveExecutionRoute, targetParameterDescription } from './execution-router';
-import { withTrustedBotSkillConnectorEnvironment } from '../bot-skills/trusted-script-execution';
+import {
+  withTrustedBotSkillArtifactSourceEnvironment,
+  withTrustedBotSkillConnectorEnvironment,
+} from '../bot-skills/trusted-script-execution';
 import { registerActiveCommand, unregisterActiveCommand } from '../utils/active-commands';
 import { buildCommandResourceNote, readPosixProcessStartTime, sampleProcessGroupRssBytes } from '../utils/machine-resources';
 
@@ -245,7 +248,11 @@ export class ShellTool implements Tool {
     );
     const commandEnvironment = withArtifactTaskRefEnvironment(
       withArtifactContextRefEnvironment(
-        isolatedEnvironment,
+        withTrustedBotSkillArtifactSourceEnvironment(
+          trustedSkillScript,
+          context,
+          isolatedEnvironment,
+        ),
         context.artifactContextRef,
       ),
       context.artifactTaskRef,

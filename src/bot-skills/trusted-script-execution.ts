@@ -70,6 +70,17 @@ const CONNECTOR_ENV_NAMES = [
 ] as const;
 
 /**
+ * Source identity for a newly-created Cloud Artifact.  These values are
+ * deliberately transient environment variables: they are injected only for
+ * the verified artifact-publish Skill entrypoint and are never added to the
+ * model prompt, shell transcript, or persistent session state.
+ */
+export const ARTIFACT_SOURCE_ENV_NAMES = [
+  'CATSCO_ARTIFACT_SOURCE_TOPIC_ID',
+  'CATSCO_ARTIFACT_SOURCE_MESSAGE_ID',
+] as const;
+
+/**
  * Removes connector capabilities from the shared Runtime environment and
  * injects one only when the verified SkillHub package id matches the grant.
  */
@@ -109,6 +120,44 @@ export function withTrustedBotSkillConnectorEnvironment(
   isolated.CATSCO_ACTOR_TOKEN = grant.actorToken;
   isolated.CATSCO_SKILL_ID = grant.skillId;
   return isolated;
+}
+
+/**
+ * Inject the canonical CatsCo conversation/message pair required by the
+ * artifact-publish API.  The runtime, rather than the model or Skill script
+ * arguments, is the only source of these values.  Existing environment values
+ * are always removed first so a stale/manual override cannot be submitted.
+ */
+export function withTrustedBotSkillArtifactSourceEnvironment(
+  invocation: TrustedBotSkillScriptInvocation | undefined,
+  context: ToolExecutionContext,
+  environment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const isolated = { ...environment };
+  for (const name of ARTIFACT_SOURCE_ENV_NAMES) delete isolated[name];
+  if (!invocation || !isArtifactPublishSkill(invocation.skillId)) return isolated;
+
+  const scope = context.executionScope;
+  const topicId = stringValue(scope?.topicId);
+  const channelSeq = scope?.channelSeq;
+  if (
+    !isTrustedLocalCatsCoRuntime(context)
+    || !topicId
+    || typeof channelSeq !== 'number'
+    || !Number.isSafeInteger(channelSeq)
+    || channelSeq <= 0
+  ) {
+    return isolated;
+  }
+
+  isolated.CATSCO_ARTIFACT_SOURCE_TOPIC_ID = topicId;
+  isolated.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID = String(channelSeq);
+  return isolated;
+}
+
+function isArtifactPublishSkill(skillId: string): boolean {
+  const normalized = stringValue(skillId).toLowerCase();
+  return normalized === 'artifact-publish' || normalized.endsWith('/artifact-publish');
 }
 
 /**
