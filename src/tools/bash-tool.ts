@@ -267,7 +267,7 @@ export class ShellTool implements Tool {
       const shellOutput = trustedSkillScript
         ? await this.executeTrustedSkillScript(
           trustedSkillScript.args,
-          executionDirectory.directory,
+          trustedSkillScript.workingDirectory || executionDirectory.directory,
           scopedRuntimeEnvironment,
           timeout,
           context.abortSignal,

@@ -19,6 +19,8 @@ export interface TrustedBotSkillScriptInvocation {
   skillId: string;
   skillName: string;
   version: string;
+  /** The requested working directory for compound Skill commands (if any). */
+  workingDirectory?: string;
 }
 
 export type TrustedBotSkillScriptDecision =
@@ -177,16 +179,15 @@ export function resolveTrustedBotSkillScriptInvocation(
     return denied('Verified Bot Skill scripts can only run on the current Bot body, without a target override.');
   }
 
-  const tokens = tokenizeDirectCommand(command);
-  if (!tokens || tokens.length < 2 || !isNodeCommand(tokens[0])) {
-    return denied('The command is not one direct Node.js script invocation.');
-  }
-
   const executionDirectory = resolveExecutionDirectory(options.cwd, context.workingDirectory);
   if (!executionDirectory) {
     return denied('The command working directory is missing or unavailable.');
   }
-  const scriptPath = path.resolve(executionDirectory, tokens[1]);
+  const parsed = resolveTrustedSkillCommand(command, executionDirectory);
+  if (!parsed) {
+    return denied('The command is not one direct Node.js script invocation.');
+  }
+  const { scriptPath, args, workingDirectory } = parsed;
   if (!['.js', '.cjs', '.mjs'].includes(path.extname(scriptPath).toLowerCase())) {
     return denied('The requested entrypoint is not a JavaScript file.');
   }
@@ -198,12 +199,15 @@ export function resolveTrustedBotSkillScriptInvocation(
   );
   const relative = path.relative(skillsRoot, scriptPath);
   const segments = relative.split(path.sep).filter(Boolean);
+  const isScriptsEntrypoint = segments.length >= 3 && segments[1] === 'scripts';
+  const isArtifactConnectorEntrypoint = segments.length === 3
+    && segments[1] === 'connector'
+    && segments[2].toLowerCase() === 'artifact-cli.mjs';
   if (
     !relative
     || relative.startsWith('..')
     || path.isAbsolute(relative)
-    || segments.length < 3
-    || segments[1] !== 'scripts'
+    || (!isScriptsEntrypoint && !isArtifactConnectorEntrypoint)
   ) {
     return denied('The requested entrypoint is outside an installed Bot Skill scripts directory.');
   }
@@ -238,6 +242,9 @@ export function resolveTrustedBotSkillScriptInvocation(
   ) {
     return denied('The SkillHub install identity does not match the Bot-bound Skill reference.');
   }
+  if (isArtifactConnectorEntrypoint && !isArtifactPublishSkill(reference.skillId)) {
+    return denied('The connector entrypoint is reserved for the artifact-publish Skill.');
+  }
 
   const agentId = stringValue(context.executionScope?.agentId);
   if (isBotSkillReferenceActive(agentId, reference) !== true) {
@@ -248,11 +255,58 @@ export function resolveTrustedBotSkillScriptInvocation(
     ok: true,
     invocation: {
       scriptPath,
-      args: [scriptPath, ...tokens.slice(2)],
+      args,
       skillId: reference.skillId,
       skillName: installMarker.name,
       version: reference.version,
+      ...(workingDirectory ? { workingDirectory } : {}),
     },
+  };
+}
+
+interface ParsedTrustedSkillCommand {
+  scriptPath: string;
+  args: string[];
+  workingDirectory?: string;
+}
+
+/**
+ * Parse only the two command shapes emitted by verified Skill instructions:
+ * a direct `node <script>` call, or the legacy artifact-publish form
+ * `cd <skill>/connector && node artifact-cli.mjs ...`.  The latter is
+ * converted to a direct process spawn; no shell ever evaluates the compound
+ * command or any additional segment.
+ */
+function resolveTrustedSkillCommand(
+  command: unknown,
+  executionDirectory: string,
+): ParsedTrustedSkillCommand | undefined {
+  const direct = tokenizeDirectCommand(command);
+  if (direct && direct.length >= 2 && isNodeCommand(direct[0])) {
+    return {
+      scriptPath: path.resolve(executionDirectory, direct[1]),
+      args: [path.resolve(executionDirectory, direct[1]), ...direct.slice(2)],
+    };
+  }
+
+  if (typeof command !== 'string') return undefined;
+  const tokens = tokenizeShellCommand(command);
+  if (
+    tokens.length < 5
+    || tokens[0].toLowerCase() !== 'cd'
+    || tokens[2] !== '&&'
+    || !isNodeCommand(tokens[3])
+    || tokens[4].toLowerCase() !== 'artifact-cli.mjs'
+    || tokens.slice(0, 5).some(token => [';', '||', '|', '(', ')'].includes(token))
+  ) {
+    return undefined;
+  }
+  const workingDirectory = path.resolve(executionDirectory, tokens[1]);
+  const scriptPath = path.resolve(workingDirectory, tokens[4]);
+  return {
+    scriptPath,
+    args: [scriptPath, ...tokens.slice(5)],
+    workingDirectory,
   };
 }
 

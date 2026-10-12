@@ -413,6 +413,87 @@ describe('trusted Bot Skill script execution', () => {
     assert.equal(untrusted.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID, undefined);
   });
 
+  test('runs the published artifact-publish connector layout and injects its source pair', async () => {
+    const artifactSkillDir = path.join(runtimeRoot, 'skills', 'artifact-publish');
+    const connectorDir = path.join(artifactSkillDir, 'connector');
+    const artifactCliPath = path.join(connectorDir, 'artifact-cli.mjs');
+    fs.mkdirSync(connectorDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactSkillDir, 'SKILL.md'), [
+      '---',
+      'name: artifact-publish',
+      'description: test fixture',
+      '---',
+      '# Artifact publish',
+      '',
+    ].join('\n'), 'utf8');
+    fs.writeFileSync(artifactCliPath, [
+      "import fs from 'node:fs';",
+      "const output = process.argv[2];",
+      "fs.writeFileSync(output, JSON.stringify({ topic: process.env.CATSCO_ARTIFACT_SOURCE_TOPIC_ID, message: process.env.CATSCO_ARTIFACT_SOURCE_MESSAGE_ID }), 'utf8');",
+      "console.log('artifact-cli-ok');",
+      '',
+    ].join('\n'), 'utf8');
+    writeSkillHubInstallMarker(artifactSkillDir, {
+      source: 'skillhub',
+      userId: 'skillhub-user-1',
+      skillId: 'publisher/artifact-publish',
+      name: 'Artifact publish',
+      installName: 'artifact-publish',
+      version: '1.0.6',
+      packageChecksumSha256: 'b'.repeat(64),
+      signature: {
+        algorithm: 'ed25519',
+        keyId: 'skillhub-test-key',
+        signature: 'signed-artifact-package-fixture',
+      },
+      packageUrl: 'https://skillhub.example/artifact-publish.skillpkg',
+      installedAt: new Date(0).toISOString(),
+    });
+    const initial = scanLocalBotSkill(artifactSkillDir, path.dirname(artifactSkillDir));
+    const artifactReference: BotSkillRef = {
+      source: 'skillhub',
+      skillId: 'publisher/artifact-publish',
+      version: '1.0.6',
+      contentHash: initial.contentHash,
+    };
+    writeBotSkillLocalMarker(artifactSkillDir, {
+      schema: 'xiaoba.bot-skill-local.v1',
+      localSkillId: initial.localSkillId,
+      reference: artifactReference,
+      origin: { skillId: artifactReference.skillId, version: artifactReference.version },
+    });
+    new FileBotDefinitionRepository({ runtimeRoot }).writeCache({
+      schema: 'xiaoba.bot-definition.v1',
+      botId: 'bot-1',
+      model: { kind: 'catalog', modelId: 'test-model' },
+      skills: [reference, artifactReference],
+    });
+
+    const output = path.join(workspaceRoot, 'artifact-source.json');
+    const command = `cd "${connectorDir}" && node artifact-cli.mjs "${output}"`;
+    const context = catsContext({
+      executionScope: {
+        ...catsContext().executionScope!,
+        topicId: 'grp_artifact',
+        channelSeq: 7331,
+      },
+    });
+    const decision = resolveTrustedBotSkillScriptInvocation(command, context);
+    assert.equal(decision.ok, true);
+    if (decision.ok) {
+      assert.equal(decision.invocation.scriptPath, artifactCliPath);
+      assert.equal(decision.invocation.workingDirectory, connectorDir);
+    }
+
+    const result = await new ShellTool().execute({ command }, context);
+    assert.equal(result.ok, true);
+    assert.match(result.ok ? String(result.content) : '', /artifact-cli-ok/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), {
+      topic: 'grp_artifact',
+      message: '7331',
+    });
+  });
+
   test('rejects a verified package that is not enabled for the active Bot', async () => {
     const command = `node "${scriptPath}" "${path.join(workspaceRoot, 'wrong-bot.json')}"`;
     const decision = resolveTrustedBotSkillScriptInvocation(command, catsContext({
