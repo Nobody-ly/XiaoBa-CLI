@@ -779,7 +779,11 @@ describe('AgentSession lifecycle', () => {
           if (action === 'clear') session.clear();
         } finally { release(); }
         const result = await pending;
-        assert.equal(summaries, 1);
+        assert.equal(
+          summaries,
+          action === 'timeout' && boundary === 'summary_pending' ? 3 : 1,
+          'a transient summary failure retries inside the same candidate without repeating tools',
+        );
         assert.equal(toolExecutions, 1);
         assert.equal(result.taskOutcome, action === 'continue' ? 'completed' : action === 'timeout' ? 'failed' : 'cancelled');
         await session.cleanup();
@@ -905,7 +909,7 @@ describe('AgentSession lifecycle', () => {
       },
     });
 
-    assert.deepStrictEqual(compactReasons, ['pre_turn', 'restore', 'mid_turn']);
+    assert.deepStrictEqual(compactReasons, ['restore', 'mid_turn']);
     // One start notice from the compaction event and one completion notice
     // after the checkpoint is persisted: no "generated" intermediate line.
     assert.deepStrictEqual(thinking, [
@@ -942,11 +946,15 @@ describe('AgentSession lifecycle', () => {
     );
 
     let preCompactMessages: any[] = [];
-    (session as any).checkpointCompactionCoordinator.compactIfNeeded = async (messages: any[], options: any) => {
-      if (options.phase === 'pre_turn') {
+    const originalBoundary = (session as any).handleCheckpointCandidateBoundary.bind(session);
+    (session as any).handleCheckpointCandidateBoundary = async (
+      messages: any[],
+      ...args: any[]
+    ) => {
+      if (args[1] === 'pre_turn') {
         preCompactMessages = messages.map(message => ({ ...message }));
       }
-      return { compacted: false, messages };
+      return originalBoundary(messages, ...args);
     };
 
     await session.handleMessage('继续');

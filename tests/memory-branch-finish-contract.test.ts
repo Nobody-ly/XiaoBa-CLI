@@ -178,7 +178,7 @@ describe('MemorySearchBranchSession concise finish contract', () => {
     assert.match(prompt, /详情见证据包/);
     assert.match(prompt, /detail_needed/);
     assert.match(prompt, /800 字符/);
-    assert.match(prompt, /refs 照常给全/);
+    assert.match(prompt, /evidence 数组照常给全/);
     // Freshness/conflict honesty the prompt already required is still there.
     assert.match(prompt, /late\/older memory 与当前用户输入冲突，summary 要明确提示冲突/);
     assert.match(prompt, /时间状态不明就说明不确定/);
