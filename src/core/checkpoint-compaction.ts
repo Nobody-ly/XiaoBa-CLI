@@ -41,6 +41,8 @@ const CHECKPOINT_TOOL_EVIDENCE_PREFIX = '[checkpoint_tool_evidence]';
 const CHECKPOINT_USER_INPUT_EVIDENCE_PREFIX = '[checkpoint_user_input_evidence]';
 const CHECKPOINT_SOURCE_VERIFICATION = 'This checkpoint is a lossy reference, not an exact data source. Re-read original files or tool evidence before using exact fields. Never pad, normalize, or extrapolate identifiers or checksums from a summary. Before declaring a generated report correct, compare every field against its original source; counts and uniqueness alone do not establish correctness.';
 
+class InvalidCheckpointSummaryError extends Error {}
+
 export type CheckpointCompactionPhase = 'pre_turn' | 'mid_turn' | 'restore' | 'manual';
 
 export interface CheckpointCompactionCoordinatorOptions {
@@ -505,16 +507,16 @@ export class CheckpointCompactionCoordinator {
           || stopReason === 'length';
         if (outputWasTruncated) {
           if (invalidSummaryAttempts++ < 1) continue;
-          throw new Error('checkpoint compaction reached the summary output limit; original context preserved');
+          throw new InvalidCheckpointSummaryError('checkpoint compaction reached the summary output limit; original context preserved');
         }
         if (!summary || response.toolCalls?.length || /<\s*(?:minimax:)?tool_call\b|<invoke\s+name\s*=|\]<\]minimax\[>/i.test(summary)) {
           if (invalidSummaryAttempts++ < 1) continue;
-          throw new Error('checkpoint compaction returned an invalid summary; original context preserved');
+          throw new InvalidCheckpointSummaryError('checkpoint compaction returned an invalid summary; original context preserved');
         }
         return summary;
       } catch (error) {
         lastError = error;
-        if (!isContextLengthError(error) || attemptMessages.length <= 1) {
+        if (error instanceof InvalidCheckpointSummaryError || !isContextLengthError(error) || attemptMessages.length <= 1) {
           throw error;
         }
         const reduced = dropOldestEpisode(attemptMessages);

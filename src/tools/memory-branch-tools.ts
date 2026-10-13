@@ -278,7 +278,7 @@ export class FinishMemorySearchTool implements Tool {
       '结束 memory search branch。',
       '当你已经拿到足够的记忆证据，或确认没有有用记忆时，调用这个工具。',
       'summary 是精简交付说明（≤400 字符：结论 + 关键锚点 + 冲突/时效提示；证据包会作为数据一并交付，详细内容不必复述）；主题确实需要更长说明时设 detail_needed:true（上限 800 字符）。',
-      '正常找到有新增价值的记忆时不需要设置 inject，并必须提供支撑 summary 的 evidence 数组。',
+      '正常找到有新增价值的记忆时不需要设置 inject，并必须提供支撑 summary 的 evidence 字符串数组：复制证据条目的 ref 值，分组则复制 refs 中的各个值。',
       '如果证据只需要留在 branch 审计日志、不应注入主 agent，可设置 delivery:"audit"、inject:false，并保留 evidence。',
       '如果完全没有可保留的价值，设置 delivery:"discard"、inject:false，并传空 evidence。',
       '调用成功后 branch 会立刻结束。',
@@ -293,7 +293,7 @@ export class FinishMemorySearchTool implements Tool {
         },
         evidence: {
           type: 'array',
-          description: '支撑 summary 的 canonical evidence locations。context/audit 至少一个；discard 必须为空。',
+          description: '支撑 summary 的证据位置字符串数组。从证据条目的 ref 或分组 refs 复制，例如 evidence:["chat/2026-06-16/demo.jsonl#2"]；discard 传 evidence:[]。context/audit 至少一个。',
           items: { type: 'string' },
         },
         inject: {
@@ -362,9 +362,9 @@ function validateFinishArgs(args: any):
   // `refs` is accepted only as a narrow migration alias for already-running
   // branches. It is intentionally not advertised in the tool schema and is
   // never coerced from a string; new calls must use evidence[].
-  const rawEvidence = args?.evidence ?? args?.refs;
+  const rawEvidence = args?.evidence === undefined ? args?.refs : args.evidence;
   if (!Array.isArray(rawEvidence)) {
-    return { ok: false, error: 'evidence must be an array of canonical memory locations' };
+    return { ok: false, error: 'evidence must be an array of strings; copy observed ref values into evidence:["chat/2026-06-16/demo.jsonl#2"], or use evidence:[] for discard' };
   }
   if (typeof args?.inject !== 'undefined' && typeof args.inject !== 'boolean') {
     return { ok: false, error: 'inject must be a boolean when provided' };
@@ -379,7 +379,13 @@ function validateFinishArgs(args: any):
     : rawDelivery === undefined || rawDelivery === 'context';
   const delivery: MemorySearchFinishPayload['delivery'] = rawDelivery
     || (inject ? 'context' : 'discard');
-  const evidence: string[] = rawEvidence.map((location: unknown) => String(location || '').trim()).filter(Boolean);
+  const evidence: string[] = [];
+  for (const [index, location] of rawEvidence.entries()) {
+    if (typeof location !== 'string' || !location.trim()) {
+      return { ok: false, error: `evidence[${index}] must be a non-empty ref string; copy one observed ref value per array element` };
+    }
+    evidence.push(location.trim());
+  }
   for (const ref of evidence) {
     if (!isMemoryCitationRef(ref)) {
       return { ok: false, error: `invalid evidence location: ${ref}` };

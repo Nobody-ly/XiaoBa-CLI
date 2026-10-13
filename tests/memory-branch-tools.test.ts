@@ -164,6 +164,24 @@ describe('memory branch tools', () => {
     assert.equal(invalidString.ok, false);
     assert.match(JSON.parse(String(invalidString.message)).error, /evidence must be an array/);
 
+    const invalidNull = await tool.execute({
+      summary: 'done',
+      evidence: null,
+      refs: ['chat/2026-06-16/demo.jsonl#2'],
+    } as any, { workingDirectory: testRoot, conversationHistory: [] });
+    assert.equal(invalidNull.ok, false);
+    assert.match(JSON.parse(String(invalidNull.message)).error, /evidence must be an array/);
+
+    for (const malformedEvidence of [[['chat/2026-06-16/demo.jsonl#2']], ['']]) {
+      const malformed = await tool.execute({
+        summary: 'done',
+        evidence: malformedEvidence,
+      } as any, { workingDirectory: testRoot, conversationHistory: [] });
+      assert.equal(malformed.ok, false);
+      assert.match(JSON.parse(String(malformed.message)).error, /evidence\[0\] must be a non-empty ref string/);
+      assert.equal(captured, null);
+    }
+
     const validEvidence = await tool.execute({
       summary: 'Evidence field is accepted.',
       evidence: ['chat/2026-06-16/demo.jsonl#2'],
