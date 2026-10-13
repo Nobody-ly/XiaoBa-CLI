@@ -2,7 +2,7 @@ import { ContentBlock, Message } from '../types';
 import { AIService } from '../utils/ai-service';
 import { Logger } from '../utils/logger';
 import { SyntheticObservationQueue } from './synthetic-observation';
-import { MemorySearchBranchSession } from './memory-search-branch-session';
+import { MemorySearchBranchSession, type MemoryBranchActivationContext } from './memory-search-branch-session';
 import type { CatsLogMemoryBackend } from '../utils/catslog-memory-provider';
 
 export interface MemorySidecarBranchOptions {
@@ -21,6 +21,7 @@ export interface MemorySidecarBranchOptions {
   maxPasses?: number;
   deadlineMs?: number;
   maxContextTokens?: number;
+  activationContext?: MemoryBranchActivationContext;
 }
 
 export interface MemorySidecarBranchHandle {

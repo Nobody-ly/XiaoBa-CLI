@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { ContentBlock, Message } from '../types';
 import { AIService } from '../utils/ai-service';
+import { readRequiredBundledPromptFile } from '../utils/prompt-template';
 import { Tool, ToolExecutionContext } from '../types/tool';
 import {
   AssessMemoryNeedPayload,
@@ -44,6 +45,12 @@ import { hasUsableMemoryEvidence } from './memory-evidence-gate';
 import { consolidateMemoryEvidencePack, type ConsolidateMemoryEvidencePackResult } from './branch-evidence-pack';
 import { collectBranchRefLanes } from './branch-citation-reporter';
 
+export interface MemoryBranchActivationContext {
+  taskAnchor: string | ContentBlock[];
+  deltaSinceLastRun: readonly Message[];
+  previousInjections: Array<{ summary: string; refs: string[] }>;
+}
+
 export interface MemorySearchBranchSessionOptions {
   sessionKey: string;
   input: string | ContentBlock[];
@@ -59,6 +66,7 @@ export interface MemorySearchBranchSessionOptions {
   maxPasses?: number;
   deadlineMs?: number;
   maxContextTokens?: number;
+  activationContext?: MemoryBranchActivationContext;
 }
 
 /**
@@ -306,6 +314,7 @@ export class MemorySearchBranchSession extends ObservationBranchSession<MemorySe
           input: this.memoryOptions.input,
           recentMessages: this.memoryOptions.recentMessages,
           hasCatsLogMemory: Boolean(this.catslogMemory),
+          activationContext: this.memoryOptions.activationContext,
         }),
       },
     ];
@@ -956,7 +965,24 @@ function buildMemorySearchUserInput(options: {
   input: string | ContentBlock[];
   recentMessages: Message[];
   hasCatsLogMemory: boolean;
+  activationContext?: MemoryBranchActivationContext;
 }): string {
+  if (options.activationContext) {
+    const { taskAnchor, deltaSinceLastRun, previousInjections } = options.activationContext;
+    return JSON.stringify({
+      current_user_input: contentToText(taskAnchor),
+      activation: 'same_episode_refresh',
+      instruction: readRequiredBundledPromptFile('memory-search-refresh.md'),
+      delta_since_last_run: deltaSinceLastRun.map(message => ({
+        role: message.role,
+        content: contentToText(message.content),
+        ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+        ...(message.name ? { name: message.name } : {}),
+      })),
+      previous_injections: previousInjections,
+      catslog_memory_source_available: options.hasCatsLogMemory,
+    }, null, 2);
+  }
   const recentTurns = extractRecentCompletedTurns(options.recentMessages).slice(-2);
   const payload = {
     current_user_input: contentToText(options.input),

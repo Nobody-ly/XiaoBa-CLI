@@ -13,7 +13,7 @@ fork main（同步上游 main）
   └─ PR #7：Memory 续搜 + 异步 Summary + PR #10 的必要修复
 ```
 
-只更新既有 PR #7 的 head/base，不另开功能 PR，也不改 PR #4、#5。改写远端分支前保存原 HEAD，使用 `--force-with-lease`，并仅在本地测试通过后推送。PR #10 不自动合并，Saturday 不因改分支而自动部署。
+只更新既有 PR #7 的 head/base，不另开功能 PR，也不改 PR #4、#5。改写远端分支前保存原 HEAD，使用 `--force-with-lease`，并仅在本地测试通过后推送。PR #10 不自动合并。用户已授权测试、审查通过后部署 Saturday 的 PR #7 HEAD，不合并上游。
 
 ## Branch Memory
 
@@ -31,8 +31,8 @@ Episode 开始时仍立即启动一次当前上游的服务端 Memory Branch。�
 
 ## 验收与边界
 
-- Memory：首轮即搜；15 分钟后有新增才续搜；无新增不调用；同一 Episode 不重叠、不重复注入同一结论；合法 `evidence` 引用可重复使用；结束后不再启动。
+- Memory：首轮即搜；15 分钟后有新增才续搜；无新增不调用；同一 Episode 不重叠；通过提示避免重复结论，不增加硬编码过滤；合法 `evidence` 引用可重复使用；结束后不再启动。
 - Summary：75% 前不启动；超过 75% 启动一次；超过停止点只等待同一候选；候选快照失效时不错误提交；后续 tool pair 和新增消息不丢；网络/空摘要/截断输出有界重试，401 不无界重试；最终失败不裁剪历史。
 - 组合：两项同时运行时不互相覆盖 Session 消息或 checkpoint；主 Agent、Memory Branch、Summary 的模型调用和计费可区分；取消/重启不泄漏后台任务。
-- 执行定向测试、完整构建、`release:check`、仓库 CI；真实 Saturday 部署另行决定，先不替换当前运行版本。
+- 执行定向测试、完整构建、`release:check`、仓库 CI。通过后检查 Saturday 活跃任务，备份当前版本和必要配置，切换到 PR #7 HEAD、重启连接；保留全部 state、skills、历史和用户配置，核对服务状态、连接、运行 SHA 与启用设置。
 

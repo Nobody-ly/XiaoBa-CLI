@@ -177,6 +177,36 @@ describe('memory sidecar branch', () => {
     }
   });
 
+  test('repeat activation sends delta and prior injections through the same server-first pipeline', async () => {
+    const ai = new MemoryBranchAI();
+    const queue = new InMemorySyntheticObservationQueue();
+    const backend = new SessionQueryMemory();
+    backend.sessionResponse = { records: [{
+      ref: 'stream-dashboard#1', timestamp: '2026-10-12T10:00:00Z',
+      user: { text: 'dashboard_unique_memory compact_filter_unique preference' },
+      agent: { text: 'Keep dashboard filters compact.' },
+    }] };
+    const handle = startMemorySidecarBranch({
+      sessionKey: 'refresh-test', input: 'task anchor', recentMessages: [],
+      workingDirectory: testRoot, aiService: ai as any, queue, logEnabled: false,
+      catslogMemory: backend as any,
+      activationContext: {
+        taskAnchor: 'task anchor',
+        deltaSinceLastRun: [{ role: 'user', content: 'new constraint takes precedence' }],
+        previousInjections: [{ summary: 'prior useful fact', refs: ['reusable-source'] }],
+      },
+    });
+    await handle.done;
+    const capsule = JSON.parse(String(ai.calls[0].find(message => message.role === 'user')?.content));
+    assert.equal(capsule.activation, 'same_episode_refresh');
+    assert.equal(capsule.current_user_input, 'task anchor');
+    assert.equal(capsule.delta_since_last_run[0].content, 'new constraint takes precedence');
+    assert.deepEqual(capsule.previous_injections[0].refs, ['reusable-source']);
+    assert.match(capsule.instruction, /同一证据可以支持新的结论/);
+    assert.equal(ai.calls.length, 2);
+    assert.equal(queue.size(), 1);
+  });
+
   test('mechanical server retrieval feeds pass 2 and publishes the cited session record', async () => {
     const queue = new InMemorySyntheticObservationQueue();
     const aiService = new MemoryBranchAI();

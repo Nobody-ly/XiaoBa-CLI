@@ -93,6 +93,70 @@ function createMemoryBranchController(
 }
 
 describe('AgentTurnController memory branch carryover', () => {
+  test('refreshes only after 15 minutes with new progress and preserves the task and previous injections', async () => {
+    const controller = createMemoryBranchController(true);
+    const starts: any[] = [];
+    (controller as any).createMemorySidecarHandle = (options: any) => {
+      starts.push(options);
+      return { cancel: () => undefined, done: Promise.resolve() };
+    };
+    const runtime = (controller as any).startEpisodeMemoryRuntime({
+      turnNumber: 1, input: 'fix the server', messages: [],
+    });
+    await Promise.resolve();
+    assert.equal(starts.length, 1);
+    const progress: Message[] = [{ role: 'assistant', content: 'investigating the new error' }];
+    runtime.activeSlot.completedAt = Date.now() - 14 * 60_000;
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 1);
+    runtime.activeSlot.completedAt = Date.now() - 15 * 60_000 - 1;
+    (controller as any).maybeStartMemoryRefresh(runtime, []);
+    assert.equal(starts.length, 1, 'no progress must not make a model request');
+    runtime.previousInjections.push({ summary: 'old constraint', refs: ['same-source'] });
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 2);
+    assert.equal(starts[1].input, 'fix the server');
+    assert.deepEqual(starts[1].messages, []);
+    assert.deepEqual(starts[1].activationContext.deltaSinceLastRun, progress);
+    assert.deepEqual(starts[1].activationContext.previousInjections, [{ summary: 'old constraint', refs: ['same-source'] }]);
+    await Promise.resolve();
+    runtime.activeSlot.completedAt = Date.now() - 16 * 60_000;
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 2, 'same progress must not trigger again');
+    progress.push({ role: 'user', content: 'actually keep the new behavior' });
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 3);
+    assert.deepEqual(starts[2].activationContext.deltaSinceLastRun, [progress[1]]);
+    assert.deepEqual(starts[2].activationContext.previousInjections[0].refs, ['same-source'], 'refs remain advisory, not a blacklist');
+  });
+
+  test('does not overlap branches, refresh cancelled/ended episodes, or feed synthetic observations back', async () => {
+    const controller = createMemoryBranchController(true);
+    const starts: any[] = [];
+    (controller as any).createMemorySidecarHandle = (options: any) => {
+      starts.push(options);
+      return { cancel: () => undefined, done: new Promise<void>(() => undefined) };
+    };
+    const abort = new AbortController();
+    const runtime = (controller as any).startEpisodeMemoryRuntime({
+      turnNumber: 1, input: 'task', messages: [], abortSignal: abort.signal,
+    });
+    const progress: Message[] = [{ role: 'assistant', content: 'progress' }];
+    runtime.activeSlot.completedAt = Date.now() - 16 * 60_000;
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 1, 'still-running first branch cannot overlap');
+    runtime.activeSlot.done = true;
+    (controller as any).maybeStartMemoryRefresh(runtime, [{ role: 'tool', content: 'memory', __syntheticObservation: true }]);
+    assert.equal(starts.length, 1);
+    runtime.stopped = true;
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 1);
+    runtime.stopped = false;
+    abort.abort();
+    (controller as any).maybeStartMemoryRefresh(runtime, progress);
+    assert.equal(starts.length, 1);
+  });
+
   test('uses the persisted Branch switch even when both legacy env switches are disabled', () => {
     const previousBranch = process.env[BRANCH_AGENTS_ENABLED_ENV];
     const previousMemory = process.env[MEMORY_SIDECAR_ENABLED_ENV];
