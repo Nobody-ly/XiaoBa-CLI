@@ -107,6 +107,37 @@ test('retries a checkpoint summary truncated by the provider output limit', asyn
   assert.match(String(result.messages.find(message => message.__checkpointSummary)?.content), /完整检查点/);
 });
 
+test('two truncated summaries stop without dropping source episodes', async () => {
+  const requests: Message[][] = [];
+  const service = {
+    chatStream: async (
+      messages: Message[],
+      _tools: unknown,
+      callbacks: { onText?: (text: string) => void },
+    ) => {
+      requests.push(messages);
+      callbacks.onText?.('incomplete checkpoint');
+      return { content: 'incomplete checkpoint', stopReason: 'max_tokens', usage };
+    },
+  };
+  const coordinator = new CheckpointCompactionCoordinator(service, { maxContextTokens: 2_000 });
+  const messages: Message[] = [
+    { role: 'user', content: `First episode: ${'history '.repeat(200)}` },
+    { role: 'assistant', content: 'first episode result' },
+    { role: 'user', content: `Second episode: ${'history '.repeat(200)}` },
+    { role: 'assistant', content: 'second episode result' },
+  ];
+  const original = structuredClone(messages);
+
+  await assert.rejects(
+    coordinator.compactIfNeeded(messages, { sessionKey: 'truncated-summary-stop', phase: 'manual', force: true }),
+    /summary output limit/,
+  );
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1], requests[0]);
+  assert.deepEqual(messages, original);
+});
+
 test('checkpoint input limit is 85 percent for supported 256K+ windows', () => {
   assert.equal(calculateCheckpointInputLimitTokens(256_000), 217_600);
   assert.equal(calculateCheckpointInputLimitTokens(1_000_000), 850_000);

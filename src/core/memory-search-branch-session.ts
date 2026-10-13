@@ -680,7 +680,7 @@ export class MemorySearchBranchSession extends ObservationBranchSession<MemorySe
           + 'updated_at 是文档修改时间，不是历史覆盖水位；不得把该时间以前未引用的记录视为已被蒸馏。'
           + '当远端/会话证据更新或与 KB 冲突时，保留来源边界并合成差异，不要盲目照搬文档。'
           + 'KB excerpt 仅为绑定 revision 与 char_start/char_end 的局部原文，分页、截断和读取缺口可能省略条件；没有片段不代表已读完正文。'
-          + '请分析后立即调用 finish_memory_search 收尾；evidence 数组只填写本视图中真实呈现的证据位置，不要创造位置。文档正文提及的其他引用不是本轮已验证来源，片段事实引用对应的 KB 证据位置。',
+          + '请分析后立即调用 finish_memory_search 收尾；将本视图中真实呈现条目的 ref 值（或分组 refs 中的各个值）复制到 evidence 字符串数组，不要创造位置。文档正文提及的其他引用不是本轮已验证来源，片段事实引用对应的 KB 条目 ref。',
       }),
     };
   }
@@ -811,7 +811,7 @@ export class MemorySearchBranchSession extends ObservationBranchSession<MemorySe
       content: [
         '你刚才的回复不会传递给主 agent。',
         '这个 branch 只能通过调用 finish_memory_search 结束。',
-        '请现在用当前已有的最佳总结和 evidence 数组调用 finish_memory_search；需要给主 agent 使用时选择 delivery:context，需要只留审计证据时选择 delivery:audit，完全没有价值时选择 delivery:discard。',
+        '请现在用当前已有的最佳总结调用 finish_memory_search；将证据条目 ref（分组 refs 中的每个值）放进 evidence 字符串数组，不能传单个字符串；需要给主 agent 使用时选择 delivery:context，需要只留审计证据时选择 delivery:audit，完全没有价值时选择 delivery:discard 且 evidence:[]。',
       ].join(' '),
     };
   }
