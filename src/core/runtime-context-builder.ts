@@ -9,7 +9,7 @@ import type {
   ScopedLocalFileGrant,
   SessionRoute,
 } from '../types/session-identity';
-import type { TargetRoute, TargetRoutes } from '../types/tool';
+import type { TargetRoute, TargetRoutes, GroupRosterEntry } from '../types/tool';
 import { parseSessionKeyV2 } from './session-router';
 import { getCatsCoAttachmentCacheSessionRoot } from '../catscompany/attachment-cache';
 import { renderMachineResourcesForPrompt } from '../utils/machine-resources';
@@ -36,6 +36,8 @@ export interface BuildRuntimeContextParams {
   deviceSelection?: ScopedDeviceSelection;
   targetRoutes?: TargetRoutes;
   localFileGrants?: ScopedLocalFileGrant[];
+  /** 群成员名单；只有多 bot 群才有，用于渲染"群里有谁"。 */
+  groupRoster?: GroupRosterEntry[];
 }
 
 export interface ExecutionContextSnapshot {
@@ -70,6 +72,7 @@ export function buildRuntimeContextMessage(params: BuildRuntimeContextParams): M
   const content = buildRuntimeContextText(
     params.targetRoutes,
     getCatsCoAttachmentCacheSessionRoot(params.sessionKey),
+    params.groupRoster,
   );
   if (!content) return null;
   return { role: 'system', content };
@@ -83,12 +86,27 @@ function shouldInjectRuntimeContext(params: BuildRuntimeContextParams): boolean 
   return source === 'catscompany';
 }
 
-export function buildRuntimeContextText(targetRoutes?: TargetRoutes, attachmentDirectory?: string): string {
+export function buildRuntimeContextText(
+  targetRoutes?: TargetRoutes,
+  attachmentDirectory?: string,
+  groupRoster?: GroupRosterEntry[],
+): string {
   const routes = targetRoutes?.routes || [];
   const lines = [TRANSIENT_RUNTIME_CONTEXT_PREFIX];
   if (attachmentDirectory) {
     lines.push(`当前会话附件缓存目录（XiaoBa 本地运行体）：${attachmentDirectory}`);
     lines.push('需要查找本会话历史附件时，用不带 target 的 glob 查看该目录；找到具体文件后再传给 read_file、grep 或本机脚本。');
+    lines.push('');
+  }
+  // 群成员名单：让这个助手知道群里谁是人、谁是同伴。
+  //
+  // 每轮重建、不进历史：它是会变的状态，写进历史就会过期。人和助手都显式标注，
+  // 因为只标助手的话，"没有标记"会有两种含义，读的人无法可靠判断。
+  if (groupRoster && groupRoster.length > 0) {
+    lines.push('群成员：');
+    for (const member of groupRoster) {
+      lines.push(`- ${formatRosterMember(member)}`);
+    }
     lines.push('');
   }
   const machineResources = renderMachineResourcesForPrompt();
@@ -119,6 +137,21 @@ export function buildRuntimeContextText(targetRoutes?: TargetRoutes, attachmentD
 
 function displayTargetUser(route: TargetRoute): string {
   return route.userName || route.userId;
+}
+
+/**
+ * 渲染一条群成员，形如 `林（人）` / `阿码（bot）` / `小文（bot，已禁言）`。
+ *
+ * 身份缺失时不加后缀：旧服务端不下发它，硬猜一个比不标更糟。禁言必须标出来，
+ * 因为被禁言的成员无法被指名——打算交接的同伴需要知道点名它会无人应答。
+ */
+function formatRosterMember(member: GroupRosterEntry): string {
+  const name = String(member.name || '').trim() || member.uid;
+  const tags: string[] = [];
+  if (member.isBot === true) tags.push('bot');
+  else if (member.isBot === false) tags.push('人');
+  if (member.muted === true) tags.push('已禁言');
+  return tags.length > 0 ? `${name}（${tags.join('，')}）` : name;
 }
 
 function formatOS(os: TargetRoute['os']): string {

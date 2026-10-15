@@ -7,6 +7,7 @@ import {
   CheckpointCompactionCoordinator,
 } from '../core/checkpoint-compaction';
 import { estimateMessagesTokens } from '../core/token-estimator';
+import { formatSpeakerLabel } from './speaker-label';
 import type {
   CatsAgentContextMessage,
   CatsAgentContextPage,
@@ -354,12 +355,13 @@ function cloudContentBlocksText(blocks: unknown[] | undefined): string {
 function cloudSpeakerLabel(message: CatsAgentContextMessage): string {
   const metadata = message.metadata;
   if (!metadata || typeof metadata !== 'object') return normalizeUID(message.from_uid);
-  const identity = metadata.catsco_identity;
+  const identity = (metadata as Record<string, unknown>).catsco_identity;
   if (!identity || typeof identity !== 'object') return normalizeUID(message.from_uid);
-  const actor = (identity as Record<string, unknown>).actor;
-  if (!actor || typeof actor !== 'object') return normalizeUID(message.from_uid);
-  const values = actor as Record<string, unknown>;
-  return String(values.display_name || values.username || values.user_id || normalizeUID(message.from_uid)).trim();
+  // 带上（人）/（bot）标记，让恢复出来的上下文与实时上下文一致。
+  return formatSpeakerLabel({
+    actor: (identity as Record<string, unknown>).actor,
+    fallbackUid: normalizeUID(message.from_uid),
+  });
 }
 
 function coalesceAssistantSegments(messages: Message[]): Message[] {

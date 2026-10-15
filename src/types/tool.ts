@@ -167,6 +167,21 @@ export type ToolErrorCode =
   | 'EXECUTION_TIMEOUT';
 
 export type ToolSurface = 'cli' | 'feishu' | 'catscompany' | 'weixin' | 'agent' | 'research' | 'unknown';
+
+/**
+ * 群成员名单的一条。
+ *
+ * 结构性类型（不是从 catscompany 导入），因为每轮临时上下文的渲染在 core 层，
+ * 不该为此反向依赖平台目录。
+ */
+export interface GroupRosterEntry {
+  uid: string;
+  name?: string;
+  /** 是否 AI 助手。缺失表示服务端没下发，此时不标注身份。 */
+  isBot?: boolean;
+  /** 是否被禁言。禁言者无法被指名。 */
+  muted?: boolean;
+}
 export type ToolPermissionProfile = 'strict' | 'default' | 'relaxed';
 
 /**
@@ -255,6 +270,13 @@ export interface ToolExecutionContext {
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
+  /**
+   * 群成员名单，供每轮临时上下文渲染"群里有谁"。
+   *
+   * 只有多 bot 群才有：一个助手的群不需要知道谁在群里。它是状态而非历史，
+   * 所以每轮重建、不落盘。
+   */
+  groupRoster?: GroupRosterEntry[];
   executionContext?: {
     schema: 'xiaoba.execution_context.v1';
     conversation: {

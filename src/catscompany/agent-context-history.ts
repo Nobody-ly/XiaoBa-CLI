@@ -1,5 +1,6 @@
 import type { ParsedCatsMessage } from './types';
 import type { CatsAgentContextMessage } from './client';
+import { formatSpeakerLabel } from './speaker-label';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -95,12 +96,9 @@ function formatParticipantMessage(message: CatsAgentContextMessage): string {
   if (!text) return '';
   const metadata = asRecord(message.metadata);
   const identity = asRecord(metadata.catsco_identity);
-  const actor = asRecord(identity.actor);
-  const speaker = stringField(actor, 'display_name')
-    || stringField(actor, 'username')
-    || stringField(actor, 'user_id')
-    || String(message.from_uid || '').trim()
-    || 'User';
+  // 带上（人）/（bot）标记：判定判据要求区分人在提问还是同伴在汇报，而只靠
+  // 名字区分不出来。服务端已下发 actor.is_bot，这里只是渲染它。
+  const speaker = formatSpeakerLabel({ actor: identity.actor, fallbackUid: message.from_uid });
   return `[发言人: ${speaker}]\n${text}`;
 }
 

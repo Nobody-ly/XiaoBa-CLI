@@ -12,6 +12,7 @@ import type {
 import {
   ChannelCallbacks,
   DeviceRpcTransport,
+  GroupRosterEntry,
   TargetRoutes,
   ThinToolRpcTransport,
   ToolExecutionConfirmationRequest,
@@ -202,6 +203,8 @@ export interface RunAgentTurnParams {
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
+  /** 群成员名单；仅多 bot 群有。状态而非历史，每轮重建、不落盘。 */
+  groupRoster?: GroupRosterEntry[];
   localFileGrants?: ScopedLocalFileGrant[];
   pendingUserInputProvider?: PendingUserInputProvider;
   abortSignal?: AbortSignal;
@@ -488,6 +491,7 @@ export class AgentTurnController {
     deviceRpc?: DeviceRpcTransport;
     thinToolRpc?: ThinToolRpcTransport;
     targetRoutes?: TargetRoutes;
+    groupRoster?: GroupRosterEntry[];
     localFileGrants?: ScopedLocalFileGrant[];
     executionContext?: import('./runtime-context-builder').ExecutionContextSnapshot;
     pendingUserInputProvider?: PendingUserInputProvider;
@@ -539,6 +543,7 @@ export class AgentTurnController {
           deviceRpc: options.deviceRpc,
           thinToolRpc: options.thinToolRpc,
           targetRoutes: options.targetRoutes,
+          groupRoster: options.groupRoster,
           executionContext: options.executionContext,
           localFileGrants: options.localFileGrants,
           confirmToolExecution: options.confirmToolExecution,

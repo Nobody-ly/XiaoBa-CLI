@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { Logger } from '../utils/logger';
 import { catsCoDomainFamily, catsCoEndpointCandidates, catsCoUrlForFamily, type CatsCoDomainFamily } from '../utils/catsco-domains';
 import { uploadCatsLocalFile, type UploadResult } from './upload';
+import type { CatsGroupRosterMember } from './types';
 
 export type { UploadResult } from './upload';
 
@@ -146,6 +147,9 @@ export interface MessageContext {
   seq?: number;   // Cats 服务端消息序号，用于排序和补充消息合并
   mentions?: string[]; // 服务端确认的结构化 @mention 目标
   memberCount?: number; // 群成员数；用于运行时在创建 session 前兜底门控
+  botCount?: number; // 群内 AI 助手数量；多 bot 群的真正判据
+  roster?: CatsGroupRosterMember[]; // 群成员名单（含人/bot 标记），仅 bot 收件人收到
+  activated?: boolean; // 服务端判定：这条消息是否点名本 bot
 }
 
 export interface CatsAgentContextMessage {
@@ -570,6 +574,18 @@ export class CatsClient extends EventEmitter {
           && msg.data.member_count > 0
           ? msg.data.member_count
           : undefined,
+        botCount: typeof msg.data.bot_count === 'number'
+          && Number.isSafeInteger(msg.data.bot_count)
+          && msg.data.bot_count >= 0
+          ? msg.data.bot_count
+          : undefined,
+        roster: Array.isArray(msg.data.roster)
+          ? msg.data.roster.filter((member: unknown): member is CatsGroupRosterMember => (
+            Boolean(member) && typeof member === 'object'
+            && typeof (member as CatsGroupRosterMember).uid === 'string'
+          ))
+          : undefined,
+        activated: typeof msg.data.activated === 'boolean' ? msg.data.activated : undefined,
       };
       this.emit('message', ctx);
     } else if (msg.pres) {

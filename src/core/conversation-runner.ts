@@ -1,7 +1,7 @@
 import { setTimeout as abortableDelay } from 'node:timers/promises';
 import { Message, ContentBlock, ChatConfig, ChatResponse } from '../types';
 import type { ScopedDeviceGrant, ScopedDeviceSelection, ScopedLocalFileGrant } from '../types/session-identity';
-import type { TargetRoutes } from '../types/tool';
+import type { GroupRosterEntry, TargetRoutes } from '../types/tool';
 import { AIService } from '../utils/ai-service';
 import { ToolCall, ToolDefinition, ToolExecutionContext, ToolExecutor, ToolResult, ToolTranscriptMode } from '../types/tool';
 import { AIRequestOptions, StreamCallbacks, StreamRetryInfo } from '../providers/provider';
@@ -973,6 +973,7 @@ export class ConversationRunner {
       deviceGrants: this.toolExecutionContext?.deviceGrants,
       deviceSelection: this.toolExecutionContext?.deviceSelection,
       targetRoutes: this.toolExecutionContext?.targetRoutes,
+      groupRoster: this.toolExecutionContext?.groupRoster,
       localFileGrants: this.toolExecutionContext?.localFileGrants,
     });
     if (runtimeContext) messages.push(runtimeContext);
