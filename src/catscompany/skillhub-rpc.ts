@@ -509,6 +509,7 @@ export class SkillHubThinRpcHandler {
       }
       for (let index = 0; index < pageSkills.length; index++) {
         const legacy = pageSkills[index];
+        if (legacy === snapshot.skills[pageOffset + index]) continue;
         pageSkills[index] = snapshot.skills[pageOffset + index];
         if (Buffer.byteLength(JSON.stringify(buildWorkspacePageResponse(snapshot, pageOffset, pageLimit, pageSkills)), 'utf8') > MAX_WORKSPACE_PAGE_RESPONSE_BYTES) {
           pageSkills[index] = legacy;
@@ -1063,6 +1064,7 @@ export class SkillHubThinRpcHandler {
 }
 
 function legacyWorkspaceSkill(skill: Record<string, unknown>): Record<string, unknown> {
+  if (!('publication_source' in skill) && !('publication_source_error' in skill)) return skill;
   const { publication_source: _source, publication_source_error: _error, ...legacy } = skill;
   return legacy;
 }
