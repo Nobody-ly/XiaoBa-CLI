@@ -35,6 +35,10 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { Logger } from '../utils/logger';
 import {
+  PUBLICATION_SOURCE_PROBE, PublicationSourceError, publicationSourceProbeEnabled,
+  describePublicationSource, findPublicationSource, type PublicationSourceBinding,
+} from '../skillhub/publication-source';
+import {
   CatsCoBotSwitchGuardError,
   verifyCatsCoBotSwitchBinding,
 } from './bot-switch-guard';
@@ -128,6 +132,7 @@ export interface SkillHubThinRpcHandlerOptions {
   isShuttingDown?: () => boolean;
   enabled?: boolean;
   allowBotSwitch?: boolean;
+  publicationProbeEnabled?: boolean;
   now?: () => Date;
 }
 
@@ -146,6 +151,8 @@ export class SkillHubThinRpcHandler {
   private readonly isShuttingDown: () => boolean;
   private readonly enabled: boolean;
   private readonly allowBotSwitch: boolean;
+  private readonly publicationProbeEnabled: boolean;
+  private publicationProbes = 0;
   private readonly now: () => Date;
   private readonly completed = new Map<string, {
     fingerprint: string;
@@ -176,16 +183,20 @@ export class SkillHubThinRpcHandler {
     this.hasRuntimeIdleFence = Boolean(options.isRuntimeIdle || options.waitForRuntimeIdle);
     this.enabled = options.enabled !== false;
     this.allowBotSwitch = options.allowBotSwitch !== false;
+    this.publicationProbeEnabled = options.publicationProbeEnabled ?? publicationSourceProbeEnabled();
     this.now = options.now ?? (() => new Date());
   }
 
   supports(toolName: string): boolean {
+    if (toolName === PUBLICATION_SOURCE_PROBE) return this.enabled && this.publicationProbeEnabled;
     return this.enabled
       && Object.values(SKILLHUB_THIN_RPC_TOOLS).includes(toolName as any)
       && (toolName !== SKILLHUB_THIN_RPC_TOOLS.switchBot || this.allowBotSwitch);
   }
 
   async execute(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
+    // Reserved probes always recheck content; never reuse cached receipts.
+    if (request.tool_name === PUBLICATION_SOURCE_PROBE) return this.probePublicationSource(request);
     this.assertOperational(request);
     if (String(request.tool_name || '').startsWith('knowledge.')) return this.executeOnce(request);
     const requestID = String(request.request_id || '').trim();
@@ -280,6 +291,76 @@ export class SkillHubThinRpcHandler {
   }
 
   private knowledgeRequests = 0;
+
+  private publicationBinding(botUid: string): PublicationSourceBinding {
+    const config = createCatsCoLocalConfigService({ runtimeRoot: this.runtimeRoot }).load();
+    const binding = {
+      botUid: String(config.currentBot?.uid || ''),
+      ownerUid: String(config.currentBot?.boundByUserUid || ''),
+      bodyId: String(config.device?.bodyId || ''),
+      installationId: String(config.device?.installationId || ''),
+    };
+    if (isActiveDeviceConnectorMode(config) || binding.botUid !== botUid ||
+      !/^[1-9][0-9]{0,18}$/.test(binding.botUid) || !/^[1-9][0-9]{0,18}$/.test(binding.ownerUid) ||
+      !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.bodyId) || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.installationId)) {
+      throw new PublicationSourceError('publication.runtime_unsupported');
+    }
+    return binding;
+  }
+
+  private async probePublicationSource(request: CatsThinToolRpcMessage): Promise<Record<string, unknown>> {
+    if (!this.enabled || !this.publicationProbeEnabled) throw new SkillHubThinRpcError('publication.runtime_unsupported', 'Publication source probing is disabled.');
+    if (this.publicationProbes >= 2) throw new SkillHubThinRpcError('publication.runtime_unavailable', 'Publication source probing is busy.');
+    this.publicationProbes++;
+    try {
+      this.assertOperational(request);
+      const payload = request.payload;
+      if (request.type !== 'request' || request.result !== undefined || request.error !== undefined ||
+        !/^(pubprobe|pubdelivery)_[A-Za-z0-9_-]{16,64}$/.test(request.request_id) ||
+        !Number.isSafeInteger(request.expires_at) || Number(request.expires_at) > Date.now() + 31_000 ||
+        !payload || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'bot_uid,local_skill_id,workspace_generation' ||
+        typeof payload.bot_uid !== 'string' || !/^[1-9][0-9]{0,18}$/.test(payload.bot_uid) ||
+        typeof payload.local_skill_id !== 'string' || !/^pubsrc-[a-f0-9]{48}$/.test(payload.local_skill_id) ||
+        typeof payload.workspace_generation !== 'string' || !/^[a-f0-9]{64}$/.test(payload.workspace_generation)) {
+        throw new PublicationSourceError('publication.source_changed');
+      }
+      const botUid = payload.bot_uid;
+      const sourceId = payload.local_skill_id;
+      const generation = payload.workspace_generation;
+      const binding = this.publicationBinding(botUid);
+      const deadline = Math.min(Number(request.expires_at), Date.now() + 3_000);
+      const check = () => {
+        this.assertOperational(request);
+        if (Date.now() >= deadline) throw new PublicationSourceError('publication.runtime_unavailable');
+      };
+      const checkBinding = () => {
+        check();
+        this.assertRequestScope(request, botUid, true);
+        if (JSON.stringify(this.publicationBinding(botUid)) !== JSON.stringify(binding) ||
+          request.target_owner_user_id !== `usr${binding.ownerUid}` ||
+          request.target_device_id !== binding.installationId ||
+          (request.device_id !== undefined && request.device_id !== binding.installationId)) {
+          throw new PublicationSourceError('publication.source_changed');
+        }
+      };
+      checkBinding();
+      const result = await withCurrentBotSkillWorkspaceWrite(context => {
+        checkBinding();
+        if (context.deviceConnectorMode) throw new PublicationSourceError('publication.runtime_unsupported');
+        this.assertActiveWorkspace(botUid, context.botId, context.activeBotId, false);
+        const source = findPublicationSource(context.skillsRoot, sourceId, check);
+        const descriptor = describePublicationSource(context.skillsRoot, source, binding, check);
+        if (descriptor.workspace_generation !== generation) throw new PublicationSourceError('publication.source_changed');
+        checkBinding();
+        return { schema_version: 1, ...descriptor };
+      }, { runtimeRoot: this.runtimeRoot, lockWaitMs: Math.min(1_000, Math.max(0, deadline - Date.now())) });
+      checkBinding();
+      return result;
+    } catch (error) {
+      const code = error instanceof PublicationSourceError ? error.code : 'publication.runtime_unavailable';
+      throw new SkillHubThinRpcError(code, 'The publication source could not be verified. No upload was started.');
+    } finally { this.publicationProbes--; }
+  }
 
   private async applyDefinition(
     botUid: string,
@@ -480,12 +561,30 @@ export class SkillHubThinRpcHandler {
         skill_hub: presentation.metadata || {},
       };
     });
+    if (this.publicationProbeEnabled) {
+      // New selectors are separate from legacy IDs, revisions and can_share.
+      const deadline = Date.now() + 1_000;
+      for (let index = 0; index < listed.length; index++) {
+        const target = skills[index] as Record<string, unknown>;
+        try {
+          target.publication_source = describePublicationSource(skillsRoot, listed[index].entry.path,
+            this.publicationBinding(botUid), () => {
+              if (Date.now() >= deadline || this.isShuttingDown()) throw new PublicationSourceError('publication.runtime_unavailable');
+            });
+        } catch (error) {
+          target.publication_source_error = error instanceof PublicationSourceError ? error.code : 'publication.runtime_unavailable';
+        }
+      }
+    }
     if (Buffer.byteLength(stableSerialize(skills), 'utf8') > MAX_WORKSPACE_SNAPSHOT_BYTES) {
       throw workspaceTooLargeError();
     }
     const revision = createHash('sha256')
       .update(stableSerialize(listed.map((item, index) => ({
-        skill: skills[index],
+        // Optional publication observations must not change the legacy
+        // pagination/sync revision, including when their scan budget expires.
+        skill: Object.fromEntries(Object.entries(skills[index]).filter(([key]) =>
+          key !== 'publication_source' && key !== 'publication_source_error')),
         package_content_hash: item.kind === 'valid'
           ? item.entry.contentHash
           : fingerprintRejectedSkillPackage(item.entry.path, rejectedFingerprintBudget),
