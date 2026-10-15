@@ -162,6 +162,20 @@ test('discovery has a bounded directory-entry budget and cancellation check', ()
   assert.throws(() => findPublicationSource(skills, id, () => {}), codeIs('publication.source_unsafe'));
 });
 
+test('fingerprint refuses an earlier file changed while later bytes are read', () => {
+  fs.writeFileSync(path.join(source, 'a'), 'before');
+  fs.writeFileSync(path.join(source, 'z'), Buffer.alloc(128 * 1024));
+  let checks = 0;
+  let mutated = false;
+  assert.throws(() => describePublicationSource(skills, source, binding, () => {
+    // Enumeration checks (4), then sorted reads of SKILL.md and a precede z.
+    if (++checks === 12) {
+      fs.appendFileSync(path.join(source, 'a'), 'after'); mutated = true;
+    }
+  }), codeIs('publication.source_changed'));
+  assert.equal(mutated, true);
+});
+
 test('waiting probes have bounded concurrency and recheck binding after the lock', async () => {
   let release!: () => void;
   let entered!: () => void;

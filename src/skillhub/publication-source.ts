@@ -79,6 +79,7 @@ export function describePublicationSource(
   let count = 0;
   let bytes = 0;
   const facts: Array<[string, string]> = [];
+  const observations: Array<[string, fs.Stats]> = [];
   const visit = (current: string, depth: number): void => {
     check();
     if (depth > maxDepth) fail();
@@ -128,11 +129,19 @@ export function describePublicationSource(
         unchanged(stat, fs.lstatSync(full));
         contained(fs.realpathSync(root), fs.realpathSync(full));
         facts.push([path.relative(source, full).split(path.sep).join('/'), digest.digest('hex')]);
+        observations.push([full, stat]);
       } finally { fs.closeSync(fd); }
     }
     unchanged(beforeDir, fs.lstatSync(current));
   };
   visit(source, 0);
+  // A previously read file may change while a later file is being hashed.
+  // Recheck the complete bounded observation set, not just the last open fd.
+  for (const [file, stat] of observations) {
+    check();
+    unchanged(stat, fs.lstatSync(file));
+    contained(fs.realpathSync(root), fs.realpathSync(file));
+  }
   unchanged(sourceStat, fs.lstatSync(source));
   check();
   return {
