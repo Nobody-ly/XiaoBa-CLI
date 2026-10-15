@@ -36,7 +36,7 @@ import { promisify } from 'util';
 import { Logger } from '../utils/logger';
 import {
   PUBLICATION_SOURCE_PROBE, PublicationSourceError, publicationSourceProbeEnabled,
-  describePublicationSource, findPublicationSource, type PublicationSourceBinding,
+  describePublicationSource, discoverPublicationSources, findPublicationSource, type PublicationSourceBinding,
 } from '../skillhub/publication-source';
 import {
   CatsCoBotSwitchGuardError,
@@ -322,11 +322,12 @@ export class SkillHubThinRpcHandler {
         typeof payload.bot_uid !== 'string' || !/^[1-9][0-9]{0,18}$/.test(payload.bot_uid) ||
         typeof payload.local_skill_id !== 'string' || !/^pubsrc-[a-f0-9]{48}$/.test(payload.local_skill_id) ||
         typeof payload.workspace_generation !== 'string' || !/^[a-f0-9]{64}$/.test(payload.workspace_generation)) {
-        throw new PublicationSourceError('publication.source_changed');
+        throw new SkillHubThinRpcError('INVALID_REQUEST', 'Invalid publication source request.');
       }
       const botUid = payload.bot_uid;
       const sourceId = payload.local_skill_id;
       const generation = payload.workspace_generation;
+      this.assertRequestScope(request, botUid, true);
       const binding = this.publicationBinding(botUid);
       const deadline = Math.min(Number(request.expires_at), Date.now() + 3_000);
       const check = () => {
@@ -336,10 +337,14 @@ export class SkillHubThinRpcHandler {
       const checkBinding = () => {
         check();
         this.assertRequestScope(request, botUid, true);
-        if (JSON.stringify(this.publicationBinding(botUid)) !== JSON.stringify(binding) ||
-          request.target_owner_user_id !== `usr${binding.ownerUid}` ||
-          request.target_device_id !== binding.installationId ||
+        if (request.target_owner_user_id !== `usr${binding.ownerUid}`) {
+          throw new SkillHubThinRpcError('OWNER_MISMATCH', 'Invalid publication owner.');
+        }
+        if (request.target_device_id !== binding.installationId ||
           (request.device_id !== undefined && request.device_id !== binding.installationId)) {
+          throw new SkillHubThinRpcError('DEVICE_MISMATCH', 'Invalid publication device.');
+        }
+        if (JSON.stringify(this.publicationBinding(botUid)) !== JSON.stringify(binding)) {
           throw new PublicationSourceError('publication.source_changed');
         }
       };
@@ -357,7 +362,11 @@ export class SkillHubThinRpcHandler {
       checkBinding();
       return result;
     } catch (error) {
-      const code = error instanceof PublicationSourceError ? error.code : 'publication.runtime_unavailable';
+      const requestCodes = new Set(['INVALID_REQUEST', 'OWNER_MISMATCH', 'DEVICE_MISMATCH', 'REQUEST_EXPIRED', 'BOT_NOT_ACTIVE']);
+      const code = error instanceof PublicationSourceError ? error.code
+        : error instanceof BotSkillWorkspaceChangingError ? 'BOT_NOT_ACTIVE'
+        : error instanceof SkillHubThinRpcError && requestCodes.has(error.code) ? error.code
+        : 'publication.runtime_unavailable';
       throw new SkillHubThinRpcError(code, 'The publication source could not be verified. No upload was started.');
     } finally { this.publicationProbes--; }
   }
@@ -483,7 +492,9 @@ export class SkillHubThinRpcHandler {
       const pageSkills: Array<Record<string, unknown>> = [];
       const pageEnd = Math.min(snapshot.skills.length, pageOffset + pageLimit);
       for (let index = pageOffset; index < pageEnd; index += 1) {
-        const candidate = [...pageSkills, snapshot.skills[index]];
+        // Preserve legacy page boundaries. Optional observations use only the
+        // remaining wire budget after all legacy entries have been selected.
+        const candidate = [...pageSkills, legacyWorkspaceSkill(snapshot.skills[index])];
         const candidateResponse = buildWorkspacePageResponse(snapshot, pageOffset, pageLimit, candidate);
         if (Buffer.byteLength(JSON.stringify(candidateResponse), 'utf8') > MAX_WORKSPACE_PAGE_RESPONSE_BYTES) {
           if (pageSkills.length === 0) {
@@ -494,7 +505,14 @@ export class SkillHubThinRpcHandler {
           }
           break;
         }
-        pageSkills.push(snapshot.skills[index]);
+        pageSkills.push(legacyWorkspaceSkill(snapshot.skills[index]));
+      }
+      for (let index = 0; index < pageSkills.length; index++) {
+        const legacy = pageSkills[index];
+        pageSkills[index] = snapshot.skills[pageOffset + index];
+        if (Buffer.byteLength(JSON.stringify(buildWorkspacePageResponse(snapshot, pageOffset, pageLimit, pageSkills)), 'utf8') > MAX_WORKSPACE_PAGE_RESPONSE_BYTES) {
+          pageSkills[index] = legacy;
+        }
       }
       return buildWorkspacePageResponse(snapshot, pageOffset, pageLimit, pageSkills);
     }, { runtimeRoot: this.runtimeRoot });
@@ -561,30 +579,47 @@ export class SkillHubThinRpcHandler {
         skill_hub: presentation.metadata || {},
       };
     });
+    // Validate the original snapshot before adding optional observations.
+    let snapshotBytes = Buffer.byteLength(stableSerialize(skills), 'utf8');
+    if (snapshotBytes > MAX_WORKSPACE_SNAPSHOT_BYTES) throw workspaceTooLargeError();
     if (this.publicationProbeEnabled) {
       // New selectors are separate from legacy IDs, revisions and can_share.
       const deadline = Date.now() + 1_000;
+      const check = () => {
+        if (Date.now() >= deadline || this.isShuttingDown()) throw new PublicationSourceError('publication.runtime_unavailable');
+      };
+      let binding: PublicationSourceBinding | undefined;
+      let sources: Set<string> | undefined;
+      let discoveryError: unknown;
+      try {
+        binding = this.publicationBinding(botUid);
+        // Exactly the same global discovery budget as the probe, once per
+        // listing. Never offer selectors that this workspace cannot resolve.
+        sources = new Set(discoverPublicationSources(skillsRoot, check).values());
+      } catch (error) { discoveryError = error; }
       for (let index = 0; index < listed.length; index++) {
         const target = skills[index] as Record<string, unknown>;
+        const legacyBytes = Buffer.byteLength(stableSerialize(target), 'utf8');
         try {
+          if (discoveryError) throw discoveryError;
+          if (!sources?.has(path.resolve(listed[index].entry.path))) throw new PublicationSourceError('publication.source_missing');
           target.publication_source = describePublicationSource(skillsRoot, listed[index].entry.path,
-            this.publicationBinding(botUid), () => {
-              if (Date.now() >= deadline || this.isShuttingDown()) throw new PublicationSourceError('publication.runtime_unavailable');
-            });
+            binding!, check);
         } catch (error) {
           target.publication_source_error = error instanceof PublicationSourceError ? error.code : 'publication.runtime_unavailable';
         }
+        const extraBytes = Buffer.byteLength(stableSerialize(target), 'utf8') - legacyBytes;
+        if (snapshotBytes + extraBytes > MAX_WORKSPACE_SNAPSHOT_BYTES) {
+          delete target.publication_source;
+          delete target.publication_source_error;
+        } else { snapshotBytes += extraBytes; }
       }
-    }
-    if (Buffer.byteLength(stableSerialize(skills), 'utf8') > MAX_WORKSPACE_SNAPSHOT_BYTES) {
-      throw workspaceTooLargeError();
     }
     const revision = createHash('sha256')
       .update(stableSerialize(listed.map((item, index) => ({
         // Optional publication observations must not change the legacy
         // pagination/sync revision, including when their scan budget expires.
-        skill: Object.fromEntries(Object.entries(skills[index]).filter(([key]) =>
-          key !== 'publication_source' && key !== 'publication_source_error')),
+        skill: legacyWorkspaceSkill(skills[index]),
         package_content_hash: item.kind === 'valid'
           ? item.entry.contentHash
           : fingerprintRejectedSkillPackage(item.entry.path, rejectedFingerprintBudget),
@@ -1025,6 +1060,11 @@ export class SkillHubThinRpcHandler {
       throw new SkillHubThinRpcError('BOT_NOT_ACTIVE', 'The selected Bot workspace is not active on this device.');
     }
   }
+}
+
+function legacyWorkspaceSkill(skill: Record<string, unknown>): Record<string, unknown> {
+  const { publication_source: _source, publication_source_error: _error, ...legacy } = skill;
+  return legacy;
 }
 
 function buildWorkspacePageResponse(

@@ -97,6 +97,19 @@ test('malformed metadata is not a source rejection and scripts are never execute
   assert.deepEqual(await handler.execute(request()), { schema_version: 1, ...descriptor() });
 });
 
+test('listing resolves the publication binding once for all Skills', async t => {
+  for (const name of ['second', 'third']) {
+    const dir = path.join(skills, name);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: demo\n---\n# Demo`);
+  }
+  const bindingRead = t.mock.method(handler as any, 'publicationBinding');
+  const listed = await handler.execute(request({ request_id: 'binding-list', tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace, payload: { bot_uid: '42' } }));
+  assert.equal(bindingRead.mock.callCount(), 1);
+  assert.equal((listed.skills as any[]).length, 3);
+  assert.ok((listed.skills as any[]).every(item => item.publication_source));
+});
+
 test('same request ID cannot replay stale content or a changed runtime binding', async () => {
   const req = request();
   await handler.execute(req);
@@ -112,19 +125,21 @@ test('same request ID cannot replay stale content or a changed runtime binding',
 
 test('rejects wrong scope, malformed payloads, expired requests and legacy selectors', async () => {
   const req = request();
-  for (const patch of [
-    { target_owner_user_id: 'usr8' }, { target_device_id: 'other' }, { device_id: 'other' },
-    { type: 'result' }, { result: {} }, { request_id: 'browser-request' },
-    { expires_at: Date.now() - 1 }, { expires_at: Date.now() + 120_000 },
-    { payload: { ...req.payload, bot_uid: '43' } },
-    { payload: { ...req.payload, path: source } },
-    { payload: { ...req.payload, local_skill_id: '../secret' } },
-    { payload: { ...req.payload, workspace_generation: 'legacy' } },
-  ]) {
-    await assert.rejects(handler.execute({ ...req, ...patch }), (error: any) => {
-      assert.ok(error.code.startsWith('publication.'));
-      assert.ok(!error.message.includes(root)); return true;
-    });
+  for (const [patch, code] of [
+    [{ target_owner_user_id: 'usr8' }, 'OWNER_MISMATCH'],
+    [{ target_owner_user_id: '7' }, 'OWNER_MISMATCH'],
+    [{ target_device_id: 'other' }, 'DEVICE_MISMATCH'],
+    [{ device_id: 'other' }, 'DEVICE_MISMATCH'],
+    [{ type: 'result' }, 'INVALID_REQUEST'], [{ result: {} }, 'INVALID_REQUEST'],
+    [{ request_id: 'browser-request' }, 'INVALID_REQUEST'],
+    [{ expires_at: Date.now() - 1 }, 'REQUEST_EXPIRED'],
+    [{ expires_at: Date.now() + 120_000 }, 'INVALID_REQUEST'],
+    [{ payload: { ...req.payload, bot_uid: '43' } }, 'BOT_NOT_ACTIVE'],
+    [{ payload: { ...req.payload, path: source } }, 'INVALID_REQUEST'],
+    [{ payload: { ...req.payload, local_skill_id: '../secret' } }, 'INVALID_REQUEST'],
+    [{ payload: { ...req.payload, workspace_generation: 'legacy' } }, 'INVALID_REQUEST'],
+  ] as const) {
+    await assert.rejects(handler.execute({ ...req, ...patch }), codeIs(code));
   }
   fs.unlinkSync(path.join(source, 'SKILL.md'));
   await assert.rejects(handler.execute(req), codeIs('publication.source_missing'));
@@ -153,13 +168,79 @@ test('unsafe links, hardlinks, oversized files and depth fail closed without raw
   assert.throws(descriptor, codeIs('publication.source_unsafe'));
 });
 
-test('discovery has a bounded directory-entry budget and cancellation check', () => {
+test('listing and probe share the global discovery budget, including unrelated files', async () => {
   const id = descriptor().local_skill_id;
   assert.equal(findPublicationSource(skills, id, () => {}), source);
   assert.throws(() => findPublicationSource(skills, id, () => { throw new PublicationSourceError('publication.runtime_unavailable'); }), codeIs('publication.runtime_unavailable'));
   const other = path.join(skills, 'other'); fs.mkdirSync(other);
   for (let i = 0; i < 4100; i++) fs.writeFileSync(path.join(other, String(i)), '');
   assert.throws(() => findPublicationSource(skills, id, () => {}), codeIs('publication.source_unsafe'));
+  const listed = await handler.execute(request({ request_id: 'large-list', tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace, payload: { bot_uid: '42' } }));
+  assert.equal((listed.skills as any[]).length, 1);
+  assert.equal((listed.skills as any[])[0].publication_source, undefined);
+  assert.equal((listed.skills as any[])[0].publication_source_error, 'publication.source_unsafe');
+  await assert.rejects(handler.execute(request()), codeIs('publication.source_unsafe'));
+});
+
+test('optional selectors cannot break a legacy entry near the 48 KiB wire limit', async () => {
+  const legacy = new SkillHubThinRpcHandler({ runtimeRoot: root, publicationProbeEnabled: false });
+  const listRequest = (id: string) => request({ request_id: id, tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace, payload: { bot_uid: '42' } });
+  const write = (size: number) => fs.writeFileSync(path.join(source, 'SKILL.md'), `---\nname: demo\ndescription: demo\nskillhub_author: ${'x'.repeat(size)}\n---\n# Demo`);
+  write(1);
+  const initial = await legacy.execute(listRequest('size-1'));
+  write(1 + 48 * 1024 - Buffer.byteLength(JSON.stringify(initial)) - 1);
+  const oldPage = await legacy.execute(listRequest('size-2'));
+  const newPage = await handler.execute(listRequest('size-3'));
+  assert.equal(Buffer.byteLength(JSON.stringify(oldPage)), 48 * 1024 - 1);
+  assert.deepEqual(newPage, oldPage);
+  assert.equal((newPage.skills as any[])[0].publication_source, undefined);
+});
+
+test('optional observations preserve multi-entry legacy pagination and actual wire size', async () => {
+  for (let i = 0; i < 120; i++) {
+    const dir = path.join(skills, `demo-${i}`);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: demo-${i}\ndescription: ${'x'.repeat(500)}\n---\n# Demo`);
+  }
+  const legacy = new SkillHubThinRpcHandler({ runtimeRoot: root, publicationProbeEnabled: false });
+  let offset = 0;
+  let pages = 0;
+  do {
+    const req = request({ request_id: `page-${offset}`, tool_name: SKILLHUB_THIN_RPC_TOOLS.workspace, payload: { bot_uid: '42', offset } });
+    const oldPage = await legacy.execute(req);
+    const newPage = await handler.execute(req);
+    assert.equal(newPage.next_offset, oldPage.next_offset);
+    assert.equal(newPage.workspace_revision, oldPage.workspace_revision);
+    assert.ok(Buffer.byteLength(JSON.stringify(newPage)) <= 48 * 1024);
+    assert.deepEqual((newPage.skills as any[]).map(({ publication_source, publication_source_error, ...skill }) => skill), oldPage.skills);
+    offset = newPage.next_offset as number;
+    pages++;
+  } while (offset !== null);
+  assert.ok(pages > 1);
+});
+
+test('optional observations cannot reject a legacy snapshot near 16 MiB', () => {
+  const legacy = new SkillHubThinRpcHandler({ runtimeRoot: root, publicationProbeEnabled: false });
+  const snapshot = (h: SkillHubThinRpcHandler) => (h as any).createWorkspaceSnapshot('42', '42', skills, Date.now());
+  // Snapshot canonical serialization retains undefined properties as null.
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value, (_key, item) => item === undefined ? null : item));
+  const write = (dir: string, size: number) => fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${path.basename(dir)}\ndescription: demo\nskillhub_author: ${'x'.repeat(size)}\n---\n# Demo`);
+  for (let i = 0; i < 8; i++) {
+    const dir = path.join(skills, `large-${i}`);
+    fs.mkdirSync(dir);
+    write(dir, 1_900_000);
+  }
+  write(source, 1);
+  const initial = snapshot(legacy);
+  const size = 1 + 16 * 1024 * 1024 - bytes(initial.skills) - 1;
+  write(source, size);
+  const oldSnapshot = snapshot(legacy);
+  const newSnapshot = snapshot(handler);
+  assert.equal(bytes(oldSnapshot.skills), 16 * 1024 * 1024 - 1);
+  assert.deepEqual(newSnapshot.skills, oldSnapshot.skills);
+  assert.equal(newSnapshot.revision, oldSnapshot.revision);
+  write(source, size + 2);
+  for (const h of [legacy, handler]) assert.throws(() => snapshot(h), codeIs('WORKSPACE_TOO_LARGE'));
 });
 
 test('fingerprint refuses an earlier file changed while later bytes are read', () => {
@@ -185,11 +266,14 @@ test('waiting probes have bounded concurrency and recheck binding after the lock
   const req = request();
   const one = handler.execute(req);
   const two = handler.execute({ ...req, request_id: 'pubprobe_abcdefghijklmnopqrstuvwx' });
+  const rejected = Promise.all([
+    assert.rejects(one, codeIs('BOT_NOT_ACTIVE')),
+    assert.rejects(two, codeIs('BOT_NOT_ACTIVE')),
+  ]);
   try {
     await assert.rejects(handler.execute(req), codeIs('publication.runtime_unavailable'));
     const config = createCatsCoLocalConfigService({ runtimeRoot: root });
     config.save({ ...config.load(), currentBot: { uid: '43', apiKey: 'other', boundByUserUid: '7' } });
   } finally { release(); await lock; }
-  await assert.rejects(one, codeIs('publication.runtime_unavailable'));
-  await assert.rejects(two, codeIs('publication.runtime_unavailable'));
+  await rejected;
 });

@@ -45,6 +45,16 @@ Errors use controlled `publication.source_missing`, `publication.source_changed`
 file contents or exceptions. Missing runtime support or source errors must not
 fall back to the legacy share operation.
 
+Request failures retain controlled `INVALID_REQUEST`, `OWNER_MISMATCH`,
+`DEVICE_MISMATCH`, `BOT_NOT_ACTIVE`, or `REQUEST_EXPIRED` codes with the same
+fixed message. Malformed payloads are not source-content changes. CatsCo's
+paired request-error adapter maps invalid/scope failures to its existing
+terminal `publication.runtime_unsupported` outcome and expiry to retryable
+`publication.runtime_timeout`; it does not add database outcome values or
+expose raw runtime messages. Older CatsCo versions safely reject these errors
+but normalize them as unavailable, so deploy the paired adapter before enabling
+the workflow to avoid unnecessary delivery retries.
+
 ## Selectors for the new publication flow
 
 When enabled, each existing workspace list item may additionally contain
@@ -53,6 +63,12 @@ When enabled, each existing workspace list item may additionally contain
 together, not the legacy `local_skill_id` or top-level `workspace_revision`.
 The old fields, `can_share`, and legacy pagination/sync revision retain their
 existing semantics. No publishing button is changed by this PR.
+
+The 16-MiB snapshot limit and 48-KiB response limit still bound actual serialized
+data. Legacy entries are fitted first; optional fields are added only from the
+remaining budget. If neither a descriptor nor an error fits, both are omitted.
+Omission is not permission to publish or to fall back to legacy identifiers.
+Page boundaries and the legacy revision do not depend on enrichment.
 
 The opaque source ID hashes the workspace-relative directory, independent of
 the legacy marker or manifest parser. The generation identifies the selected
@@ -82,7 +98,14 @@ hostile local administrator. They do not lock bytes for later capture.
 
 Per selected-source fingerprint: at most 4,096 directory entries, depth 32,
 5 MiB per file and 20 MiB total. Discovery has its own 4,096-entry/depth-32
-budget. `.git`, `node_modules`, `.venv`, `.cache`, `.mypy_cache`, `.pytest_cache`,
+budget across the whole workspace, including ordinary files and the selected
+source. Listing performs the same discovery once before offering any selectors,
+using one binding read for the enrichment batch. When discovery exceeds its
+budget, all items get `publication.source_unsafe` (space permitting); this code
+includes scan-limit failures, not only unsafe file types. A large unrelated
+sibling can therefore disable probing, but cannot cause a misleading usable
+selector or fail the legacy listing. Hidden directories are not discovered.
+`.git`, `node_modules`, `.venv`, `.cache`, `.mypy_cache`, `.pytest_cache`,
 `.ruff_cache` and `__pycache__` directories are excluded from content hashing.
 Symlinks at their directory entries are still rejected. Oversized/unsupported
 sources fail closed; this is a source-probe budget, not Cloud format approval.

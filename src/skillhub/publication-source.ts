@@ -156,12 +156,11 @@ export function describePublicationSource(
 
 // Resolve only a scoped opaque reference, never a caller-provided path. This
 // bounded discovery reads directory names only; no Skill metadata or scripts.
-export function findPublicationSource(skillsRoot: string, localSkillId: string, check: () => void): string {
-  if (!/^pubsrc-[a-f0-9]{48}$/.test(localSkillId)) fail('publication.source_missing');
+export function discoverPublicationSources(skillsRoot: string, check: () => void): Map<string, string> {
   const root = path.resolve(skillsRoot);
   directory(root, root);
   let count = 0;
-  let found: string | undefined;
+  const sources = new Map<string, string>();
   const visit = (current: string, depth: number): void => {
     check();
     if (depth > maxDepth) fail();
@@ -173,15 +172,21 @@ export function findPublicationSource(skillsRoot: string, localSkillId: string, 
         if (++count > maxEntries) fail();
         if (!entry.isDirectory() || entry.isSymbolicLink() || ignoredDirectories.has(entry.name) || entry.name.startsWith('.')) continue;
         const full = path.join(current, entry.name);
-        if (identity(root, full) === localSkillId) {
-          if (found) fail();
-          directory(root, full);
-          found = full;
-        } else { visit(full, depth + 1); }
+        const id = identity(root, full);
+        if (sources.has(id)) fail();
+        directory(root, full);
+        sources.set(id, full);
+        visit(full, depth + 1);
       }
     } finally { handle.closeSync(); }
   };
   visit(root, 0);
+  return sources;
+}
+
+export function findPublicationSource(skillsRoot: string, localSkillId: string, check: () => void): string {
+  if (!/^pubsrc-[a-f0-9]{48}$/.test(localSkillId)) fail('publication.source_missing');
+  const found = discoverPublicationSources(skillsRoot, check).get(localSkillId);
   if (!found) fail('publication.source_missing');
   return found!;
 }
