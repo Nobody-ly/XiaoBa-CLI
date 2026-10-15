@@ -7,7 +7,7 @@ import {
   type CatsSkillMutationGrantRequest,
   type CatsThinToolRpcMessage,
 } from './client';
-import { CatsCompanyConfig, ParsedCatsMessage, CatsFileInfo, type CatsCompanyRuntimeRole } from './types';
+import { CatsCompanyConfig, ParsedCatsMessage, CatsFileInfo, type CatsCompanyRuntimeRole, type CatsGroupRosterMember } from './types';
 import { MessageSender, type ConversationTaskStatusInput } from './message-sender';
 import { extractContentBlocks } from './content-blocks';
 import { createCatsCoMessageEnvelope, createExecutionScope, buildCatsCoSessionKey } from './message-envelope';
@@ -41,7 +41,7 @@ import { Logger } from '../utils/logger';
 import { SubAgentManager } from '../core/sub-agent-manager';
 import { shouldSuppressSubAgentObservationReply } from '../core/sub-agent-observation';
 import type { SubAgentInfo } from '../core/sub-agent-session';
-import { ChannelCallbacks, DeviceRpcTransport, TargetRoutes, ThinToolRpcTransport, ToolErrorCode, ToolExecutionConfirmationRequest, ToolExecutionConfirmationResult, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
+import { ChannelCallbacks, DeviceRpcTransport, GroupRosterEntry, TargetRoutes, ThinToolRpcTransport, ToolErrorCode, ToolExecutionConfirmationRequest, ToolExecutionConfirmationResult, ToolExecutionContext, ToolExecutionResult } from '../types/tool';
 import { ContentBlock } from '../types';
 import type { PendingUserInput } from '../core/conversation-runner';
 import type { StreamRetryInfo } from '../providers/provider';
@@ -97,6 +97,7 @@ import {
   CatsCompanyCloudSessionRestorer,
   type CloudSessionRestoreResult,
 } from './cloud-session-restore';
+import { formatSpeakerLabel } from './speaker-label';
 import {
   SkillHubThinRpcError,
   SkillHubThinRpcHandler,
@@ -133,6 +134,8 @@ interface QueuedMessage {
   deviceGrants?: ScopedDeviceGrant[];
   deviceSelection?: ScopedDeviceSelection;
   targetRoutes?: TargetRoutes;
+  /** 群成员名单；随队列入队，出队时注入每轮临时上下文。 */
+  roster?: CatsGroupRosterMember[];
   localFileGrants?: ScopedLocalFileGrant[];
   /** Device metadata for the interrupted-turn marker if this queued work is running at shutdown. */
   deviceContext?: InterruptedTurnDeviceContext;
@@ -349,15 +352,27 @@ function summarizeThinToolRpcArgs(args: any): string {
   }
 }
 
+/**
+ * 把服务端下发的群成员名单转成每轮临时上下文用的形状。
+ *
+ * 字段名不同（服务端 snake_case，本地 camelCase），所以需要转换——而且只在这里
+ * 转一次，不在每个使用点各转一遍。
+ */
+function toGroupRosterEntries(roster: CatsGroupRosterMember[] | undefined): GroupRosterEntry[] | undefined {
+  if (!Array.isArray(roster) || roster.length === 0) return undefined;
+  return roster.map(member => ({
+    uid: member.uid,
+    name: member.name,
+    isBot: member.is_bot,
+    muted: member.muted,
+  }));
+}
+
 function speakerNameFromMetadata(msg: Pick<ParsedCatsMessage, 'metadata' | 'senderId'>): string {
   const metadata = asRecord(msg.metadata);
   const identity = asRecord(metadata?.catsco_identity);
-  const actor = asRecord(identity?.actor);
-  return stringField(actor, 'display_name')
-    || stringField(actor, 'username')
-    || stringField(actor, 'user_id')
-    || msg.senderId
-    || 'User';
+  // 带上（人）/（bot）标记：判定判据要区分人在提问还是同伴在汇报，只靠名字分不出来。
+  return formatSpeakerLabel({ actor: identity?.actor, fallbackUid: msg.senderId });
 }
 
 function prefixCatsUserMessage(name: string, content: string | ContentBlock[]): string | ContentBlock[] {
@@ -491,7 +506,7 @@ export function createCatsCompanyRuntime(sessionTTL?: number): AdapterRuntimeBun
 }
 
 export function shouldActivateCatsCompanyMessage(
-  message: Pick<MessageContext, 'isGroup' | 'metadata' | 'mentions' | 'memberCount'>,
+  message: Pick<MessageContext, 'isGroup' | 'metadata' | 'mentions' | 'memberCount' | 'botCount' | 'activated'>,
   botUid: string | null | undefined,
 ): boolean {
   if (!message.isGroup) return true;
@@ -507,6 +522,26 @@ export function shouldActivateCatsCompanyMessage(
       || metadata.channel_native_group_triggered === 'true';
   }
 
+  // A room with fewer than two agents needs no coordination: every message is
+  // for the one agent that is there. botCount is the count that answers this;
+  // memberCount cannot, because one agent plus three people and two agents plus
+  // one person both have more than two members.
+  //
+  // botCount is only trusted from 1 upward. A count of 0 cannot be true for a
+  // message that was delivered to an agent, so it means the server did not
+  // compute it — and treating a bad value as "this is a single-agent room" would
+  // make the client answer every message in a busy room.
+  const botCount = message.botCount;
+  if (typeof botCount === 'number' && Number.isSafeInteger(botCount) && botCount >= 1) {
+    if (botCount === 1) return true;
+    // A multi-agent room is decided by the server, which holds the roster, the
+    // agent identities and the transcript. Read its verdict rather than
+    // re-deriving one here.
+    return message.activated === true;
+  }
+
+  // No usable botCount (older server, or a value that cannot be right): fall
+  // back to the behaviour this client has always had rather than guessing.
   const memberCount = message.memberCount;
   if (typeof memberCount === 'number'
     && Number.isSafeInteger(memberCount)
@@ -2071,6 +2106,7 @@ export class CatsCompanyBot {
         deviceGrants: msg.deviceGrants,
         deviceSelection: msg.deviceSelection,
         targetRoutes: msg.targetRoutes,
+        roster: msg.roster,
         localFileGrants,
         deviceContext: sanitizeDeviceContext(msg.metadata, msg.executionScope),
         receivedAt: Date.now(),
@@ -2129,6 +2165,7 @@ export class CatsCompanyBot {
           deviceGrants: msg.deviceGrants,
           deviceSelection: msg.deviceSelection,
           targetRoutes: msg.targetRoutes,
+          groupRoster: toGroupRosterEntries(msg.roster),
           deviceRpc: this.buildDeviceRpcTransport(),
           thinToolRpc: this.maybeBuildThinToolRpcTransport(),
           localFileGrants,
@@ -2942,6 +2979,9 @@ export class CatsCompanyBot {
       text: messageText,
       mentions: ctx.mentions,
       memberCount: ctx.memberCount,
+      botCount: ctx.botCount,
+      roster: ctx.roster,
+      activated: ctx.activated,
       rawContent: ctx.content,
       metadata: ctx.metadata,
       envelope,
@@ -3884,6 +3924,7 @@ export class CatsCompanyBot {
             deviceGrants: msg.deviceGrants,
             deviceSelection: msg.deviceSelection,
             targetRoutes: msg.targetRoutes,
+            groupRoster: toGroupRosterEntries(msg.roster),
             deviceRpc: this.buildDeviceRpcTransport(),
             thinToolRpc: this.maybeBuildThinToolRpcTransport(),
             runtimeFeedback: msg.runtimeFeedback,

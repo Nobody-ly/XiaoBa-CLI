@@ -19,6 +19,7 @@ import type { TurnSkillSnapshotStore } from '../skills/turn-skill-snapshot';
 import {
   ChannelCallbacks,
   DeviceRpcTransport,
+  GroupRosterEntry,
   TargetRoutes,
   ThinToolRpcTransport,
   ToolExecutionConfirmationRequest,
@@ -160,6 +161,13 @@ export interface HandleMessageOptions {
   deviceRpc?: DeviceRpcTransport;
   thinToolRpc?: ThinToolRpcTransport;
   targetRoutes?: TargetRoutes;
+  /**
+   * 群成员名单，仅多 bot 群有。
+   *
+   * 它是状态而非历史：每轮重建、不落盘。写进历史的话，"谁在群里"会随着
+   * 成员变动而过期。
+   */
+  groupRoster?: GroupRosterEntry[];
   /** 当前 turn 已授权的本地文件资源。 */
   localFileGrants?: ScopedLocalFileGrant[];
   /** 当前 turn 专属、给 agent 可见的运行时反馈 */
@@ -612,6 +620,7 @@ export class AgentSession {
       let deviceRpc: DeviceRpcTransport | undefined;
       let thinToolRpc: ThinToolRpcTransport | undefined;
       let targetRoutes: TargetRoutes | undefined;
+      let groupRoster: GroupRosterEntry[] | undefined;
       let localFileGrants: ScopedLocalFileGrant[] | undefined;
       let runtimeFeedbackInputs: RuntimeFeedbackInput[] = [];
       let pendingUserInputProvider: PendingUserInputProvider | undefined;
@@ -650,6 +659,7 @@ export class AgentSession {
           deviceRpc = opts.deviceRpc;
           thinToolRpc = opts.thinToolRpc;
           targetRoutes = opts.targetRoutes;
+          groupRoster = opts.groupRoster;
           localFileGrants = opts.localFileGrants;
           runtimeFeedbackInputs = opts.runtimeFeedback || [];
           pendingUserInputProvider = opts.pendingUserInputProvider;
@@ -752,6 +762,7 @@ export class AgentSession {
           deviceRpc,
           thinToolRpc,
           targetRoutes,
+          groupRoster,
           localFileGrants,
           pendingUserInputProvider,
           abortSignal: this.activeAbortController.signal,
