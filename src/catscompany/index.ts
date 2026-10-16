@@ -104,6 +104,7 @@ import {
   SKILLHUB_THIN_RPC_TOOLS,
   SKILLHUB_WORKSPACE_PAGINATION_CAPABILITY,
 } from './skillhub-rpc';
+import { PUBLICATION_SOURCE_PROBE, publicationSourceProbeEnabled } from '../skillhub/publication-source';
 
 interface PendingAttachment {
   fileName: string;
@@ -316,9 +317,11 @@ export const CATSCOMPANY_FULL_RUNTIME_DEVICE_CAPABILITIES = CATSCOMPANY_DESKTOP_
 export function capabilitiesForCatsCompanyRuntimeRole(
   runtimeRole: CatsCompanyRuntimeRole,
 ): DeviceGrantOperation[] {
-  return runtimeRole === 'desktop'
+  const capabilities = runtimeRole === 'desktop'
     ? [...CATSCOMPANY_DESKTOP_RUNTIME_DEVICE_CAPABILITIES]
     : [...CATSCOMPANY_SERVER_RUNTIME_DEVICE_CAPABILITIES];
+  if (publicationSourceProbeEnabled()) capabilities.push(PUBLICATION_SOURCE_PROBE);
+  return capabilities;
 }
 
 function currentRuntimeOS(): 'windows' | 'macos' | 'linux' | 'unknown' {
@@ -1130,7 +1133,7 @@ export class CatsCompanyBot {
     });
     if (rpcTelemetry) Logger.info(rpcTelemetry.received());
 
-    if (this.skillHubThinRpc.supports(String(request.tool_name || ''))) {
+    if (request.tool_name === PUBLICATION_SOURCE_PROBE || this.skillHubThinRpc.supports(String(request.tool_name || ''))) {
       await this.handleSkillHubThinToolRpcRequest(request);
       return;
     }

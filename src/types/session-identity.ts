@@ -119,6 +119,7 @@ export type DeviceGrantOperation =
   | 'skillhub.localWorkspace.applyDefinition'
   | 'skillhub.localWorkspace.syncToAgent'
   | 'skillhub.localSkill.share'
+  | 'skillhub.publication.sourceProbe.v1'
   | 'skillhub.localSkill.finalize'
   | 'skillhub.localSkill.delete'
   | 'skillhub.localBot.switch'
