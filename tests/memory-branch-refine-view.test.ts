@@ -294,4 +294,3 @@ describe('branch evidence pack refine view (unit)', () => {
     );
   });
 });
-

@@ -34,6 +34,8 @@ test('Memory and Summary are independent opt-ins and default off', () => {
     const defaults = new AgentSession('user:opt-in-defaults', buildMockServices({}), 'catscompany');
     assert.equal((defaults as any).useCheckpointCandidates, false);
     assert.equal((defaults as any).turnController.isMemoryBranchEnabled(), false);
+    assert.equal((defaults as any).turnController.options.beforeModelRequest, undefined);
+    assert.equal((defaults as any).turnController.options.checkpointCandidateBoundary, undefined);
     for (const memory of [false, true]) {
       for (const summary of [false, true]) {
         process.env.XIAOBA_CHECKPOINT_CANDIDATES_ENABLED = String(summary);
@@ -42,6 +44,8 @@ test('Memory and Summary are independent opt-ins and default off', () => {
         const session = new AgentSession('user:opt-in-matrix', services, 'catscompany');
         assert.equal((session as any).useCheckpointCandidates, summary);
         assert.equal((session as any).turnController.isMemoryBranchEnabled(), memory);
+        assert.equal(typeof (session as any).turnController.options.beforeModelRequest, summary ? 'function' : 'undefined');
+        assert.equal(typeof (session as any).turnController.options.checkpointCandidateBoundary, summary ? 'function' : 'undefined');
       }
     }
   } finally {

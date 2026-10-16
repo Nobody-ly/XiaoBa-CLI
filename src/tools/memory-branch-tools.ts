@@ -339,7 +339,3 @@ export function isMemoryCitationRef(ref: string): boolean {
   return Boolean(skill && isSafeCatsLogSkillHandle(skill[1]) && Number.isSafeInteger(Number(skill[2])));
 }
 
-/**
- * Pass-1 decision payload of the v1.3 two-call pipeline (structured output
- * contract, same style as the finish payload).
- */

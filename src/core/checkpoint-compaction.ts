@@ -42,8 +42,6 @@ const CHECKPOINT_TOOL_EVIDENCE_PREFIX = '[checkpoint_tool_evidence]';
 const CHECKPOINT_USER_INPUT_EVIDENCE_PREFIX = '[checkpoint_user_input_evidence]';
 const CHECKPOINT_SOURCE_VERIFICATION = 'This checkpoint is a lossy reference, not an exact data source. Re-read original files or tool evidence before using exact fields. Never pad, normalize, or extrapolate identifiers or checksums from a summary. Before declaring a generated report correct, compare every field against its original source; counts and uniqueness alone do not establish correctness.';
 
-class InvalidCheckpointSummaryError extends Error {}
-
 export type CheckpointCompactionPhase = 'pre_turn' | 'mid_turn' | 'restore' | 'manual';
 
 export interface CheckpointCompactionCoordinatorOptions {
@@ -69,8 +67,6 @@ export interface CheckpointCompactionRequest {
   onStatus?: (event: CheckpointCompactionStatusEvent) => void | Promise<void>;
   metrics?: MetricsCollector;
   metricsContext?: MetricsRecordContext;
-  /** Includes unusable/truncated responses, which still consumed tokens. */
-  onSummaryResponse?: (usage: TokenUsage | undefined) => void;
 }
 
 export interface CheckpointCompactionStatusEvent {
@@ -450,7 +446,6 @@ export class CheckpointCompactionCoordinator {
       request.metricsScope,
       request.metrics,
       request.metricsContext,
-      request.onSummaryResponse,
     );
     const remoteContextWatermarks = collectRemoteContextWatermarks(durable);
     const summaryMessage: Message = {
@@ -487,7 +482,6 @@ export class CheckpointCompactionCoordinator {
     metricsScope: 'turn' | 'background' = 'turn',
     metrics?: MetricsCollector,
     metricsContext?: MetricsRecordContext,
-    onSummaryResponse?: (usage: TokenUsage | undefined) => void,
   ): Promise<{ summary: string; usage?: TokenUsage; attempts: number }> {
     let attemptMessages = prepareSummarySourceMessages(sourceMessages);
     let omittedMessageCount = 0;
@@ -532,7 +526,6 @@ export class CheckpointCompactionCoordinator {
             },
           },
         );
-        onSummaryResponse?.(response.usage);
         if (response.usage && recordMetrics) {
           const config = typeof (this.aiService as any).getConfig === 'function'
             ? (this.aiService as any).getConfig()
@@ -552,22 +545,14 @@ export class CheckpointCompactionCoordinator {
           }
         }
         const summary = (streamed || response.content || '').trim();
-        const stopReason = String(response.stopReason || '').toLowerCase();
-        const outputWasTruncated = stopReason === 'max_tokens'
-          || stopReason === 'max_output_tokens'
-          || stopReason === 'length';
-        if (outputWasTruncated) {
-          if (invalidSummaryAttempts++ < 1) continue;
-          throw new InvalidCheckpointSummaryError('checkpoint compaction reached the summary output limit; original context preserved');
-        }
         if (!summary || response.toolCalls?.length || /<\s*(?:minimax:)?tool_call\b|<invoke\s+name\s*=|\]<\]minimax\[>/i.test(summary)) {
           if (invalidSummaryAttempts++ < 1) continue;
-          throw new InvalidCheckpointSummaryError('checkpoint compaction returned an invalid summary; original context preserved');
+          throw new Error('checkpoint compaction returned an invalid summary; original context preserved');
         }
         return { summary, usage: response.usage, attempts: attempt + 1 };
       } catch (error) {
         lastError = error;
-        if (error instanceof InvalidCheckpointSummaryError || !isContextLengthError(error) || attemptMessages.length <= 1) {
+        if (!isContextLengthError(error) || attemptMessages.length <= 1) {
           throw error;
         }
         const reduced = dropOldestEpisode(attemptMessages);

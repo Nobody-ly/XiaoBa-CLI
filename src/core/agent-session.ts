@@ -362,15 +362,15 @@ export class AgentSession {
           throw new Error('Failed to persist continuation checkpoint');
         }
       },
-      checkpointCandidateBoundary: (messages, tools, promptOverheadTokens, finalizeOnly) => this.handleCheckpointCandidateBoundary(
+      checkpointCandidateBoundary: checkpointCandidatesEnabled ? (messages, tools, promptOverheadTokens, finalizeOnly) => this.handleCheckpointCandidateBoundary(
           messages,
           this.lifecycleGeneration,
           'mid_turn',
           tools ? estimateToolsTokens(tools) : undefined,
           promptOverheadTokens,
           finalizeOnly,
-        ),
-      beforeModelRequest: (messages, tools, promptOverheadTokens = 0) => {
+        ) : undefined,
+      beforeModelRequest: checkpointCandidatesEnabled ? (messages, tools, promptOverheadTokens = 0) => {
           if (this.checkpointBlockedReason) {
             throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
           }
@@ -380,7 +380,7 @@ export class AgentSession {
             > usage.maxTokens * this.checkpointSummaryStopRatio) {
             throw new Error(CONTEXT_CHECKPOINT_BLOCKED_ERROR);
           }
-        },
+        } : undefined,
     });
 
     const runtimeFeedbackInbox = this.runtimeFeedbackInbox;
@@ -833,7 +833,7 @@ export class AgentSession {
         } else {
           this.messages = compactionResult.messages;
         }
-        if (this.isCheckpointCandidateSerialThresholdReached(
+        if (this.useCheckpointCandidates && this.isCheckpointCandidateSerialThresholdReached(
             this.getContextUsageInfo(
               this.messages,
               this.useCheckpointCandidates ? 0 : this.getToolDefinitionTokens(),

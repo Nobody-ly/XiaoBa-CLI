@@ -41,4 +41,3 @@ describe('CatsLogObservedRefsTracker', () => {
     assert.equal(JSON.stringify(snapshot).includes('untrusted branch evidence'), false);
   });
 });
-
