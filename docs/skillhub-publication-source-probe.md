@@ -48,9 +48,11 @@ fall back to the legacy share operation.
 Request failures retain controlled `INVALID_REQUEST`, `OWNER_MISMATCH`,
 `DEVICE_MISMATCH`, `BOT_NOT_ACTIVE`, or `REQUEST_EXPIRED` codes with the same
 fixed message. Malformed payloads are not source-content changes. CatsCo's
-paired request-error adapter maps invalid/scope failures to its existing
-terminal `publication.runtime_unsupported` outcome and expiry to retryable
-`publication.runtime_timeout`; it does not add database outcome values or
+paired request-error adapter maps `INVALID_REQUEST`, `OWNER_MISMATCH` and
+`DEVICE_MISMATCH` to its existing terminal `publication.runtime_unsupported`
+outcome and expiry to retryable `publication.runtime_timeout`. `BOT_NOT_ACTIVE`
+also covers transient workspace switching, so CatsCo preserves its unavailable
+fallback and bounded background retries. The adapter does not add DB outcomes or
 expose raw runtime messages. Older CatsCo versions safely reject these errors
 but normalize them as unavailable, so deploy the paired adapter before enabling
 the workflow to avoid unnecessary delivery retries.
@@ -131,3 +133,31 @@ This is not live CatsCo/Cloud end-to-end acceptance. CatsCo initial admission is
 still online/same-node. Durable pre-probe intake, scoped grants, cancellation,
 candidate capture/upload, chat context, frontend integration and joint isolated
 acceptance are still required. Keep production flags off until those gates pass.
+
+### Paired message contract
+
+`npm run test:cross-repo:publication-probe` uses `CATSCOMPANY_REPO` (default:
+the sibling `cats-company` checkout) and requires Go, installed XiaoBa Node
+dependencies, and CatsCo including PR642. CI pins that counterpart to the PR642
+merge commit, `23f0c9f6ad5d5c05f3bb92ff19f25f5667546023`.
+
+The Go tests exercise actual CatsCo admission/delivery handlers, pass their
+generated request envelopes unchanged through a test-only JSONL pipe to the
+real XiaoBa `SkillHubThinRpcHandler`, and feed its replies back to CatsCo.
+Selectors come from a real XiaoBa workspace listing of temporary Skill files.
+The test registration follows XiaoBa's installation-ID-as-device-ID convention;
+it does not rewrite routing fields to bypass mismatches. Each probe checks that
+the Skill tree remains unchanged. No Skill scripts are executed.
+
+Coverage: normal/malformed-metadata source admission and replay; changed or
+renamed sources; disabled probing; local owner mismatch; simulated on-disk
+workspace-switching mismatch followed by recovery and handler reconstruction,
+with bounded-backoff delivery of the original intent. The runner requires all
+three named tests and six subcases to execute and pass; missing counterparts,
+skips or test-discovery failures fail the job rather than producing a green skip.
+Go's overlay adds the test file without editing the CatsCo checkout.
+
+Authority/store fixtures and transport are in-memory, not real user login,
+WebSocket authentication, PostgreSQL/Redis persistence, cross-node recovery or
+Cloud upload. This gate verifies the implemented message contract only. It does
+not enable production flags, publish a Skill, or replace isolated deployed E2E.
