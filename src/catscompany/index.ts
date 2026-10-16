@@ -98,6 +98,7 @@ import {
   type CloudSessionRestoreResult,
 } from './cloud-session-restore';
 import { formatSpeakerLabel } from './speaker-label';
+import { mergeQueuedMessageContents } from './queued-message-merge';
 import {
   SkillHubThinRpcError,
   SkillHubThinRpcHandler,
@@ -4125,37 +4126,7 @@ export class CatsCompanyBot {
   }
 
   private mergeQueuedMessages(messages: QueuedMessage[]): string | ContentBlock[] {
-    if (messages.length === 1) {
-      return messages[0].userMessage;
-    }
-
-    const header = [
-      `用户在你处理上一轮时又补充了 ${messages.length} 条消息。`,
-      '请把这些补充消息作为当前最新需求一起处理；如果前后要求冲突，以最后一条为准。',
-    ].join('\n');
-
-    const hasRichContent = messages.some(item => Array.isArray(item.userMessage));
-    if (!hasRichContent) {
-      const body = messages
-        .map((item, index) => `${index + 1}. ${item.senderId}: ${item.userMessage as string}`)
-        .join('\n');
-      return `${header}\n\n${body}`;
-    }
-
-    const blocks: ContentBlock[] = [{ type: 'text', text: `${header}\n` }];
-    for (const [index, item] of messages.entries()) {
-      blocks.push({
-        type: 'text',
-        text: `\n[补充消息 ${index + 1} / ${messages.length}，来自 ${item.senderId}]\n`,
-      });
-      if (Array.isArray(item.userMessage)) {
-        blocks.push(...item.userMessage);
-      } else {
-        blocks.push({ type: 'text', text: item.userMessage });
-      }
-    }
-
-    return blocks;
+    return mergeQueuedMessageContents(messages);
   }
 
   /**
