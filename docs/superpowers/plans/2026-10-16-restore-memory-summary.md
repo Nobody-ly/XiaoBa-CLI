@@ -22,20 +22,20 @@
 ## Tasks
 
 ### 1. Restore autonomous Memory
-- [ ] Import baseline local log store/tools/session and relevant tests using apply_patch.
-- [ ] Pin search/read/neighbors, original no-injection behavior and strict evidence finalization in tests; demonstrate failing tests before implementation.
-- [ ] Adapt current sidecar/runtime interfaces without passing new memory budgets to the restored session. Retain common cancellation and observation delivery infrastructure.
-- [ ] Update tests/docs that specifically assert the superseded pipeline; retain independent remote API tests.
+- [x] Import baseline local log store/tools/session and relevant tests using apply_patch.
+- [x] Pin search/read/neighbors, original no-injection behavior and strict evidence finalization in tests; demonstrate failing tests before implementation.
+- [x] Adapt current sidecar/runtime interfaces without passing new memory budgets to the restored session. Retain common cancellation and observation delivery infrastructure.
+- [x] Update tests/docs that specifically assert the superseded pipeline; retain independent remote API tests.
 
 ### 2. Restore long-episode refresh and async Summary
-- [ ] Port only baseline Memory coordinator and checkpoint candidate boundary changes, preserving latest main `/compact`, interrupts, session termination and other updates.
-- [ ] Set candidate enablement explicit opt-in; preserve existing Memory default off.
-- [ ] Verify baseline candidate tests, suffix/tool-pair preservation, retry behavior and manual/synchronous checkpoint regression tests.
+- [x] Port only baseline Memory coordinator and checkpoint candidate boundary changes, preserving latest main `/compact`, interrupts, session termination and other updates.
+- [x] Set candidate enablement explicit opt-in; preserve existing Memory default off.
+- [x] Verify baseline candidate tests, suffix/tool-pair preservation, retry behavior and manual/synchronous checkpoint regression tests.
 
 ### 3. Verification and handoff
-- [ ] Test all four switch combinations and effective absence of 45s/16K limits.
-- [ ] Build, release check, targeted tests, full runtime and SkillHub tests; distinguish pre-existing/environmental failures.
-- [ ] Self-review plus independent standards/spec reviews; repair findings within scope.
+- [x] Test all four switch combinations and effective absence of 45s/16K limits.
+- [x] Build, release check, targeted tests, full runtime and SkillHub tests; distinguish pre-existing/environmental failures.
+- [x] Self-review plus independent standards/spec reviews; repair findings within scope.
 - [ ] Commit, push and open one non-draft PR against buildsense-ai/XiaoBa-CLI main; attach PR and report verification honestly.
 
 ## Review focus
@@ -45,3 +45,13 @@
 - Long parent deltas do not inherit 16K/45s caps; external abort still terminates the branch.
 - Summary pending/ready across finalization, interrupts and manual compact never replaces changed context or drops suffix/tool results.
 - A disabled Summary branch leaves automatic checkpoint and `/compact` working; a disabled Memory produces no background model calls.
+
+## Verification notes
+
+- Independent standards and spec reviews found candidate hooks affecting the Summary-off path; these hooks and the pre-turn stop are now opt-in only. Additional summary truncation policy from an intermediate port was removed.
+- Re-review at `4b829f84`: no remaining blocking findings on either axis.
+- Targeted Memory/Summary/configuration/citation/timing regression set: 90/90 passed.
+- TypeScript build and release preflight passed. SkillHub: 363 passed, 3 skipped.
+- Full runtime tests are being compared with untouched upstream main on the same Windows host. Platform/baseline failures are reported in the PR, not silently treated as passes.
+- Existing candidate lifecycle-event usage totals can omit failed summary attempts; the separate metrics collector still records responses. This inherited accounting limitation is retained to avoid unrelated changes in the restoration.
+- Saturday and fork PR #7 remain untouched.

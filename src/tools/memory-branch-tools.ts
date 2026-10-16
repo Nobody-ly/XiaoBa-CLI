@@ -338,4 +338,3 @@ export function isMemoryCitationRef(ref: string): boolean {
   const skill = ref.match(CATSLOG_SKILL_REF_PATTERN);
   return Boolean(skill && isSafeCatsLogSkillHandle(skill[1]) && Number.isSafeInteger(Number(skill[2])));
 }
-
