@@ -196,3 +196,35 @@ jobs:
         env:
           CATSCOMPANY_REPO: ../cats-company
         run: npm run test:cross-repo:catsco-skills
+
+  cross-repo-publication-probe:
+    name: CatsCo/XiaoBa publication probe message round trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: XiaoBa-CLI
+      - uses: actions/checkout@v4
+        with:
+          repository: buildsense-ai/cats-company
+          # PR642 merge: stable counterpart, including transient-error policy.
+          ref: 23f0c9f6ad5d5c05f3bb92ff19f25f5667546023
+          path: cats-company
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: XiaoBa-CLI/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cats-company/go.mod
+          cache-dependency-path: cats-company/go.sum
+      - name: Install XiaoBa dependencies
+        working-directory: XiaoBa-CLI
+        run: npm ci --prefer-offline --no-audit --fund=false
+      - name: Run real handler round trip without skip fallback
+        working-directory: XiaoBa-CLI
+        env:
+          CATSCOMPANY_REPO: ../cats-company
+        run: npm run test:cross-repo:publication-probe
